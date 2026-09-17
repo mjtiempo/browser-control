@@ -1,0 +1,9 @@
+{
+  "include": ["lib", "cli", "tests"],
+  "exclude": ["**/__pycache__", ".venv"],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "extraPaths": ["."],
+  "reportMissingImports": "error",
+  "reportMissingModuleSource": "none"
+}
