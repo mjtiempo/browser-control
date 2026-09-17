@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 .venv/
 
+# tool caches
+.pytest_cache/
+.ruff_cache/
+
 # editor / OS noise
 *.swp
 .DS_Store
