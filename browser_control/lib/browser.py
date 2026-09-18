@@ -382,9 +382,20 @@ def browsers() -> list[dict]:
         if not port:
             port = _to_int(_cmdline_value(cmd, "--remote-debugging-port"))
         reachable = cdp.answers(port)
-        endpoint: dict = {"port": port, "reachable": reachable}
+        endpoint: dict = {"port": port, "reachable": reachable,
+                          "verified": False}
         if reachable:
-            endpoint["tabs"] = len(cdp.page_rows_at(port))
+            # WHO holds the port: the row reports the pid and exe the kernel
+            # says own the listening socket, and `verified` says whether that
+            # process is this browser. Nothing here DRIVES an unverified row.
+            owner = endpoint_owner(profile, port)
+            endpoint["verified"] = bool(owner["verified"])
+            endpoint["listener"] = {"pid": owner["pid"],
+                                    "exe": owner["exe"]}
+            if owner["verified"]:
+                endpoint["tabs"] = len(cdp.page_rows_at(port))
+            else:
+                endpoint["reason"] = str(owner["reason"])
         rows.append({"pid": pid, "exe": exe,
                      "path": os.path.realpath(f"/proc/{pid}/exe"),
                      "profile": profile,
@@ -395,14 +406,14 @@ def browsers() -> list[dict]:
                      "cdp": endpoint})
     # ours first, then the attached ones, then whatever can be driven, by pid
     return sorted(rows, key=lambda r: (not r["managed"], not r["attached"],
-                                       not r["cdp"]["reachable"], r["pid"]))
+                                       not r["cdp"]["verified"], r["pid"]))
 
 
 def list_browsers() -> dict:
     """`list`: every browser running here, drivable or not."""
     rows = browsers()
     return {"ok": True, "count": len(rows),
-            "drivable": sum(1 for r in rows if r["cdp"]["reachable"]),
+            "drivable": sum(1 for r in rows if r["cdp"]["verified"]),
             "browsers": rows}
 
 
@@ -458,10 +469,14 @@ def _narrow(rows: list[dict], browser: str) -> list[dict]:
 
 
 def _writable(browser: str = "") -> list[dict]:
-    """The running browsers a WRITE may target: ours, plus the attached ones."""
-    return _narrow([r for r in browsers()
-                    if (r["managed"] or r["attached"])
-                    and r["cdp"]["reachable"]], browser)
+    """The running browsers a WRITE may target: ours, plus the attached ones.
+
+    `_drivable` decides what "drivable" means (it must be the browser it claims
+    to be), and this narrows that to the ones a write may touch — an endpoint
+    that answered but did not verify is a refusal here, never a silent skip.
+    """
+    return [r for r in _drivable(browser, strict=False)
+            if r["managed"] or r["attached"]] or _drivable(browser)
 
 
 def _writable_profile(browser: str = "") -> str:
@@ -600,8 +615,86 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
     return {"ok": True, "detached": keys, "count": len(records)}
 
 
-def _drivable(browser: str = "") -> list[dict]:
-    """The running browsers that answer CDP, sorted by browser.
+# One /proc walk per (profile, port) per process: the guard runs on every drive
+# path, and the walk behind it costs milliseconds.
+_OWNER_CACHE: dict[tuple[str, int], dict] = {}
+
+
+def endpoint_owner(profile: str, port: int) -> dict:
+    """Is the process holding that port the browser this profile says it is?
+
+    {"verified": bool, "pid": int, "exe": str, "profile_pid": int,
+    "reason": str}. The port comes from a FILE, so it is checked against the
+    kernel (`cdp.listener_of`): the process that owns the listening socket.
+
+    The rule, and why it stops there:
+
+    * a MANAGED profile must appear in the holder's own cmdline
+      (`--user-data-dir=<profile>`) — that is airtight;
+    * a Chromium-family process also passes when the profile's MAIN process is
+      on the machine, because a helper can own the socket while the browser
+      process is the one we drive;
+    * anything else does not pass, and every caller that would DRIVE that
+      endpoint refuses instead (`cdp-not-local`). A local process that names
+      itself `chrome` cannot be told apart, and docs/progress.md says so.
+    """
+    key = (profile, port)
+    cached = _OWNER_CACHE.get(key)
+    if cached is not None:
+        return cached
+    owner = cdp.listener_of(port)
+    pid = _to_int(owner.get("pid"))
+    exe = str(owner.get("exe") or "")
+    cmd = str(owner.get("cmd") or "")
+    profile_pid = _find_pid(profile) if profile else 0
+    if not owner:
+        verdict = {"verified": False, "pid": 0, "exe": "",
+                   "profile_pid": profile_pid,
+                   "reason": "no process holds the port (the socket is gone)"}
+    elif exe not in BROWSER_EXES:
+        verdict = {"verified": False, "pid": pid, "exe": exe,
+                   "profile_pid": profile_pid,
+                   "reason": f"pid {pid} holds the port and is not a "
+                             f"Chromium-family browser ({exe or 'unknown'})"}
+    elif profile and f"--user-data-dir={profile}" not in cmd \
+            and not profile_pid:
+        verdict = {"verified": False, "pid": pid, "exe": exe,
+                   "profile_pid": 0,
+                   "reason": f"pid {pid} holds the port, but neither it nor "
+                             "any other process runs that profile"}
+    else:
+        verdict = {"verified": True, "pid": pid, "exe": exe,
+                   "profile_pid": profile_pid, "reason": ""}
+    _OWNER_CACHE[key] = verdict
+    return verdict
+
+
+def not_local_refusal(profile: str, port: int, reason: str) -> None:
+    """Refuse to drive an endpoint that is not the browser we think it is.
+
+    The advice is the mundane one, because the mundane cause is the common
+    one: a stale port file, or a port that was taken after the browser died.
+    """
+    fail("cdp-not-local",
+         f"port {port} on {profile} answers, but it is not that profile's "
+         f"browser: {reason}. Nothing was sent to it. The port file is stale "
+         "or the port was taken — run `browser-control-cli close --force` "
+         "(it finds the profile's own process by its cmdline) and then "
+         "`open` again")
+
+
+def _drive_refusal(browser: str, rows: list[dict]) -> None:
+    """Refuse a drive when the only candidates answered but did not verify."""
+    suspects = _narrow([r for r in rows if r["cdp"].get("reachable")
+                        and not r["cdp"].get("verified")], browser)
+    if suspects:
+        row = suspects[0]
+        not_local_refusal(str(row["profile"]), _to_int(row["cdp"]["port"]),
+                          str(row["cdp"].get("reason") or "unknown"))
+
+
+def _drivable(browser: str = "", strict: bool = True) -> list[dict]:
+    """The running browsers that answer CDP AND are the browsers they claim.
 
     `browser` narrows to the one named — its executable, or the basename of
     its profile, which is the name `open --browser NAME` keys a profile by.
@@ -610,13 +703,20 @@ def _drivable(browser: str = "") -> list[dict]:
     that is the browser this CLI would drive and the only one a write may
     touch. An empty result is []: whether that is a refusal is the caller's
     question.
+
+    `strict` makes an endpoint that answered but did NOT verify a refusal
+    (`cdp-not-local`) rather than a silent omission — `list` wants the row, a
+    drive wants the refusal. Nothing is ever driven from an unverified row.
     """
-    rows = [r for r in browsers() if r["cdp"]["reachable"]]
-    matches = _narrow(rows, browser)
+    answering = [r for r in browsers() if r["cdp"].get("reachable")]
+    verified = [r for r in answering if r["cdp"].get("verified")]
+    matches = _narrow(verified, browser)
     if browser and matches:
         rows = [r for r in matches if r["managed"] or r["attached"]] or matches
     else:
         rows = matches
+    if strict and not rows:
+        _drive_refusal(browser, answering)
     return sorted(rows, key=lambda r: (r["exe"], str(r["profile"])))
 
 
@@ -624,8 +724,13 @@ def _tabs_of(row: dict) -> tuple[list[dict], str]:
     """(page tabs, error) for one browser row.
 
     A browser that stopped answering between the probe and the read is
-    REPORTED: an empty list is "no tabs", an error is "no answer".
+    REPORTED: an empty list is "no tabs", an error is "no answer". A row whose
+    endpoint did not VERIFY is reported the same way — the tab list of a
+    stranger is not this browser's tab list, and no count is claimed.
     """
+    if row["cdp"].get("reachable") and not row["cdp"].get("verified"):
+        return [], str(row["cdp"].get("reason") or
+                       "the endpoint is not this profile's browser")
     try:
         port = _to_int(row["cdp"]["port"])
         return cdp.rows_to_tabs(cdp.page_rows_at(port)), ""
@@ -665,17 +770,31 @@ def list_tabs(browser: str = "") -> dict:
     handle only means something next to the browser it came from: two tabs
     with the same title in two browsers are two rows, not one. `browser`
     narrows the answer to one of them.
+
+    A browser whose endpoint did not VERIFY is not listed under `browsers`
+    (nothing of it is driven or counted) — it appears under `unverified`, with
+    the pid and exe that actually hold the port, because a row that silently
+    vanished would be a claim of absence.
     """
     groups: list[dict] = []
     total = 0
-    for row in _drivable(browser):
+    for row in _drivable(browser, strict=False):
         tabs, error = _tabs_of(row)
         group = {**_brief(row), "tabs": tabs, "count": len(tabs)}
         if error:
             group["error"] = error
         total += len(tabs)
         groups.append(group)
-    return {"ok": True, "count": total, "browsers": groups}
+    reply: dict = {"ok": True, "count": total, "browsers": groups}
+    suspects = _narrow([r for r in browsers()
+                        if r["cdp"].get("reachable")
+                        and not r["cdp"].get("verified")], browser)
+    if suspects:
+        reply["unverified"] = [
+            {**_brief(r), "listener": r["cdp"].get("listener"),
+             "reason": r["cdp"].get("reason")}
+            for r in suspects]
+    return reply
 
 
 def browser_info(browser: str = "") -> dict:
@@ -840,6 +959,12 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     and opens the rest as tabs; an already-running browser is handed each as
     a new tab; an empty list just makes sure a page exists. `started` says
     which of the two happened and `opened` names the tabs this call made.
+
+    Adoption needs more than an answer on the port (see `endpoint_owner`): a
+    port file is a FILE. A port held by something that is not this profile's
+    browser is refused when a process on that profile is running, and IGNORED
+    (with a `warning` in the reply) when nothing is — a stale file must not
+    stop a fresh start, and it must not make `open` hand URLs to a stranger.
     """
     wanted = [safe_url(url) for url in (urls or [])]
     path = binary(browser)
@@ -849,7 +974,16 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     except OSError as e:
         raise ControlError("profile-unusable",
                            f"cannot create {profile}: {e}") from e
-    already = cdp.reachable(profile)
+    port = cdp.port_of(profile)
+    owner = endpoint_owner(profile, port) if cdp.reachable(profile) else {}
+    if owner and not owner.get("verified"):
+        if owner.get("profile_pid"):
+            not_local_refusal(profile, port, str(owner.get("reason") or ""))
+        stale = (f"ignored a stale DevTools port ({port}): "
+                 f"{owner.get('reason') or 'nothing of this browser holds it'}")
+    else:
+        stale = ""
+    already = bool(owner.get("verified"))
     requests: list[str] = []
     opened: list[dict] = []
     if already:
@@ -884,15 +1018,24 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
                         for index, row in enumerate(opened)]}
     if len(opened) == 1:
         reply["tab"] = f"id:{opened[0]['id']}"
+    if stale:
+        reply["warning"] = stale
     return reply
 
 
 def _page_count(profile: str) -> int | None:
     """How many page tabs answer on that profile, or None when it is silent.
 
-    None is not zero: a browser whose endpoint is already gone cannot be asked
-    what it holds, and the difference decides whether `close` may warn.
+    None is not zero. A browser whose endpoint is already gone cannot be asked
+    what it holds, and neither can one whose port is held by something that is
+    not that profile's browser — the difference decides whether `close` may
+    warn about tabs.
     """
+    port = cdp.port_of(profile)
+    if not port or not cdp.answers(port):
+        return None
+    if not endpoint_owner(profile, port)["verified"]:
+        return None
     try:
         return len(cdp.page_rows(profile))
     except ControlError:
@@ -1442,11 +1585,10 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
         return row, tab
     rows = _writable(browser)
     if not rows:
-        fail("cdp-unreachable",
-             "no browser this CLI drives is up"
-             + (f" matching {browser!r}" if browser else "")
-             + " — run `browser-control-cli open`, attach one, or name a tab "
-             "in another browser with --tab SPEC")
+        fail("cdp-not-local",
+             "the only endpoint this CLI could drive is not the browser it "
+             "claims to be — nothing was sent to it (`tab list` names the "
+             "process holding the port)")
     pairs = [(row, tab) for row in rows for tab in _tabs_of(row)[0]]
     if not pairs:
         fail("no-page-tab",

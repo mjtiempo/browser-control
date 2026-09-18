@@ -249,14 +249,18 @@ unclear oracle into a claim of absence.**
    be named; otherwise report `unverifiable` with the reason.
 8. **Every refusal carries the rung.** `effect`/`rung`/`code` in the reply and
    the audit log.
-9. **Escape hatches are declared unverified.** `js` and `cdp` return the
+9. **Nothing is driven through an unverified endpoint.** The port comes from a
+   file; the process holding the listening socket is checked in `/proc`, and a
+   drive of anything else refuses `cdp-not-local` naming the holder. `list`
+   reports the listener, `tab list` reports it under `unverified`.
+10. **Escape hatches are declared unverified.** `js` and `cdp` return the
    protocol's own answer; the caller owns judgment.
 
 ### Per-verb appetite
 
 | Verb | Kind | Oracle | Level | On failure |
 | --- | --- | --- | --- | --- |
-| `tab list` | read | `/json` shape + endpoint ownership | L2 | `cdp-unreachable`, `no-page-tab` |
+| `tab list` | read | `/json` shape + the socket's OWNER from `/proc` (an unverified endpoint is reported under `unverified`, never driven) | L2 | `cdp-unreachable`, `no-page-tab` |
 | `tab info` | read | the spec resolves to exactly one tab | L2 | `no-page-tab`, `tab-ambiguous` |
 | `tab find` | read | rect + visibility + a real hit-test | L2 | `no-match`, `no-viewport` |
 | `tab text` | read | the page's rendered text, truncated IN the page | L2 | `no-match` |

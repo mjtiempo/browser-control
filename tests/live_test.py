@@ -1084,6 +1084,86 @@ def c_close_stops_the_browser() -> str:
             f"({err.split(']')[0]}])")
 
 
+def c_list_reports_the_listener() -> str:
+    """`list` names the pid and exe the KERNEL says own each drivable port."""
+    data = ok_json("list")
+    ours = [b for b in data["browsers"] if b["pid"] == STATE["pid"]]
+    assert len(ours) == 1, data
+    endpoint = ours[0]["cdp"]
+    assert endpoint["reachable"] is True, endpoint
+    assert endpoint["verified"] is True, endpoint
+    assert endpoint["listener"]["pid"] == STATE["pid"], endpoint
+    assert "chrome" in str(endpoint["listener"]["exe"]), endpoint
+    return (f'listener {endpoint["listener"]["pid"]} '
+            f'({endpoint["listener"]["exe"]}) verified, and it is our pid')
+
+
+def c_cdp_not_local() -> str:
+    """A port a profile names but a STRANGER holds is refused, never driven.
+
+    The stale/taken-port case in one check: this battery process answers where
+    the profile file says its browser does. Every drive must refuse, `list`
+    must name the pid that actually holds the port, and the profile's port file
+    is put back afterwards so the rest of the battery drives the real one.
+    """
+    saved_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = ROOT
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                             _quiet_handler())
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    fake_port = int(server.server_address[1])
+    port_file = Path(ROOT, "google-chrome-stable", "DevToolsActivePort")
+    original = port_file.read_text(encoding="utf-8")
+    port_file.write_text(f"{fake_port}\n/devtools/browser/battery\n",
+                         encoding="utf-8")
+    try:
+        err = refuses("cdp-not-local", "tab", "nav", f"{base_url()}/nine-a")
+        assert str(os.getpid()) in err, err          # names the real holder
+        assert "close --force" in err, err           # and the mundane advice
+        # adopting it is refused too: a URL must not go to a stranger
+        refuses("cdp-not-local", "open", f"{base_url()}/nine-b")
+        # `list` reports the row it will NOT drive, with the real listener
+        row = next(b for b in ok_json("list")["browsers"]
+                   if b["pid"] == STATE["pid"])
+        assert row["cdp"]["verified"] is False, row
+        assert row["cdp"]["listener"]["pid"] == os.getpid(), row
+        assert "not a Chromium-family browser" in row["cdp"]["reason"], row
+        # `tab list` does not silently drop it either
+        listed = ok_json("tab", "list")
+        assert [g for g in listed.get("unverified", [])
+                if g["pid"] == STATE["pid"]], listed
+        assert all(g["pid"] != STATE["pid"] for g in listed["browsers"]), \
+            listed
+    finally:
+        port_file.write_text(original, encoding="utf-8")
+        server.shutdown()
+        server.server_close()
+        if saved_root is None:
+            os.environ.pop("BROWSER_CONTROL_ROOT", None)
+        else:
+            os.environ["BROWSER_CONTROL_ROOT"] = saved_root
+    # the real endpoint drives again once the file is honest
+    back = ok_json("tab", "text", "--chars", "20",
+                   "--tab", f"id:{STATE['tab'][:8]}")
+    assert back["length"] > 0, back
+    return "the stranger was refused, named, and never driven"
+
+
+def _quiet_handler() -> type:
+    """A handler that answers `{}` and logs nothing: a listener, not a CDP."""
+    class Quiet(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:                            # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    return Quiet
+
+
 def c_close_ignores_a_recycled_pid() -> str:
     """A stale pid file must not aim SIGTERM at an unrelated process.
 
@@ -1223,7 +1303,11 @@ def c_list_shows_a_browser_outside_cdp() -> str:
         assert row is not None, f"pid {proc.pid} never showed up in `list`"
         assert row["managed"] is False, row
         assert row["profile"] == profile, row
-        assert row["cdp"] == {"port": 0, "reachable": False}, row
+        assert row["cdp"]["port"] == 0, row
+        assert row["cdp"]["reachable"] is False, row
+        assert row["cdp"]["verified"] is False, row
+        assert "listener" not in row["cdp"], \
+            "nothing owns a port, so nothing was looked for"
         assert all(g["pid"] != proc.pid
                    for g in ok_json("tab", "list")["browsers"]), row
     finally:
@@ -1387,6 +1471,9 @@ CHECKS = (
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),
     ("open adopts a running browser", c_open_adopts_the_running_browser),
+    ("list names the listener that owns each port",
+     c_list_reports_the_listener),
+    ("a port a stranger holds is refused", c_cdp_not_local),
     ("close ignores a recycled pid", c_close_ignores_a_recycled_pid),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),

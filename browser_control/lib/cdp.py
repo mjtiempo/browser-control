@@ -96,6 +96,86 @@ def get_json(profile: str, path: str) -> Any:
     return _get_port(port, path)
 
 
+def _proc_text(pid: str, name: str) -> str:
+    """One /proc file of a pid as text, or "" — cmdline NULs become spaces."""
+    try:
+        with open(f"/proc/{pid}/{name}", "rb") as handle:
+            return handle.read().decode("utf-8", "replace").replace("\0", " ")
+    except OSError:
+        return ""
+
+
+def _exe_basename(pid: str) -> str:
+    """The executable a pid is running, by name, or ""."""
+    try:
+        return os.path.basename(os.path.realpath(f"/proc/{pid}/exe"))
+    except OSError:
+        return ""
+
+
+def _listening_inodes(port: int) -> set[str]:
+    """The socket inodes LISTENING on that port, tcp4 and tcp6.
+
+    `/proc/net/tcp` is a table: `sl local_address rem_address st … inode`, with
+    the port in HEX and `0A` meaning LISTEN.
+    """
+    wanted = f"{port:04X}"
+    inodes: set[str] = set()
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(name) as handle:
+                next(handle, "")            # the header line
+                for line in handle:
+                    fields = line.split()
+                    if len(fields) < 10 or fields[3] != "0A":
+                        continue
+                    if fields[1].rpartition(":")[2] != wanted:
+                        continue
+                    inodes.add(fields[9])
+        except OSError:
+            continue
+    return inodes
+
+
+def listener_of(port: int) -> dict:
+    """Which process LISTENS on that port: {pid, exe, cmd} — or {}.
+
+    The port came from a FILE (`DevToolsActivePort`), and a file can be stale
+    or its port can be taken by something else. This asks the KERNEL instead:
+    the listening socket's inode from `/proc/net/tcp{,6}`, then the process
+    holding that inode through `/proc/<pid>/fd`. A few milliseconds, which is
+    why the caller memoises.
+
+    A pid whose fd table cannot be read is skipped rather than guessed at: the
+    answer is either the process holding the socket or nothing.
+    """
+    if not port:
+        return {}
+    marks = {f"socket:[{inode}]" for inode in _listening_inodes(port)}
+    if not marks:
+        return {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        fd_dir = f"/proc/{entry}/fd"
+        try:
+            handles = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for handle in handles:
+            try:
+                if os.readlink(f"{fd_dir}/{handle}") in marks:
+                    return {"pid": int(entry), "exe": _exe_basename(entry),
+                            "cmd": _proc_text(entry, "cmdline")}
+            except OSError:
+                continue
+    return {}
+
+
 def answers(port: int) -> bool:
     """Is a CDP endpoint answering on this loopback port right now?
 

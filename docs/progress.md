@@ -33,7 +33,7 @@ the other verbs own the browser.
 | --- | --- | --- |
 | `open [URL...]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs | the endpoint must **answer**, then every opened tab must be in the tab list |
 | `close [--force]` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs, never signals a pid whose own cmdline does not name that profile, and refuses `tabs-open` while page tabs are open unless `--force` |
-| `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, and whether CDP answers (+ its tab count) | one `/proc` pass, plus a CDP probe on the port each one names |
+| `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, whether CDP answers, whether the endpoint VERIFIED, and (when it did) the listener pid/exe the kernel names (+ its tab count) | one `/proc` pass, a CDP probe on the port each one names, and the socket's owner from `/proc/net/tcp` + `/proc/<pid>/fd` |
 | `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
 | `attach --port N \| --pid N \| --profile DIR` | makes a running browser this CLI did not start writable (a `tab` write target) | the profile comes from a live Chromium-family process of this machine that ANSWERS on its endpoint, never from the caller |
 | `attach --list` | what is attached, and whether it is still running | each record re-checked against `/proc` + a CDP probe |
@@ -147,8 +147,10 @@ multi-browser test (two live instances refuse), no CI.
 1. **No seeding** — the managed browser has none of the user's logins.
 2. **No lock/serialization** — two concurrent `open` calls race the profile
    (Chrome's singleton makes it mostly benign; the plan's lock is not there).
-3. **No fixed-port ownership guard** — a forwarded CDP endpoint would not be
-   refused with `cdp-not-local` (see §3).
+3. ~~**No fixed-port ownership guard**~~ — DONE (§5.16): the process holding
+   the port is checked in `/proc`, every drive of an unverified endpoint
+   refuses `cdp-not-local`, and `list`/`tab list` name the pid and exe that
+   actually own it.
 4. **One browser at a time** — there is no `--profile`/instance selector; two
    live instances refuse instead of being addressable.
 5. **Not published** — the wheel builds and installs locally, but there is no
@@ -187,7 +189,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12, 5.13, 5.14 and 5.15 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.16 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -518,6 +520,43 @@ the code never reads, and called the library in-process where
 `BROWSER_CONTROL_ROOT` is unset — so it passed while testing nothing. It now
 uses `_pid_file()` and sets the root for the duration of those calls.
 
+### 5.16 Endpoint ownership — the port is checked against the kernel — done
+
+The port came from a FILE (`DevToolsActivePort` in the profile), and a file can
+be stale or its port can be taken by something else. Before this, a stranger
+answering there would have received our clicks, keystrokes, uploads and
+screenshots. Now:
+
+1. port → the LISTENING socket's inode (`/proc/net/tcp` + `tcp6`);
+2. inode → the process holding it (`/proc/<pid>/fd` for `socket:[inode]`);
+3. that process → **verified** when its cmdline carries
+   `--user-data-dir=<profile>`, or when it is a Chromium-family executable AND
+   the profile's main process is on the machine (a helper can own the socket);
+4. anything else is **unverified**, which is where the verbs divide:
+
+| caller | what it does with an unverified endpoint |
+| --- | --- |
+| every DRIVE (`tab …, tab info`, `close`, `tab close`) | refuses `cdp-not-local`, naming the pid and exe that hold the port, and says the mundane thing: the port file is stale or the port was taken — `close --force`, then `open` |
+| `open` | refuses when a process on that profile is running; IGNORES a stale file (nothing on the profile) and launches, with a `warning` in the reply |
+| `list` | reports the row with `verified: false` + `listener: {pid, exe}` + `reason` |
+| `tab list` | leaves it out of `browsers` and lists it under `unverified` — never silently absent |
+| `close`'s tab count | `null`: a stranger's tab list is not this browser's |
+
+What it cannot do, said plainly: a local process that names itself `chrome`
+passes the exe test, and a same-uid attacker could edit the profile (they could
+edit `attached.json` too). Its value is the mundane case — a stale file plus a
+recycled port must not hand our input to whoever holds it — plus making
+`list`'s "drivable" a verified claim rather than "something answered".
+
+Evidence: hermetic (a listener of the test process stands in for the stale
+port: `cdp.listener_of` finds it, `endpoint_owner` calls it not a browser, the
+drive refusal names the advice, and a closed port is `{}`); battery (a real
+browser, its port file overwritten with the battery process's own listener →
+`tab nav` and `open` refuse `cdp-not-local` naming pid `os.getpid()`, `list`
+reports `verified: false` with that pid, `tab list` shows it under `unverified`,
+and putting the file back drives the real browser again; plus `list` naming the
+verified listener for a healthy browser).
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -531,8 +570,8 @@ plugin can fail but cannot claim success. *Done when* one out-of-core adapter
 passes its own live check through the contract.
 
 ### 5.10 Hardening (parallel, any time)
-Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
-`cdp-not-local`; a `--profile`/instance selector; richer `stop` identity.
+Launch/sync lock; a `--profile`/instance selector; richer `stop` identity.
+(The `/proc` ownership guard is DONE — §5.16.)
 
 ### 5.11 `open --windowless` — built, measured, REJECTED
 A windowless start (`--no-startup-window`: CDP up, no window, no page) was built

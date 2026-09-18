@@ -15,6 +15,7 @@ import http.server
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -549,12 +550,14 @@ def t_attach_bookkeeping() -> None:
                 {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
                  "profile": ours, "profile_from": "flag",
                  "managed": True, "attached": browser.is_attached(ours),
-                 "cdp": {"port": 1616, "reachable": True, "tabs": 1}},
+                 "cdp": {"port": 1616, "reachable": True, "verified": True,
+                         "tabs": 1}},
                 {"pid": 2, "exe": "chrome", "path": "/usr/bin/chrome",
                  "profile": foreign, "profile_from": "flag",
                  "managed": False,
                  "attached": browser.is_attached(foreign),
-                 "cdp": {"port": 1515, "reachable": True, "tabs": 1}},
+                 "cdp": {"port": 1515, "reachable": True, "verified": True,
+                         "tabs": 1}},
             ]
 
         def page_rows_at(port: int) -> list[dict]:
@@ -678,11 +681,11 @@ def t_one_tab_addressing() -> None:
                 {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
                  "profile": ours, "profile_from": "flag", "managed": True,
                  "attached": False,
-                 "cdp": {"port": 1616, "reachable": True}},
+                 "cdp": {"port": 1616, "reachable": True, "verified": True}},
                 {"pid": 2, "exe": "chrome", "path": "/usr/bin/chrome",
                  "profile": foreign, "profile_from": "flag",
                  "managed": False, "attached": False,
-                 "cdp": {"port": 1515, "reachable": True}},
+                 "cdp": {"port": 1515, "reachable": True, "verified": True}},
             ]
 
         def page_rows_at(port: int) -> list[dict]:
@@ -1323,6 +1326,63 @@ def t_action_log_lands_on_disk() -> None:
     assert os.path.isdir(scratch), scratch
 
 
+def t_endpoint_ownership() -> None:
+    """The port is checked against the KERNEL, not against a file.
+
+    A listener of THIS process stands in for the stale-port case: a plain HTTP
+    server where the profile says its browser is. The guard must say so, the
+    drive must refuse with the mundane advice — and no browser is involved.
+    """
+    class Quiet(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:                            # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = int(server.server_address[1])
+    try:
+        owner = cdp.listener_of(port)
+        assert owner.get("pid") == os.getpid(), owner      # this very process
+        assert owner.get("exe"), owner
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = os.path.join(tmp, "google-chrome-stable")
+            os.makedirs(profile)
+            verdict = browser.endpoint_owner(profile, port)
+            assert verdict["verified"] is False, verdict
+            assert verdict["pid"] == os.getpid(), verdict
+            assert "not a Chromium-family browser" in verdict["reason"], verdict
+            assert verdict["profile_pid"] == 0, verdict
+            # the refusal a drive gets, with the advice that is true here
+            rows = [{"pid": 4242, "exe": "python3", "profile": profile,
+                     "managed": True, "attached": False,
+                     "cdp": {"port": port, "reachable": True,
+                             "verified": False,
+                             "reason": verdict["reason"]}}]
+            try:
+                browser._drive_refusal("", rows)                # noqa: SLF001
+            except ControlError as e:
+                assert e.code == "cdp-not-local", e
+                assert "close --force" in e.message, e.message
+                assert "Nothing was sent" in e.message, e.message
+            else:
+                raise AssertionError("an unverified endpoint was not refused")
+    finally:
+        server.shutdown()
+        server.server_close()
+    # nothing holds a port that was just closed: {}
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = int(probe.getsockname()[1])
+    assert cdp.listener_of(free) == {}, free
+    assert cdp.listener_of(0) == {}, "port 0 is not a question"
+
+
 def t_pid_alive() -> None:
     assert browser._pid_alive(os.getpid()) is True                 # noqa: SLF001
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
@@ -1351,6 +1411,7 @@ def main() -> int:
         ("the action log lands on disk", t_action_log_lands_on_disk),
         ("a working log makes no scratch directory",
          t_a_working_log_makes_no_scratch_dirs),
+        ("the port is checked against the kernel", t_endpoint_ownership),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),
         ("media argv", t_cli_media_grammar),
