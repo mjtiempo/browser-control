@@ -113,6 +113,42 @@ DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
 </script>"""
 DOM_FRAME = ("<!doctype html><title>frame</title>"
              "<button aria-label=\"Frame Button\">in frame</button>")
+# A page with REAL playable media, made offline: a canvas is recorded to a
+# blob and handed to a muted, looping <video> — so `media play` has something
+# the browser will actually start without a gesture.
+MEDIA_PAGE = """<!doctype html><meta charset="utf-8"><title>media fixture</title>
+<style>video { width: 320px; height: 180px; background: #000; }</style>
+<video id="v" muted loop></video>
+<script>
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  const rec = new MediaRecorder(canvas.captureStream(10),
+                                {mimeType: 'video/webm'});
+  const chunks = [];
+  rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  rec.onstop = () => {
+    const v = document.getElementById('v');
+    v.src = URL.createObjectURL(new Blob(chunks, {type: 'video/webm'}));
+    v.load();
+  };
+  let t = 0;
+  const draw = () => {
+    ctx.fillStyle = (t % 2) ? '#123456' : '#654321';
+    ctx.fillRect(0, 0, 64, 64);
+    t += 1;
+    if (t < 90) requestAnimationFrame(draw);
+  };
+  draw();
+  rec.start();
+  setTimeout(() => rec.stop(), 1200);
+</script>"""
+# A page whose <video> has NO source: play() is a promise the browser rejects,
+# which is the refusal `media-blocked` exists for.
+BARE_MEDIA_PAGE = ("<!doctype html><meta charset=\"utf-8\">"
+                   "<title>bare media</title>"
+                   "<style>video{width:320px;height:180px}</style>"
+                   "<video id=\"v\"></video>")
 
 
 def env() -> dict[str, str]:
@@ -224,6 +260,12 @@ def start_server() -> None:
                 self.send_response(302)
                 self.send_header("Location", "/eight-b")
                 self.end_headers()
+                return
+            if self.path.startswith("/media-bare"):
+                self._send(BARE_MEDIA_PAGE.encode())
+                return
+            if self.path.startswith("/media"):
+                self._send(MEDIA_PAGE.encode())
                 return
             if self.path.startswith("/dom-frame"):
                 self._send(DOM_FRAME.encode())
@@ -652,6 +694,44 @@ def c_dom_text_needs_a_focus() -> str:
     return "insert and type refused with no focus, naming the fix"
 
 
+def c_dom_media_state_play_pause() -> str:
+    """`tab media` reads, starts and stops the page's media — verified."""
+    ok_json("tab", "nav", f"{base_url()}/media")
+    ok_json("tab", "wait", "--for", "js", "--expr",
+            "document.querySelector('#v').readyState >= 2", "--timeout", "20")
+    idle = ok_json("tab", "media", "state")
+    assert idle["paused"] is True and idle["playing"] is False, idle
+    assert idle["element"] == "video" and idle["count"] == 1, idle
+    played = ok_json("tab", "media", "play")
+    assert played["playing"] is True and played["paused"] is False, played
+    time.sleep(0.6)
+    running = ok_json("tab", "media", "state")
+    assert running["playing"] is True, running
+    assert running["time"] > played["time"], (played["time"], running["time"])
+    paused = ok_json("tab", "media", "pause")
+    assert paused["paused"] is True and paused["playing"] is False, paused
+    return f"play → the clock reached {running['time']}s; pause → paused"
+
+
+def c_dom_media_refuses_what_it_cannot_do() -> str:
+    """A play that cannot work refuses with a reason, never as `ok`.
+
+    A `<video>` with NO source is refused EITHER by the page (the promise
+    rejects with the autoplay policy) OR by the verdict (it reports `paused:
+    false` and never plays a frame) — which one depends on whether the tab has
+    seen a real gesture yet, so both are honest and this accepts both.
+    """
+    ok_json("tab", "nav", f"{base_url()}/media-bare")
+    rc, out, err = run("tab", "media", "play")
+    assert rc == 2, (rc, out, err)
+    assert "ERR[media-blocked]" in err or "ERR[media-not-verified]" in err, err
+    assert "nothing to play" in err or "refused" in err, err
+    ok_json("tab", "nav", f"{base_url()}/dom")          # no media at all
+    refuses("no-media", "tab", "media", "state")
+    refuses("bad-args", "tab", "media", "stop")
+    return "a source-less video and a media-less page refused, each named"
+
+
 def c_ambiguous_spec_refuses() -> str:
     first = str(ok_json("tab", f"{base_url()}/four-a")["id"])
     second = str(ok_json("tab", f"{base_url()}/four-b")["id"])
@@ -959,6 +1039,9 @@ CHECKS = (
     ("tab upload fills a hidden input", c_dom_upload_attaches_a_file),
     ("a password never reaches the log", c_dom_password_never_reaches_the_log),
     ("typing needs a focus", c_dom_text_needs_a_focus),
+    ("tab media reads, plays and pauses", c_dom_media_state_play_pause),
+    ("tab media refuses what it cannot do",
+     c_dom_media_refuses_what_it_cannot_do),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),

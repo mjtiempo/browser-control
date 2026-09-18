@@ -51,8 +51,8 @@ from typing import Any
 # tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
 from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
-from browser_control.lib import browser as tabs  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser as tabs  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ControlError,
     fail,
@@ -68,6 +68,7 @@ SCROLL_EDGE_STEP = 2500     # one wheel notch when scrolling to an edge
 SCROLL_EDGE_STEPS = 12      # and how many of them an edge is worth
 SCROLL_MOVE_S = 4.0         # how long one wheel is given to move something
 TYPE_PAUSE_S = 0.008        # between keystrokes: the page's handlers need air
+MEDIA_TIMEOUT_S = 5.0       # how long a play/pause is given to take effect
 
 # The keys `press` can send, and the exact (key, code, virtual key code, text)
 # a CDP key event needs. A wrong triple SILENTLY does nothing in the page, so
@@ -338,6 +339,66 @@ CANDIDATES_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
             hit_element: null}))};
 })())""")
 
+# Reading playback state, and calling play()/pause(), is the ONE place with no
+# CDP method: the `Media` domain is experimental and event-only, and the media
+# KEY is a toggle aimed at whichever session has focus (a background tab's
+# audio, or nothing at all). So this verb drives the ELEMENT and then verifies
+# what the page reports.
+MEDIA_STATE_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const all = Array.from(document.querySelectorAll('video, audio'));
+  const area = (el) => { const r = el.getBoundingClientRect();
+                         return Math.round(r.width * r.height); };
+  // the element that is PLAYING first, else the biggest one on the page: a
+  // page can carry a preview clip beside the real player
+  const playing = all.filter((el) => !el.paused && !el.ended);
+  const el = playing[0] ||
+    all.slice().sort((a, b) => area(b) - area(a))[0] || null;
+  const base = {count: all.length, found: !!el,
+                error: window.__bcMediaError || null};
+  if (!el) return base;
+  return Object.assign(base, {
+    element: el.tagName.toLowerCase(),
+    playing: !el.paused && !el.ended, paused: el.paused, ended: el.ended,
+    muted: el.muted, volume: el.volume, rate: el.playbackRate,
+    time: Number((el.currentTime || 0).toFixed(2)),
+    duration: Number((el.duration || 0).toFixed(2)),
+    ready_state: el.readyState,
+    src: String(el.currentSrc || el.src || '').slice(0, 120)});
+})())""")
+
+MEDIA_ACTION_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const mode = __MODE__, index = __INDEX__;
+  const all = Array.from(document.querySelectorAll('video, audio'));
+  const area = (el) => { const r = el.getBoundingClientRect();
+                         return Math.round(r.width * r.height); };
+  const playing = all.filter((el) => !el.paused && !el.ended);
+  const el = index >= 0 ? (all[index] || null)
+    : (playing[0] || all.slice().sort((a, b) => area(b) - area(a))[0] || null);
+  if (!el) return {count: all.length, found: false};
+  // a play() the browser REJECTS is the page refusing (no supported source, or
+  // the autoplay policy): the promise is not awaited here — the reason is
+  // parked where the read-back can name it
+  window.__bcMediaError = null;
+  let thrown = null;
+  try {
+    if (mode === 'play') {
+      const promised = el.play();
+      if (promised && typeof promised.catch === 'function') {
+        promised.catch((e) => { window.__bcMediaError =
+          ((e && e.name) || 'Error') + ': ' + ((e && e.message) || ''); });
+      }
+    } else {
+      el.pause();
+    }
+  } catch (e) {
+    thrown = ((e && e.name) || 'Error') + ': ' + ((e && e.message) || '');
+    window.__bcMediaError = thrown;
+  }
+  return {count: all.length, found: true,
+          element: el.tagName.toLowerCase(), paused: el.paused,
+          error: window.__bcMediaError || null};
+})())""")
+
 WAIT_EXPRS = {
     "load": "Boolean(document.readyState === 'complete' && !!document.body)",
     "idle": ("(() => { if (document.readyState !== 'complete' || "
@@ -355,6 +416,14 @@ WAIT_EXPRS = {
 def _int(value: object, default: int = 0) -> int:
     try:
         return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _num(value: object, default: float = 0.0) -> float:
+    """A number the PAGE reported, or `default` when it is not one."""
+    try:
+        return float(str(value).strip())
     except (TypeError, ValueError):
         return default
 
@@ -512,6 +581,27 @@ def _is_secret(probe: dict) -> bool:
     """
     return bool(probe.get("secret") or probe.get("frame")
                 or probe.get("unreadable"))
+
+
+def _playback_verdict(mode: str, before: dict, after: dict) -> tuple[bool, str]:
+    """Did the play/pause take effect? Judged ONLY from the read-back.
+
+    `play` is verified when the CLOCK MOVED — not merely when the element
+    stopped reporting `paused`: measured, a media element with no source
+    reports `paused: false` the moment `play()` is called and never plays a
+    frame, which is exactly the overclaim this check exists to catch. `pause`
+    is verified by the state the page reports.
+    """
+    if mode == "play":
+        if _num(after.get("time")) > _num(before.get("time")):
+            return True, "the clock advanced"
+        if _int(after.get("ready_state")) == 0:
+            return False, ("the element has nothing to play (readyState 0: no "
+                           "supported source)")
+        return False, "the clock did not advance"
+    if after.get("paused"):
+        return True, "the element reports paused"
+    return False, "the element is still playing"
 
 
 def _text_verdict(before: dict, after: dict, chars: int) -> tuple[bool | None, str]:
@@ -1147,3 +1237,100 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
             "input": {"selector": css, "files": files},
             "tab": f"id:{tab_row['id']}",
             "browser": tabs._brief(row)}  # noqa: SLF001
+
+
+def _media_reply(row: dict, tab_row: dict, state: dict, mode: str,
+                 before: dict | None = None) -> dict:
+    """The media reply: what the PAGE reports, plus the clock as evidence."""
+    reply = {"ok": True, "mode": mode,
+             "element": state.get("element"),
+             "count": _int(state.get("count")),
+             "playing": bool(state.get("playing")),
+             "paused": bool(state.get("paused")),
+             "ended": bool(state.get("ended")),
+             "muted": bool(state.get("muted")),
+             "volume": _num(state.get("volume")),
+             "rate": _num(state.get("rate")),
+             "time": _num(state.get("time")),
+             "duration": _num(state.get("duration")),
+             "ready_state": _int(state.get("ready_state")),
+             "src": str(state.get("src") or ""),
+             "tab": f"id:{tab_row['id']}",
+             "browser": tabs._brief(row)}  # noqa: SLF001
+    if before is not None:
+        reply["time_before"] = _num(before.get("time"))
+        reply["advanced"] = _num(state.get("time")) > _num(before.get("time"))
+    return reply
+
+
+def _poll_media(session: cdp.Session, mode: str, before: dict,
+                timeout: float = MEDIA_TIMEOUT_S) -> dict:
+    """Poll the page's own playback state until it followed, or the deadline.
+
+    A play() the browser REJECTED stops the poll at once: the reason (the
+    autoplay policy, no supported source) is the answer, and waiting would
+    only make the caller wait for it.
+    """
+    deadline = time.time() + timeout
+    state = before
+    while True:
+        got = session.evaluate(MEDIA_STATE_EXPR)
+        state = got if isinstance(got, dict) else {}
+        if not state.get("found"):
+            return state
+        verified, _why = _playback_verdict(mode, before, state)
+        if verified or state.get("error"):
+            return state
+        if time.time() >= deadline:
+            return state
+        time.sleep(0.2)
+
+
+def media(mode: str, index: int | None = None, tab: str = "",
+          browser: str = "") -> dict:
+    """`tab media state|play|pause`: read, start or stop the page's media.
+
+    There is no CDP method for playback — the `Media` domain is experimental
+    and event-only, and a media KEY is a toggle aimed at whichever session has
+    focus (a background tab's audio, or nothing) — so this verb drives the
+    ELEMENT and then VERIFIES what the page reports: a play that leaves
+    `paused: true` refuses `media-not-verified`, a `play()` the browser rejects
+    (the autoplay policy, no supported source) refuses `media-blocked` with the
+    reason, and the state read is `tab media state`. `--index` picks among
+    several players; without it the playing one — else the largest — is used,
+    and `count` says how many the page has.
+    """
+    name = str(mode or "").strip().lower()
+    if name not in ("state", "play", "pause"):
+        fail("bad-args", f"tab media: MODE is state|play|pause, got {mode!r}")
+    if index is not None and name == "state":
+        fail("bad-args", "tab media state: --index is for play/pause")
+    row, tab_row = _resolve(tab, browser, for_write=(name != "state"))
+    with _session(row, tab_row) as session:
+        before = session.evaluate(MEDIA_STATE_EXPR)
+        before = before if isinstance(before, dict) else {}
+        if not before.get("found"):
+            fail("no-media",
+                 f"tab media: the page has no video or audio element "
+                 f"({_int(before.get('count'))} found)")
+        if name == "state":
+            return _media_reply(row, tab_row, before, name)
+        # `__MODE__` here is play|pause, NOT the matcher's text|selector, so
+        # this expression is filled directly (and -1 means "the preferred one")
+        session.evaluate(
+            MEDIA_ACTION_EXPR.replace("__MODE__", json.dumps(name))
+            .replace("__INDEX__",
+                     str(-1 if index is None else _int(index))))
+        after = _poll_media(session, name, before)
+    if not after.get("found"):
+        fail("no-media", f"tab media {name}: the element left the page")
+    verified, why = _playback_verdict(name, before, after)
+    if not verified:
+        if after.get("error"):
+            fail("media-blocked",
+                 f"tab media {name}: the page refused: {after['error']}" + (
+                     " — if that is the autoplay policy, a real gesture is "
+                     "needed first (`tab click` the player)"
+                     if "interact" in str(after.get("error")) else ""))
+        fail("media-not-verified", f"tab media {name}: {why}")
+    return _media_reply(row, tab_row, after, name, before)

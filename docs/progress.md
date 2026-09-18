@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 24 hermetic + 37 live checks passing.
+Repo `main`, worktree clean, 26 hermetic + 39 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,14 +15,14 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 656 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
-| `browser_control/lib/dom.py` | 1149 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `scroll`, `focus`, `press`, `insert`, `type`, `upload` |
+| `browser_control/cli/main.py` | 677 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/lib/dom.py` | 1336 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `media` |
 | `browser_control/lib/audit.py` | 108 | the JSONL action log: fail-open, and a proven secret written as a length |
 | `browser_control/lib/browser.py` | 1281 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
 | `browser_control/lib/cdp.py` | 513 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 936 | 24 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1068 | 37 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 1002 | 26 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1151 | 39 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -56,6 +56,7 @@ the other verbs own the browser.
 | `tab insert TEXT` | `Input.insertText` — ONE atomic event | the focused field's **length grew** (`verified: true`), a readable field that did not change refuses `insert-not-verified`, an unreadable one (frame/canvas) reports `verified: false`; `no-focus` when nothing is focused |
 | `tab type TEXT` | real per-character key events (`keyDown`, `char`, `keyUp`) on one connection | same oracle and codes as `insert` (`type-not-verified`) |
 | `tab upload FILE [--selector CSS] [--index N]` | `DOM.setFileInputFiles` (an objectId, so shadow roots work) | `input.files` read back: one file, same name **and size**; `no-file`/`upload-not-verified` |
+| `tab media state\|play\|pause [--index N]` | drives the `<video>`/`<audio>` element (no CDP playback method exists — see 5.7) | `play` needs the **clock to move** (a source-less element reports `paused: false` and never plays a frame), `pause` needs `paused: true`; `no-media` when there is none, `media-blocked` with the page's own reason when the promise rejects |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
@@ -104,7 +105,7 @@ refusing `cdp-unreachable`.
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
-**Live battery** — `python3 tests/live_test.py` → **32 passed, 0 failed, 0
+**Live battery** — `python3 tests/live_test.py` → **39 passed, 0 failed, 0
 skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
 independent state back — a raw socket connect, a direct `/json` GET, `/proc`
 for the pid — for open, `list`, `tab list`/`tab info`, `tab` (single and
@@ -114,12 +115,17 @@ call, `tab nav` (a redirect, a dead endpoint, `--tab` naming the one tab),
 `tab back`/`tab forward`, `tab reload`, `tab text` (with a 20-char cap),
 `tab find` (a hidden twin skipped, a shadow-root button found, the iframe's
 button not), `tab js` (value, decoded JSON, `js-error`, `result-too-large`),
-`tab wait` (a button that appears after 2 s, then a timeout), refusals,
-`info`, adoption of the running browser, the verified close, the idempotent
-close, a browser with no debugging port (listed, never driven), a **foreign
-drivable** browser (read → refused → attached → written → detached, with
-`close` still refusing to stop it) and "nothing left running". With the
-command missing it reports 29 skips and exits 2.
+`tab wait` (a button that appears after 2 s, then a timeout), `tab click`
+(a trusted press, an occluded target, an off-screen target), `tab scroll`
+(a document wheel, a nested-scroller wheel, both edges), `tab focus`/`insert`/
+`type` (lengths and keydowns), `tab press` (Enter reaching a form handler),
+`tab upload` (a hidden file input), a password absent from the whole log,
+`tab media` (play → the clock moves, pause, a source-less video refused),
+refusals, `info`, adoption of the running browser, the verified close, the
+idempotent close, a browser with no debugging port (listed, never driven), a
+**foreign drivable** browser (read → refused → attached → written →
+detached, with `close` still refusing to stop it) and "nothing left
+running". With the command missing it reports 39 skips and exits 2.
 
 **Not proven yet**: no concurrent-`open` test (there is no lock), no
 multi-browser test (two live instances refuse), no CI.
@@ -155,10 +161,10 @@ multi-browser test (two live instances refuse), no CI.
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5 and 5.6
-have landed** (§1, §2), **5.3 is deferred by decision** — the next actionable
-step is 5.7 (media: `tab media state|play|pause`, `tab ad-state`, `tab
-skip-ad`) — and every later verb is expected to add its check to
+Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6 and
+5.7 have landed** (§1, §2), **5.3 and the ad functions are deferred by
+decision** — the next actionable step is 5.8 (headless search: `search QUERY
+[--engine …]`) — and every later verb is expected to add its check to
 `tests/live_test.py`. The CLI grammar is settled (§1): page work lives under
 `tab`, browser work stays top-level.
 
@@ -325,11 +331,31 @@ changed the identity and every `insert` reported `verified: false` while the
 text landed. Fixed with the stable DOM path — and the battery now asserts the
 lengths, the key count, and that the secret is absent from the whole log.
 
-### 5.7 Media
-`media-state|play|pause` (judged from the read-back), `ad-state`, `skip-ad`
-(button matched by shape/class, not the English word; a page-coordinate click
-with a hit-test). *Done when* a `play` that does not start refuses
-`media-not-verified`.
+### 5.7 Media — done (the ad functions are deferred)
+`tab media state|play|pause [--index N]` — the base media verbs, and **only**
+those: `tab ad-state` and `tab skip-ad` are deferred by decision (the site
+adapters belong to the plugin tier anyway).
+
+* **There is no CDP method for playback**, which is worth stating because the
+  principle here is native-first: the `Media` domain is experimental and
+  event-only, and the media KEY is a toggle aimed at whichever session has
+  focus (a background tab's audio, or nothing). So the verb drives the
+  ELEMENT and then VERIFIES what the page reports.
+* **The play oracle is the clock**, and the first battery run proved why: with
+  a real gesture in the tab, `play()` on a video with NO source resolves and
+  the element reports `paused: false` — `readyState: 0`, never a frame. "Not
+  paused" is not playing; `time` advancing is. The refusal names which it was
+  ("the element has nothing to play (readyState 0: no supported source)").
+* **A `play()` the browser rejects refuses `media-blocked` with the page's own
+  words** (the autoplay policy, no supported source) — and when that reason is
+  the autoplay policy the message names the remedy (`tab click` the player).
+* `state` is a read; `play`/`pause` are writes. Several players on a page are
+  picked by rule (the playing one, else the largest) with `--index` to choose,
+  and `count` says how many the page has.
+
+The battery gets its media **offline**: the fixture records a canvas with
+`MediaRecorder` into a blob and hands it to a muted, looping `<video>`, so
+`play` has something the browser will actually start without a gesture.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
@@ -379,9 +405,15 @@ page tab exists afterwards.
 10. ~~**Native first**~~ — answered as a standing principle: **whatever CDP can
     do natively, do that** rather than reaching for page JavaScript. Hence
     `Input.dispatchMouseEvent` for clicks and wheels (trusted input, measured
-    against `element.click()`'s `isTrusted: false`), and
-    `DOM.scrollIntoViewIfNeeded` for revealing an element. `js` stays the last
-    resort, and every new verb is checked against this rule first.
+    against `element.click()`'s `isTrusted: false`),
+    `DOM.scrollIntoViewIfNeeded` for revealing an element, `DOM.focus`,
+    `Input.insertText`/`dispatchKeyEvent` for text and keys, and
+    `DOM.setFileInputFiles` for uploads. `js` stays the last resort, and where
+    the protocol offers NOTHING (playback), the verb says so and verifies the
+    effect instead.
+11. ~~**The ad functions**~~ — deferred by decision: `tab ad-state` and `tab
+    skip-ad` are not being built. The ad knowledge is site-specific, so it
+    belongs to the plugin tier (5.9) rather than to the core.
 
 Nothing here blocks 5.6.
 

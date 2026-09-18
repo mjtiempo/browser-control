@@ -83,6 +83,8 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab type TEXT [--tab SPEC]     type TEXT as real per-character key events
   tab upload FILE [--selector CSS] [--index N] [--tab SPEC]
                                  attach a file to an <input type=file>
+  tab media state|play|pause [--index N] [--tab SPEC]
+                                 read or drive the page's video/audio
   selftest           prove the install: interpreter, websockets, verbs
 
 SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
@@ -547,6 +549,7 @@ def cmd_tab_type(rest: list[str], browser: str) -> dict:
 
 def cmd_tab_upload(rest: list[str], browser: str) -> dict:
     """`tab upload FILE [--selector CSS] [--index N] [--tab SPEC]`."""
+    """`tab upload FILE [--selector CSS] [--index N] [--tab SPEC]`."""
     rest, spec = _tab_flag(rest, "tab upload")
     rest, selector = _pop(rest, "--selector", "tab upload")
     rest, index = _pop(rest, "--index", "tab upload")
@@ -561,6 +564,23 @@ def cmd_tab_upload(rest: list[str], browser: str) -> dict:
                       index=_int(index, "tab upload --index")
                       if index is not None else None,
                       tab=spec, browser=browser)
+
+
+def cmd_tab_media(rest: list[str], browser: str) -> dict:
+    """`tab media state|play|pause [--index N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab media")
+    rest, index = _pop(rest, "--index", "tab media")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab media: unknown flag {arg!r}")
+    if not rest:
+        fail("bad-args", "tab media: MODE is required (state, play or pause)")
+    if len(rest) > 1:
+        fail("bad-args", f"tab media: one MODE at most, got {len(rest)}")
+    return dom.media(rest[0],
+                     index=_int(index, "tab media --index")
+                     if index is not None else None,
+                     tab=spec, browser=browser)
 
 
 # `tab`'s subcommands: a reserved first word, so a URL can never be mistaken
@@ -584,6 +604,7 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
     "insert": cmd_tab_insert,
     "type": cmd_tab_type,
     "upload": cmd_tab_upload,
+    "media": cmd_tab_media,
 }
 
 HANDLERS: dict[str, Handler] = {

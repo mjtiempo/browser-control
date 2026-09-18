@@ -160,7 +160,8 @@ Page-level, under `tab`:
 `tab focus TEXT|--selector CSS` ·
 `tab press KEY` · `tab insert TEXT` · `tab type TEXT` ·
 `tab upload FILE [--selector CSS]` ·
-`tab media state|play|pause` · `tab ad-state` · `tab skip-ad`.
+`tab media state|play|pause` · `tab ad-state` · `tab skip-ad` (the ad verbs
+are DEFERRED by decision: site-specific knowledge belongs to the plugin tier).
 
 A SPEC is a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; one
 match is required, several refuse with the candidates named. A page verb with
@@ -185,7 +186,8 @@ Delivered so far: `open`, `close`, `list`, `info`, `attach`, `attach --list`,
 `detach`, `tab [URL…]`, `tab list`, `tab info`, `tab close`, `tab nav`,
 `tab back`, `tab forward`, `tab reload`, `tab js`, `tab wait`, `tab find`,
 `tab text`, `tab click`, `tab scroll`, `tab focus`, `tab press`, `tab insert`,
-`tab type`, `tab upload`, `selftest` — the rest of the list is the target
+`tab type`, `tab upload`, `tab media`, `selftest` — the rest of the list is
+the target
 surface; [`progress.md`](progress.md) is the state of the work.
 
 ## 4. Verification appetite

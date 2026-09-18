@@ -821,6 +821,70 @@ def t_cli_input_grammar() -> None:
     assert rc == 2 and "ERR[no-file]" in err, (rc, err)
 
 
+def t_media_verdict() -> None:
+    """The play/pause verdict is judged ONLY from the read-back.
+
+    `play` needs the CLOCK to move: an element with no source reports
+    `paused: false` and never plays a frame (measured in the battery), so "not
+    paused" is not playing.
+    """
+    verdicts = [
+        dom._playback_verdict("play", {"time": 0.0},                # noqa: SLF001
+                              {"time": 0.6})[0],
+        dom._playback_verdict("play", {"time": 0.0},                # noqa: SLF001
+                              {"time": 0.0, "paused": False,
+                               "ready_state": 4})[0],
+        dom._playback_verdict("play", {"time": 0.0},                # noqa: SLF001
+                              {"time": 0.0, "paused": False,
+                               "ready_state": 0})[0],
+        dom._playback_verdict("pause", {"paused": False},           # noqa: SLF001
+                              {"paused": True})[0],
+        dom._playback_verdict("pause", {"paused": False},           # noqa: SLF001
+                              {"paused": False})[0],
+    ]
+    assert verdicts == [True, False, False, True, False], verdicts
+    why = dom._playback_verdict("play", {"time": 0.0},             # noqa: SLF001
+                                {"time": 0.0, "ready_state": 0})
+    assert "nothing to play" in why[1], why
+    assert dom._num("1.5") == 1.5                                # noqa: SLF001
+    assert dom._num("nope", 2.0) == 2.0                         # noqa: SLF001
+    assert dom._num(None, 3.0) == 3.0                            # noqa: SLF001
+
+
+def t_cli_media_grammar() -> None:
+    """`tab media state|play|pause` argv — flags stripped, none dropped."""
+    calls: list[tuple] = []
+
+    def fake_media(mode: str = "", index: int | None = None, tab: str = "",
+                   browser: str = "") -> dict:
+        calls.append(("media", mode, index, tab, browser))
+        return {"ok": True}
+
+    original = dom.media
+    dom.media = fake_media                          # type: ignore[assignment]
+    try:
+        for argv in (["tab", "media", "state"],
+                     ["tab", "media", "play", "--index", "1",
+                      "--tab", "id:AB"],
+                     ["tab", "media", "pause"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("media", "state", None, "", ""),
+            ("media", "play", 1, "id:AB", ""),
+            ("media", "pause", None, "", ""),
+        ], calls
+    finally:
+        dom.media = original                        # type: ignore[assignment]
+    # and the mode is validated BEFORE a browser is touched
+    for argv in (["tab", "media"], ["tab", "media", "stop"],
+                 ["tab", "media", "play", "pause"],
+                 ["tab", "media", "play", "-x"],
+                 ["tab", "media", "state", "--index", "1"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
 def t_cmdline_value() -> None:
     """Chrome writes `--flag=value` and `--flag value`; both are read."""
     value = browser._cmdline_value                            # noqa: SLF001
@@ -916,6 +980,8 @@ def main() -> int:
         ("keys, verdicts and secrets", t_keys_and_verdicts),
         ("the log redacts and never fails a verb", t_audit_redaction),
         ("input verbs' argv", t_cli_input_grammar),
+        ("media verdict and argv", t_media_verdict),
+        ("media argv", t_cli_media_grammar),
         ("dom shape filters", t_dom_shape_filters),
         ("the net-change test", t_same_page),
         ("one page verb, one tab", t_one_tab_addressing),
