@@ -20,7 +20,10 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from lib.errors import ControlError, fail  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ControlError,
+    fail,
+)
 
 # The one third-party dependency. Typed as Any so a missing package is a
 # runtime refusal (`no-websockets`), not an import-time traceback — and so the

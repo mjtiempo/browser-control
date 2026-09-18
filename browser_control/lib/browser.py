@@ -29,8 +29,11 @@ from pathlib import Path
 
 # The project-level pyright run resolves these imports; the line-level ignore
 # is for pi-lens's fallback index, which does not see the sibling modules.
-from lib import cdp  # pyright: ignore[reportMissingImports]
-from lib.errors import ControlError, fail  # pyright: ignore[reportMissingImports]
+from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ControlError,
+    fail,
+)
 
 # The PATH names, in preference order. The profile is keyed off the basename
 # of whichever resolves, so the same browser cannot end up with two profiles.

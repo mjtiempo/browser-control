@@ -13,14 +13,17 @@ from collections.abc import Callable
 
 # The project-level pyright run resolves these imports; the line-level ignore
 # is for pi-lens's fallback index, which does not see the sibling modules.
-from lib.browser import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     close_tab,
     launch,
     new_tab,
     stop,
     tabs,
 )
-from lib.errors import ControlError, fail  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ControlError,
+    fail,
+)
 
 USAGE = """usage: browser-control-cli VERB [ARGS]
 

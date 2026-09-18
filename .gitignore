@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# editor / OS noise
-*.swp
-.DS_Store
+# build artifacts
+build/
+dist/
+*.egg-info/

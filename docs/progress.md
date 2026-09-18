@@ -1,19 +1,24 @@
 # browser-control — progress
 
-Status: **slice 1 delivered and live-verified.** Repo `main` @ `834ed2b`,
+Status: **slice 1 delivered, packaged, and live-verified.** Repo `main`,
 worktree clean, 10/10 hermetic checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
 ## 1. Slice 1 — what exists
 
+The distributable package is `browser_control` (`browser_control/lib` is the
+logic, `browser_control/cli` is the argv adapter); `pyproject.toml` installs
+it and puts one console script on PATH.
+
 | File | Lines | Owns |
 | --- | --- | --- |
-| `browser-control-cli` | 13 | the command (symlink in `~/.local/bin`) |
-| `cli/main.py` | 135 | `HANDLERS` table, `--browser`, JSON out / `ERR[code]` exit 2 |
-| `lib/browser.py` | 459 | managed profile, resolve, launch, verified stop, tab ops |
-| `lib/cdp.py` | 186 | endpoint (`DevToolsActivePort`), capped JSON GET, one websocket call |
-| `lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
+| `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
+| `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
+| `browser_control/cli/main.py` | 138 | `HANDLERS` table, `--browser`, JSON out / `ERR[code]` exit 2 |
+| `browser_control/lib/browser.py` | 462 | managed profile, resolve, launch, verified stop, tab ops |
+| `browser_control/lib/cdp.py` | 189 | endpoint (`DevToolsActivePort`), capped JSON GET, one websocket call |
+| `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
 | `tests/test_unit.py` | 246 | 10 hermetic checks, no browser needed |
 
 Five verbs, browser-only:
@@ -49,6 +54,15 @@ fake endpoint, CLI dispatch, CLI argv strictness, pid liveness.
 | `close` | `{stopped: true, pid: 334917}`; `tabs` after → `ERR[cdp-unreachable]`; `close` again → `{stopped: false, reason: "no managed browser was running"}` |
 | refusals | `tab-ambiguous` names both candidates; `no-page-tab` lists what exists; `unknown-command` lists verbs; `file://` refused; extra positionals refused |
 
+**Packaging** — `python3 -m pip wheel .` builds
+`browser_control-0.1.0-py3-none-any.whl` carrying
+`browser-control-cli = browser_control.cli.main:main`, `Requires-Python:
+>=3.11` and `Requires-Dist: websockets>=12`. Installing that wheel into a
+fresh venv (which resolved `websockets 17.1`) and running the *installed*
+command from `/tmp` — nothing of the repo on the path — drove a real Chrome
+through open → new-tab → tabs → close-tab → close, with `tabs` afterwards
+refusing `cdp-unreachable`.
+
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
@@ -65,7 +79,7 @@ concurrent-`open` test, no multi-browser test, no CI.
 | port → inode → pid ownership guard | only the websocket-host check; `close` identifies its pid by cmdline + exe | the endpoint is `--remote-debugging-port=0` on our own profile, so there is no fixed port to forward yet |
 | `ensure` (windowless start) | `open` always makes a page | the 4-verb scope does not need a windowless state |
 | plugin tier, nav, dom, input, forms, media, search | not started | next (see §5) |
-| console script `bctl` (packaging) | repo script + symlink on PATH | decide the name and the install story (§6) |
+| console script `bctl` | console script `browser-control-cli`; the short name is still an open decision (§6) | packaging landed; the plan's `bctl` alias was not added |
 
 ## 4. Known gaps and debt
 
@@ -76,8 +90,8 @@ concurrent-`open` test, no multi-browser test, no CI.
    refused with `cdp-not-local` (see §3).
 4. **One browser at a time** — there is no `--profile`/instance selector; two
    live instances refuse instead of being addressable.
-5. **No packaging** — the command is a repo script plus a hand symlink; no
-   `pyproject.toml`, no pinned dependency on `websockets`.
+5. **Not published** — the wheel builds and installs locally, but there is no
+   README, no declared license, and no index to publish to.
 6. **Live checks are not committed** — the battery that produced §2 lives in
    shell history, not in `tests/`.
 7. **No human output** — every verb prints JSON; there is no `--json` switch
@@ -88,16 +102,16 @@ concurrent-`open` test, no multi-browser test, no CI.
 ## 5. What is next
 
 Ordered by "unblocks the most with the least": 5.1–5.3 are infrastructure the
-other steps then lean on.
+other steps then lean on. **Packaging itself has landed** (§1, §2); what is
+left of that step is 5.1.
 
-### 5.1 Packaging + `selftest` (small)
-`pyproject.toml` with `requires-python = ">=3.11"`, `dependencies =
-["websockets"]`, a console script, and a `selftest` verb (interpreter,
-`websockets` version, verb table) so an install can prove itself without a
-browser. *Done when* a fresh venv install puts a working command on PATH with
-no symlink, and `selftest` answers.
-Runtime here is Python 3.14.7 with websockets 16.1.1 — the floor stays 3.11
-because nothing uses newer syntax.
+### 5.1 `selftest` verb (small)
+A `selftest` verb — interpreter, `websockets` version, verb table — so an
+installed command can prove itself without a browser; it is what the plan's
+packaging step promised beside the install. *Done when* an installed command
+answers `selftest`, and it fails loudly when `websockets` is missing.
+Runtime here is Python 3.14.7; the floor stays 3.11 because nothing uses newer
+syntax.
 
 ### 5.2 The live battery, committed
 `tests/live_test.py`: the §2 sequence, each check with a skip-if-prereq
@@ -165,8 +179,10 @@ Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
    only (current)?
 2. **`open` semantics** — always make a page (current), or also support
    `ensure` (windowless, no page) for scripted use?
-3. **Install story** — console script from `pyproject` (recommended) or keep
-   the repo script + `~/.local/bin` symlink?
+3. ~~**Install story**~~ — answered: `pyproject.toml` installs a console
+   script, `browser-control-cli`. The checkout script stays for running
+   without an install; note that the `~/.local/bin` symlink will shadow an
+   installed wheel, so drop it if you pip-install.
 4. **Command name** — the plan says `bctl`; the delivered command is
    `browser-control-cli`. Keep one, or ship both (long name for discovery,
    short alias for typing)?
@@ -176,6 +192,8 @@ Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
 ## 7. How to run
 
 ```bash
+python3 -m pip install .              # console script on PATH (pipx also works)
+# or, from the checkout with no install:  ./browser-control-cli …
 python3 tests/test_unit.py            # hermetic, no browser
 browser-control-cli open https://example.com
 browser-control-cli tabs

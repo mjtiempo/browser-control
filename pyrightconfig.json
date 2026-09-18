@@ -1,5 +1,5 @@
 {
-  "include": ["lib", "cli", "tests"],
+  "include": ["browser_control", "tests"],
   "exclude": ["**/__pycache__", ".venv"],
   "pythonVersion": "3.11",
   "typeCheckingMode": "basic",

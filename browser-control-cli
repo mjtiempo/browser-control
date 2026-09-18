@@ -7,7 +7,7 @@ import sys
 # the repo it points at is the code that must run.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from cli.main import main  # noqa: E402
+from browser_control.cli.main import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

@@ -22,9 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cli import main as cli_main  # noqa: E402  # pyright: ignore[reportMissingImports]
-from lib import browser, cdp  # noqa: E402  # pyright: ignore[reportMissingImports]
-from lib.errors import ControlError  # noqa: E402  # pyright: ignore[reportMissingImports]
+from browser_control.cli import main as cli_main  # noqa: E402  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser, cdp  # noqa: E402  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import ControlError  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 PASS: list[str] = []
 FAIL: list[str] = []

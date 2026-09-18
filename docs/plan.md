@@ -12,7 +12,7 @@ profile, one endpoint, resolved the same way everywhere.
 
 | Item | Decision |
 | --- | --- |
-| Name / layout | `browser-control` repo, Python package `browser_control`, with `lib/` (logic) + `cli/` (adapters) |
+| Name / layout | `browser-control` repo, Python package `browser_control/` with `lib/` (logic) + `cli/` (adapters) inside it; `pyproject.toml` installs it |
 | Browsers | Chromium family only (chrome, chromium, brave, edge, vivaldi + headless shell) |
 | Scope | Browser only — no desktop/compositor integration |
 | Window-scoped tabs | **Not in v1** (no `--window`, no `--workspace`, no screen coordinates) |
