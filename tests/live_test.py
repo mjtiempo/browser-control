@@ -1277,6 +1277,65 @@ def c_close_by_name_stops_a_foreign_browser() -> str:
     return f"foreign pid {proc.pid} stopped BY NAME, tabs guard and all"
 
 
+def c_two_instances_by_profile() -> str:
+    """Two instances of ONE browser are addressable with `--profile DIR`.
+
+    One root, one binary, two profiles. Both are managed and writable, so an
+    unqualified tab verb refuses — and `--profile` addresses exactly one: the
+    tabs land in the right instance, each reads its own page, and a scoped
+    `close` stops one while the other keeps running.
+    """
+    work = os.path.join(ROOT, "instance-work")
+    personal = os.path.join(ROOT, "instance-personal")
+    try:
+        first = ok_json("open", f"{base_url()}/work", "--profile", work)
+        second = ok_json("open", f"{base_url()}/personal", "--profile",
+                         personal)
+        assert first["started"] is True and second["started"] is True, \
+            (first, second)
+        assert {first["profile"], second["profile"]} == {work, personal}, \
+            (first["profile"], second["profile"])
+        assert first["pid"] != second["pid"], (first, second)
+        # a NEW tab with no selector is ambiguous, and says how to pick
+        err = refuses("ambiguous-browser", "tab", f"{base_url()}/x")
+        assert "--profile" in err, err
+        # the selector addresses exactly one instance, for reads...
+        seen = ok_json("tab", "text", "--chars", "40", "--profile", work)
+        assert str(seen["url"]).endswith("/work"), seen
+        other = ok_json("tab", "text", "--chars", "40", "--profile",
+                        personal)
+        assert str(other["url"]).endswith("/personal"), other
+        # ...and for the lifecycle: ONE instance stops
+        gone = ok_json("close", "--profile", work, "--force")
+        assert gone["stopped"] is True and gone["profile"] == work, gone
+        assert not browser_lib._pid_alive(int(first["pid"])), \
+            "the named instance survived"
+        assert browser_lib._pid_alive(int(second["pid"])), \
+            "close --profile stopped the OTHER instance"
+        back = ok_json("tab", "text", "--chars", "20", "--profile", personal)
+        assert str(back["url"]).endswith("/personal"), back
+        # a profile outside this CLI's root is not one it manages
+        outside = tempfile.mkdtemp(prefix="browser-control-outside-")
+        try:
+            err = refuses("bad-args", "open", f"{base_url()}/x",
+                          "--profile", outside)
+            assert "under" in err, err
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+    finally:
+        # both profiles, whoever is still up: an aborted check must not leave
+        # an instance behind (the first version stopped only one)
+        for where in (work, personal):
+            run("close", "--profile", where, "--force", timeout=60)
+        for where in (work, personal):
+            for _ in range(3):
+                shutil.rmtree(where, ignore_errors=True)
+                if not os.path.exists(where):
+                    break
+                time.sleep(0.3)
+    return "two instances of one browser: addressed, read, and one stopped"
+
+
 def c_no_leftover_process() -> str:
     left = procs_on(ROOT)
     assert not left, f"processes still running on the throwaway root: {left}"
@@ -1598,6 +1657,8 @@ CHECKS = (
      c_attach_grants_writes),
     ("a foreign browser can be stopped BY NAME",
      c_close_by_name_stops_a_foreign_browser),
+    ("two instances of one browser are addressable",
+     c_two_instances_by_profile),
     ("no process is left behind", c_no_leftover_process),
 )
 

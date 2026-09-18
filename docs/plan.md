@@ -169,6 +169,12 @@ Page-level, under `tab`:
 `tab media state|play|pause` · `tab ad-state` · `tab skip-ad` (the ad verbs
 are DEFERRED by decision: site-specific knowledge belongs to the plugin tier).
 
+`--profile DIR` is the INSTANCE selector, on every verb: a profile directory
+under the root, which is how two instances of ONE browser (or two sessions) are
+told apart. It is the same selector `attach`/`detach`/`close` take, and it
+refuses anything outside the root — a browser started elsewhere is what `attach`
+is for.
+
 A SPEC is a CDP target id prefix (`id:2D4BC76C`), the RESERVED word `active`
 (the tab whose page reports itself visible among the browsers this CLI drives —
 at most one per window; a page whose title merely contains the word is reached

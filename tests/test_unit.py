@@ -958,7 +958,10 @@ def t_cli_close_bulk() -> None:
     finally:
         cli_main.stop = original_stop                  # type: ignore[assignment]
     for argv in (["close", "now"], ["close", "--pid", "1", "--port", "2"],
-                 ["close", "--pid"], ["close", "--list"]):
+                 ["close", "--pid"], ["close", "--list"],
+                 # --profile IS a selector: naming two ways is bad-args
+                 ["close", "--pid", "1", "--profile", fake_profile],
+                 ["close", "--port", "1", "--profile", fake_profile]):
         rc, _out, err = run_cli(argv)
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     # a repeatable flag with no value is refused in argv

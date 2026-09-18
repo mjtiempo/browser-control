@@ -14,15 +14,16 @@ import shutil
 import sys
 from collections.abc import Callable
 
-# The project-level pyright run resolves these imports; the line-level ignores
-# are for pi-lens's fallback index, which does not see the sibling modules.
+# The project-level pyright run resolves these imports; pi-lens's fallback
+# index does not see the sibling modules, and the per-line ignores it wanted
+# pushed every line past the formatter's limit, so they are gone.
 from browser_control import __version__
-from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
-from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
-from browser_control.lib import capabilities  # pyright: ignore[reportMissingImports]
-from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
-from browser_control.lib import dom  # pyright: ignore[reportMissingImports]
-from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib import audit
+from browser_control.lib import browser as browser_lib
+from browser_control.lib import capabilities
+from browser_control.lib import cdp
+from browser_control.lib import dom
+from browser_control.lib.browser import (
     activate,
     attach,
     attachments,
@@ -39,7 +40,7 @@ from browser_control.lib.browser import (  # pyright: ignore[reportMissingImport
     stop,
     tab_info,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ControlError,
     fail,
 )
@@ -114,6 +115,9 @@ SPEC   a CDP target id prefix (`id:2D4BC76C`), `active` (the tab whose page
 flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
                         (info/tab list); default: a live managed browser, else
                         the first Chromium-family one on PATH
+       --profile DIR    the INSTANCE to drive: a profile directory under the
+                        root, which is how two instances of ONE browser are
+                        told apart (`open --profile <root>/work`)
        --tab SPEC       the tab a page verb acts on (nav/back/forward/reload);
                         without it the verb acts on the ONLY page tab there is
 reads: every drivable browser.  writes: a managed browser, or an attached one
@@ -216,15 +220,17 @@ def cmd_attach(rest: list[str], browser: str) -> dict:
     if selector["list"]:
         return attachments()
     return attach(port=selector["port"], pid=selector["pid"],
-                  profile=selector["profile"])
+                  profile=browser_lib.scope())
 
 
 def cmd_detach(rest: list[str], browser: str) -> dict:
     """`detach ...` / `detach --all` — revoke a tab-write authorization."""
     _no_browser_flag("detach", browser)
     selector = _selector(rest, "detach", ("all",))
+    # --all means every record, so a scoped call does not narrow it
+    profile = "" if selector["all"] else browser_lib.scope()
     return detach(port=selector["port"], pid=selector["pid"],
-                  profile=selector["profile"], detach_all=selector["all"])
+                  profile=profile, detach_all=selector["all"])
 
 
 def cmd_open(rest: list[str], browser: str) -> dict:
@@ -242,8 +248,13 @@ def cmd_close(rest: list[str], browser: str) -> dict:
     """
     rest, force = _switch(rest, "--force")
     selector = _selector(rest, "close", ())
+    scoped = browser_lib.scope()
+    if scoped and (selector["port"] or selector["pid"]):
+        fail("bad-args",
+             "close: --profile names an instance, so it takes no --port or "
+             "--pid — one way to name a browser per call")
     return stop(browser=browser, force=force, port=selector["port"],
-                pid=selector["pid"], profile=selector["profile"])
+                pid=selector["pid"], profile=scoped)
 
 
 def cmd_list(rest: list[str], browser: str) -> dict:
@@ -308,6 +319,8 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
     if browser:
         reply["requested"] = {"name": browser,
                               "path": shutil.which(browser) or ""}
+    if browser_lib.scope():
+        reply["scoped_to"] = browser_lib.scope()
     if not found:
         reply["warning"] = ("no Chromium-family browser on PATH — `open` "
                             "will refuse until one is installed")
@@ -805,26 +818,40 @@ HANDLERS: dict[str, Handler] = {
 }
 
 
-def _browser_flag(args: list[str]) -> tuple[list[str], str]:
-    """Pull `--browser NAME` (or `--browser=NAME`) out of argv, anywhere."""
+def _flags(args: list[str]) -> tuple[list[str], str, str]:
+    """Pull `--browser NAME` and `--profile DIR` out of argv, anywhere.
+
+    `--profile` is the INSTANCE selector, and it goes in the same place: the
+    process scope (`browser_lib.scope`), which every verb that narrows by
+    `--browser` also consults. `attach`/`detach`/`close` read it from there, so
+    one flag means one thing on every verb.
+    """
     rest: list[str] = []
     browser = ""
+    profile = ""
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == "--browser":
+        if arg in ("--browser", "--profile"):
             if i + 1 >= len(args):
-                fail("bad-args", "--browser needs a NAME")
-            browser = args[i + 1]
+                fail("bad-args", f"{arg} needs a value")
+            if arg == "--browser":
+                browser = args[i + 1]
+            else:
+                profile = args[i + 1]
             i += 2
             continue
-        if arg.startswith("--browser="):
-            browser = arg.split("=", 1)[1]
+        if arg.startswith(("--browser=", "--profile=")):
+            key, value = arg.split("=", 1)
+            if key == "--browser":
+                browser = value
+            else:
+                profile = value
             i += 1
             continue
         rest.append(arg)
         i += 1
-    return rest, browser
+    return rest, browser, profile
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -841,8 +868,11 @@ def main(argv: list[str] | None = None) -> int:
     ok = False
     code: str | None = None
     try:
-        rest, browser = _browser_flag(args)
+        rest, browser, profile = _flags(args)
         verb, rest = rest[0], rest[1:]
+        # `--profile` is the INSTANCE, read from the process scope: one flag for
+        # every verb, and never inherited from another invocation
+        browser_lib.scope(profile or "")
         audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:

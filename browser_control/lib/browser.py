@@ -112,6 +112,49 @@ def profile_dir(binary_path: str) -> str:
     return os.path.join(root(), os.path.basename(binary_path))
 
 
+# The INSTANCE a call is about, set once per process by the CLI from
+# `--profile DIR` — the same selector `attach`, `detach` and `close` already
+# take. Every verb that narrows by `--browser` funnels through `_narrow`, so
+# this one value addresses ONE instance everywhere: which is what makes two
+# instances of the SAME browser usable (`open --profile <root>/work` and
+# `open --profile <root>/personal`), instead of refusing `ambiguous-browser`.
+SCOPE: dict[str, str] = {"profile": ""}
+
+
+def scope(profile: str | None = None) -> str:
+    """Set, clear or read the profile this process's calls are about.
+
+    `None` reads it, `""` clears it (the CLI does that on every invocation that
+    does not pass `--profile`, so one call never inherits another's), and a path
+    sets it. A path outside this CLI's root is refused when `open` acts on it
+    (`instance_dir`), because only the profiles under that root are the CLI's.
+    """
+    if profile is not None:
+        text = str(profile).strip()
+        SCOPE["profile"] = (os.path.abspath(os.path.expanduser(text))
+                            if text else "")
+    return SCOPE["profile"]
+
+
+def instance_dir(binary_path: str) -> str:
+    """The profile `open` is about: the SCOPED instance, else the default one.
+
+    The default stays one profile per browser binary (what `profile_dir`
+    builds); `--profile DIR` names a second instance of the same browser
+    instead, and it has to live under this CLI's root: outside it we would be
+    starting a browser we then refuse to write to.
+    """
+    scoped = SCOPE["profile"]
+    if not scoped:
+        return profile_dir(binary_path)
+    if not _is_managed(scoped):
+        fail("bad-args",
+             f"--profile {scoped} is not under {root()} — this CLI manages the "
+             "profiles in its own root (set BROWSER_CONTROL_ROOT to move it, "
+             "or `attach` a browser started elsewhere)")
+    return scoped
+
+
 def profiles() -> list[str]:
     """Every managed profile directory, sorted."""
     base = root()
@@ -460,13 +503,24 @@ def is_attached(profile: str) -> bool:
 
 
 def _narrow(rows: list[dict], browser: str) -> list[dict]:
-    """The rows whose browser a name matches: its executable, or the basename
-    of its profile — the name `open --browser NAME` keys a profile by."""
-    if not browser:
-        return rows
+    """The rows a name and/or the SCOPED profile select.
+
+    `--browser NAME` matches the executable or the profile's basename (the name
+    `open --browser NAME` keys a default profile by); `--profile DIR` (the
+    process scope) matches the profile PATH and nothing else, so it can pick
+    between two instances of the same browser.
+    """
     wanted = os.path.basename(str(browser).strip())
-    return [r for r in rows
-            if wanted in (r["exe"], os.path.basename(str(r["profile"])))]
+    scoped = SCOPE["profile"]
+    out: list[dict] = []
+    for row in rows:
+        if wanted and wanted not in (row["exe"],
+                                     os.path.basename(str(row["profile"]))):
+            continue
+        if scoped and _norm(str(row["profile"])) != scoped:
+            continue
+        out.append(row)
+    return out
 
 
 def _writable(browser: str = "") -> list[dict]:
@@ -487,8 +541,11 @@ def _writable_profile(browser: str = "") -> str:
     Two writable browsers refuse — the endpoint belongs to a browser identity,
     and picking one silently is how a tab lands in the browser nobody asked
     about. `attach`/`detach` decide which browsers are candidates; `--browser`
-    picks among them.
+    picks among them, and `--profile DIR` (the process scope) names ONE instance
+    outright — the answer to two instances of the same browser.
     """
+    if SCOPE["profile"]:
+        return SCOPE["profile"]
     rows = _writable(browser)
     if len(rows) > 1:
         names = ", ".join(os.path.basename(str(r["profile"]))
@@ -496,7 +553,8 @@ def _writable_profile(browser: str = "") -> str:
                           for r in rows)
         fail("ambiguous-browser",
              f"{len(rows)} writable browsers are up ({names}) — pass "
-             "--browser NAME, or `detach` one")
+             "--profile DIR to name the instance, --browser NAME, or "
+             "`detach` one")
     if rows:
         return str(rows[0]["profile"])
     return profile_dir(binary(browser)) if browser else profile_dir(binary())
@@ -508,6 +566,10 @@ def managed_profile(browser: str = "") -> str:
     tab writes, not the right to stop somebody else's browser."""
     rows = _narrow([r for r in browsers()
                     if r["managed"] and r["cdp"]["reachable"]], browser)
+    if not rows and SCOPE["profile"]:
+        # a scoped call is about THAT instance, running or not: `open` starts
+        # it, and nothing here may silently fall back to some other profile
+        return SCOPE["profile"]
     if len(rows) > 1:
         # pid AND the whole profile path: two browsers can share an executable
         # name, and "(google-chrome-stable, google-chrome-stable)" is a message
@@ -821,38 +883,32 @@ def browser_info(browser: str = "") -> dict:
     "Would drive" includes an ATTACHED browser: that is the one a `tab` write
     goes to. `running: false` is an ANSWER, not a refusal — which browser
     `open` would start, and where its profile lives, is knowable without one
-    running.
+    running. `--browser NAME` and `--profile DIR` both narrow it, so a scoped
+    call reports the instance it is about.
     """
-    name = os.path.basename(str(browser).strip())
-    rows = browsers()
-    if name:
-        matches = [r for r in rows if name in (
-            r["exe"], os.path.basename(str(r["profile"])))]
-        # ours first, then an attached one: those are the browsers a tab
-        # write could reach, and the one `info` is really about
-        writable = next((r for r in matches
-                         if r["managed"] or r["attached"]), None)
-        row = writable if writable is not None else (
-            matches[0] if matches else None)
-        if row is not None:
-            return {"ok": True, "running": True, "browser": _row(row),
-                    "cdp": _endpoint_details(row)}
-        path = binary(browser)          # refuses no-browser when unknown
-    else:
-        live = [r for r in rows
-                if (r["managed"] or r["attached"]) and r["cdp"]["reachable"]]
-        if len(live) > 1:
-            names = ", ".join(os.path.basename(str(r["profile"]))
-                              + (" (attached)" if r["attached"] else "")
-                              for r in live)
-            fail("ambiguous-browser",
-                 f"{len(live)} writable browsers are up ({names}) — name one "
-                 "with --browser NAME")
-        if live:
-            return {"ok": True, "running": True, "browser": _row(live[0]),
-                    "cdp": _endpoint_details(live[0])}
-        path = binary()
-    profile = profile_dir(path)
+    rows = _narrow(browsers(), browser)
+    # ours first, then an attached one: those are the browsers a tab write
+    # could reach, and the one `info` is really about
+    live = [r for r in rows if r["managed"] or r["attached"]]
+    if len(live) > 1:
+        names = ", ".join(os.path.basename(str(r["profile"]))
+                          + (" (attached)" if r["attached"] else "")
+                          for r in live)
+        fail("ambiguous-browser",
+             f"{len(live)} writable browsers are up ({names}) — name one with "
+             "--profile DIR (the instance) or --browser NAME")
+    if live:
+        return {"ok": True, "running": True, "browser": _row(live[0]),
+                "cdp": _endpoint_details(live[0])}
+    if rows and (browser or SCOPE["profile"]):
+        # a NAMED browser this CLI cannot (or may not) drive: report it rather
+        # than pretend. With no name and no scope, an unmanaged and unreachable
+        # browser is not an answer at all — say `running: false` instead.
+        row = rows[0]
+        return {"ok": True, "running": bool(row["cdp"]["reachable"]),
+                "browser": _row(row), "cdp": _endpoint_details(row)}
+    path = binary(browser) if browser else binary()
+    profile = instance_dir(path)
     return {"ok": True, "running": False,
             "browser": {"pid": 0, "exe": os.path.basename(path),
                         "path": path, "profile": profile,
@@ -1142,7 +1198,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     """
     wanted = [safe_url(url) for url in (urls or [])]
     path = binary(browser)
-    profile = profile_dir(path)
+    profile = instance_dir(path)
     try:
         os.makedirs(profile, exist_ok=True)
     except OSError as e:
