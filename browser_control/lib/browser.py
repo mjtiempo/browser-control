@@ -732,14 +732,6 @@ def _wait_rows(profile: str, timeout: float = TAB_WAIT_S) -> list[dict]:
     return rows
 
 
-def _rows_or_empty(profile: str) -> list[dict]:
-    """The page tabs right now, or [] when the endpoint will not say."""
-    try:
-        return _rows(profile)
-    except ControlError:
-        return []
-
-
 def _wait_tabs(profile: str, ids: list[str],
                timeout: float = TAB_WAIT_S) -> tuple[dict, list[str]]:
     """(rows by id, ids still missing) after ONE bounded poll."""
@@ -818,28 +810,15 @@ def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
 
 
 # ------------------------------------------------------------------ verbs
-def launch(urls: list[str] | None = None, browser: str = "",
-           windowless: bool = False) -> dict:
-    """Start (or adopt) the managed browser; with `windowless`, no page at all.
+def launch(urls: list[str] | None = None, browser: str = "") -> dict:
+    """Start (or adopt) the managed browser and prove the pages are there.
 
     `urls` is what to open: a fresh start loads the FIRST as its startup page
     and opens the rest as tabs; an already-running browser is handed each as
     a new tab; an empty list just makes sure a page exists. `started` says
     which of the two happened and `opened` names the tabs this call made.
-
-    `windowless` starts the browser with `--no-startup-window`, so CDP comes
-    up and NOTHING is on screen. It is an option, never the default, and it
-    takes no URL: Chromium opens a WINDOW for the first tab, so a URL here
-    could not be honoured. On an already-running browser it is a no-op that
-    reports what is really there — this verb starts browsers, it does not
-    close windows (`close`, then `open --windowless`, is how a window leaves
-    the screen).
     """
     wanted = [safe_url(url) for url in (urls or [])]
-    if windowless and wanted:
-        fail("bad-args",
-             "open: --windowless starts NO page — Chromium opens a window for "
-             "the first tab, so pass the URL without --windowless")
     path = binary(browser)
     profile = profile_dir(path)
     try:
@@ -855,40 +834,28 @@ def launch(urls: list[str] | None = None, browser: str = "",
             requests = wanted
             opened = _open_tabs(profile, wanted)
     else:
-        argv = [path, *flags(profile)]
-        # `--no-startup-window` and a URL are mutually exclusive (see above),
-        # and without one of them the browser makes its own blank page
-        argv.append("--no-startup-window" if windowless
-                    else (wanted[0] if wanted else "about:blank"))
-        _record_pid(profile, _spawn(argv))
+        first = wanted[0] if wanted else "about:blank"
+        requests = [first, *wanted[1:]]
+        _record_pid(profile, _spawn([path, *flags(profile), first]))
         if not _wait_port(profile):
             fail("launch-failed",
                  f"started {path} on {profile} but no CDP endpoint answered "
                  f"within {LAUNCH_WAIT_S:g}s")
-        if not windowless:
-            first = wanted[0] if wanted else "about:blank"
-            requests = [first, *wanted[1:]]
-            row = _wait_url(profile, first)
-            if row is None:
-                fail("no-page-tab",
-                     f"{path} is up on {profile} but shows no tab for "
-                     f"{first!r}")
-            opened = [row]
-            if len(wanted) > 1:
-                opened += _open_tabs(profile, wanted[1:])
-    if windowless:
-        # no page is the POINT: report whatever is there rather than waiting
-        rows = _rows_or_empty(profile)
-    else:
-        rows = _wait_rows(profile)
-        if not rows:
+        row = _wait_url(profile, first)
+        if row is None:
             fail("no-page-tab",
-                 f"{path} is up on {profile} but shows no page tab — pass a "
-                 "URL (browser-control-cli open https://…)")
-    reply = {"ok": True, "started": not already, "windowless": windowless,
-             "browser": path, "profile": profile,
-             "port": cdp.port_of(profile), "pid": _pid_of(profile),
-             "tabs": rows,
+                 f"{path} is up on {profile} but shows no tab for {first!r}")
+        opened = [row]
+        if len(wanted) > 1:
+            opened += _open_tabs(profile, wanted[1:])
+    rows = _wait_rows(profile)
+    if not rows:
+        fail("no-page-tab",
+             f"{path} is up on {profile} but shows no page tab — pass a URL "
+             "(browser-control-cli open https://…)")
+    reply = {"ok": True, "started": not already, "browser": path,
+             "profile": profile, "port": cdp.port_of(profile),
+             "pid": _pid_of(profile), "tabs": rows,
              "opened": [{"requested": requests[index], "id": row["id"],
                          "url": row["url"], "title": row["title"]}
                         for index, row in enumerate(opened)]}

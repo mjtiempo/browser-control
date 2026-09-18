@@ -171,26 +171,21 @@ def check(name: str, fn) -> None:                              # noqa: ANN001
         print(f"PASS  {name}  {detail}")
 
 
-def run(*argv: str, timeout: int = TIMEOUT_S,
-        env_extra: dict | None = None) -> tuple[int, str, str]:
+def run(*argv: str, timeout: int = TIMEOUT_S) -> tuple[int, str, str]:
     """One CLI call on the throwaway root: (returncode, stdout, stderr).
 
     The command is executed AS a command, so its own shebang picks the
     interpreter — a checkout script and an installed console script in some
-    other venv both work. `env_extra` overrides entries for THIS call only
-    (`--windowless` needs a profile root of its own, so that the browser it
-    starts is not adopted by the rest of the session).
+    other venv both work.
     """
-    call_env = env()
-    call_env.update(env_extra or {})
     proc = subprocess.run([CLI, *argv], capture_output=True, text=True,
-                          timeout=timeout, env=call_env)
+                          timeout=timeout, env=env())
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
-def ok_json(*argv: str, env_extra: dict | None = None) -> dict:
+def ok_json(*argv: str) -> dict:
     """A CLI call that must succeed, as parsed JSON."""
-    rc, out, err = run(*argv, env_extra=env_extra)
+    rc, out, err = run(*argv)
     assert rc == 0, f"{' '.join(argv)} rc={rc}: {err or out}"
     try:
         return json.loads(out)
@@ -870,42 +865,6 @@ def c_list_tabs_groups_by_browser() -> str:
             "drivable browser(s), grouped and id-matched")
 
 
-def c_open_windowless() -> str:
-    """`open --windowless` brings CDP up with NOTHING on screen.
-
-    It gets a profile root of its own: the flag is only meaningful where no
-    browser is running yet, and this keeps the session's own browser out of
-    it. Chromium opens a WINDOW for the first tab, so the check ends by making
-    one — that is the honest behaviour, not a promise this verb breaks.
-    """
-    alt = f"{ROOT}-windowless"
-    extra = {"BROWSER_CONTROL_ROOT": alt}
-    try:
-        reply = ok_json("open", "--windowless", env_extra=extra)
-        assert reply["started"] is True and reply["windowless"] is True, reply
-        assert reply["tabs"] == [] and reply["opened"] == [], reply
-        assert reply["port"] > 0 and reply["pid"] > 0, reply
-        listed = ok_json("tab", "list", env_extra=extra)
-        ours = [g for g in listed["browsers"] if g["profile"].startswith(alt)]
-        assert len(ours) == 1, listed
-        assert ours[0]["managed"] is True, listed
-        assert ours[0]["count"] == 0, listed          # drivable, no page
-        assert ours[0]["tabs"] == [], listed
-        made = ok_json("tab", f"{base_url()}/one.html", env_extra=extra)
-        assert made["count"] == 1, made
-        assert made["url"].endswith("/one.html"), made
-        # the flag takes no URL, and refuses before any browser is touched
-        refuses("bad-args", "open", "--windowless", f"{base_url()}/one.html")
-    finally:
-        run("close", timeout=60, env_extra=extra)      # best effort
-        for pid in procs_on(alt):                      # ours by construction
-            with contextlib.suppress(OSError):
-                os.kill(pid, signal.SIGTERM)
-        shutil.rmtree(alt, ignore_errors=True)
-    assert not procs_on(alt), f"a windowless browser was left on {alt}"
-    return "CDP up with no window and no tab; the first tab opened a page"
-
-
 def c_list_shows_a_browser_outside_cdp() -> str:
     """A browser with no debugging port is LISTED, and never driven.
 
@@ -1089,7 +1048,6 @@ CHECKS = (
     ("open adopts a running browser", c_open_adopts_the_running_browser),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),
-    ("open --windowless starts no window", c_open_windowless),
     ("a browser outside CDP is listed, not driven",
      c_list_shows_a_browser_outside_cdp),
     ("a foreign CDP browser is read, then attached for writes",

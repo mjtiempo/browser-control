@@ -142,7 +142,7 @@ for tabs) rather than page JavaScript, and `tab js` is the last resort.
 
 Browser-level:
 
-`open URL… [--windowless]` · `close` · `list` · `info` · `attach [--port N|--pid N|--profile
+`open URL…` · `close` · `list` · `info` · `attach [--port N|--pid N|--profile
 DIR]` · `attach --list` · `detach [--port N|--pid N|--profile DIR|--all]` ·
 `selftest` · `help` · `cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the
 raw escape hatch) · `search QUERY [--engine E] [--limit N]` (headless, in a
@@ -255,7 +255,7 @@ unclear oracle into a claim of absence.**
 | `tab insert` · `tab type` | mutation | the focused field's text LENGTH grew — never the value | L2 | `no-focus`, `insert-not-verified`/`type-not-verified`; `verified:false` when the field is unreadable |
 | `tab upload` | mutation | `input.files` read back (name + size) | L2 | `no-file`, `upload-not-verified` |
 | `media-play/pause` | mutation | `video.paused` read back | L2 | `media-not-verified` |
-| `open` | mutation | window + tab identity re-read; `--windowless` reports `tabs: []` (a page count of zero is the point) | L4 | `launch-failed`, `tab_refused` (window kept, reason named) |
+| `open` | mutation | window + tab identity re-read | L4 | `launch-failed`, `tab_refused` (window kept, reason named) |
 | `ensure` | mutation | port answers + pid recorded | L3 | `cdp-unreachable` with the real reason |
 | `profile-sync` | mutation | destination exists + file/byte count + copy kind | L2 | `profile-sync-failed` |
 | `search` | read | rendered vs empty vs wall vs unreachable | L3 | `search-denied`, `search-cdp` |

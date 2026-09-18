@@ -45,7 +45,6 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
 USAGE = """usage: browser-control-cli VERB [ARGS]
 
   open [URL...]      start (or adopt) the managed browser; each URL opens
-                     --windowless starts it with NO window (and takes no URL)
   close              stop the managed browser this CLI started
   list               every Chromium-family browser running here, ours or not
   info               the browser this CLI would drive, and its endpoint
@@ -222,16 +221,8 @@ def _specs(rest: list[str], verb: str) -> list[str]:
     return list(rest)
 
 
-def _switch(rest: list[str], flag: str) -> tuple[list[str], bool]:
-    """Pull a VALUE-LESS flag (`--windowless`) out of argv."""
-    given = any(str(arg) == flag for arg in rest)
-    return [arg for arg in rest if str(arg) != flag], given
-
-
 def cmd_open(rest: list[str], browser: str) -> dict:
-    """`open [URL...] [--windowless]` — start or adopt the managed browser."""
-    rest, windowless = _switch(rest, "--windowless")
-    return launch(_urls(rest, "open"), browser=browser, windowless=windowless)
+    return launch(_urls(rest, "open"), browser=browser)
 
 
 def cmd_close(rest: list[str], browser: str) -> dict:
