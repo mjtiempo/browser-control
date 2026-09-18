@@ -142,7 +142,7 @@ for tabs) rather than page JavaScript, and `tab js` is the last resort.
 
 Browser-level:
 
-`open URL…` · `close` · `list` · `info` · `attach [--port N|--pid N|--profile
+`open URL…` · `close [--force]` · `list` · `info` · `attach [--port N|--pid N|--profile
 DIR]` · `attach --list` · `detach [--port N|--pid N|--profile DIR|--all]` ·
 `selftest` · `help` · `cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the
 raw escape hatch) · `search QUERY [--engine E] [--limit N]` (headless, in a
@@ -154,7 +154,7 @@ Page-level, under `tab`:
 
 `tab [URL…]` · `tab list` · `tab info SPEC` ·
 `tab close SPEC… | --like VALUE | --title VALUE | --url VALUE |
-`--all [--except SPEC…]` ·
+`--all [--except SPEC…] | --dry` ·
 `tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
 `tab reload` · `tab js EXPR` · `tab wait --for …` ·
 `tab find TEXT|--selector CSS` · `tab text` · `tab click TEXT|--selector CSS` ·
@@ -265,7 +265,7 @@ unclear oracle into a claim of absence.**
 | `tab nav` · `tab back`/`forward` | mutation | `Page.navigate` (browser-side, so a PARKED renderer still navigates), then the MOVE (a new document or a changed address), then `readyState` + not an error page | L3 | `nav-failed` (an error page, a refused navigation, or a download), `nav-not-verified` |
 | `tab reload` | mutation | `performance.timeOrigin` changed: a NEW document | L3 | `reload-not-verified` |
 | `tab [URL…]` | mutation | the tab row exists, the id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
-| `tab close SPEC… / --like / --title / --url / --all / --except` | mutation | every requested id ABSENT from the re-read list, over the UNION of the matches, all resolved before anything closes | L3 | `no-page-tab` (naming the value and suggesting `--like`, or the exception that kept nothing), `not-managed` (every match foreign), `close-tab-not-verified` (report survivors); foreign matches are REPORTED in `skipped`, never closed silently. A SPEC names a tab exactly (`id:` with no prefix refuses); `--like` is the declared sweep. Closing the LAST tab stops the browser with its last window |
+| `tab close SPEC… / --like / --title / --url / --all / --except / --dry` | mutation | every requested id ABSENT from the re-read list, over the UNION of the matches, all resolved before anything closes | L3 | `no-page-tab` (naming the value and suggesting `--like`, or the exception that kept nothing), `not-managed` (every match foreign), `close-tab-not-verified` (report survivors); foreign matches are REPORTED in `skipped`, never closed silently. A SPEC names a tab exactly (`id:` with no prefix refuses); `--like` is the declared sweep; `--dry` resolves and returns `would_close` without closing anything. Closing the LAST tab stops the browser with its last window |
 | `tab activate` | mutation | the page's own `document.visibilityState` before and after `Page.bringToFront` | L2 | `activate-not-verified` (the window may be hidden entirely) |
 | `tab click` | mutation | hit-test before, then url/title/focus/scroll before-and-after | L4 | `occluded`, `no-viewport-target`, `ambiguous-element` |
 | `tab hover` | mutation | the engine's `:hover` state at the point, and that the point still hit-tests into the element | L4 | `hover-not-verified`, `occluded`, `no-viewport-target` |
@@ -281,6 +281,7 @@ unclear oracle into a claim of absence.**
 | `tab upload` | mutation | `input.files` read back (name + size) | L2 | `no-file`, `upload-not-verified` |
 | `media-play/pause` | mutation | `video.paused` read back | L2 | `media-not-verified` |
 | `open` | mutation | window + tab identity re-read | L4 | `launch-failed`, `tab_refused` (window kept, reason named) |
+| `close` | mutation (lifecycle) | the pid AND the endpoint gone, the pid identified by its own cmdline | L4 | `tabs-open` unless `--force` (a browser with tabs refuses), `browser-not-stopped` (never SIGKILLs, never signals an unidentifiable process), `ambiguous-browser` (pid + profile path) |
 | `ensure` | mutation | port answers + pid recorded | L3 | `cdp-unreachable` with the real reason |
 | `profile-sync` | mutation | destination exists + file/byte count + copy kind | L2 | `profile-sync-failed` |
 | `search` | read | rendered vs empty vs wall vs unreachable | L3 | `search-denied`, `search-cdp` |

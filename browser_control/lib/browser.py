@@ -286,15 +286,34 @@ def _find_pid(profile: str) -> int:
     return 0
 
 
+def _pid_on_profile(pid: int, profile: str) -> bool:
+    """Does that pid's OWN cmdline say it runs on this profile?
+
+    The marker is the one `_find_pid` matches and the one Chrome is started
+    with, so a pid that cannot show it is not this profile's browser — which is
+    the difference between stopping that browser and signalling whatever
+    process inherited a recycled pid.
+    """
+    marker = f"--user-data-dir={profile}"
+    return any(found == pid and marker in cmd
+               for found, _exe, cmd in _main_processes())
+
+
 def _pid_of(profile: str) -> int:
-    """The pid recorded for this profile, or the one running on it now."""
+    """The pid recorded for this profile, or the one running on it now.
+
+    A recorded pid is used only while the process still SAYS it is this
+    profile's browser: the record is a hint, and a stale one plus a recycled
+    pid would otherwise aim `stop` at an unrelated process. `_find_pid` is the
+    fallback, and it refuses to hand back a renderer or a stranger.
+    """
     pid = 0
     try:
         with open(_pid_file(profile)) as f:
             pid = int(f.read().strip())
     except (OSError, ValueError):
         pid = 0
-    if pid and _pid_alive(pid):
+    if pid and _pid_alive(pid) and _pid_on_profile(pid, profile):
         return pid
     return _find_pid(profile)
 
@@ -474,9 +493,13 @@ def managed_profile(browser: str = "") -> str:
     rows = _narrow([r for r in browsers()
                     if r["managed"] and r["cdp"]["reachable"]], browser)
     if len(rows) > 1:
-        names = ", ".join(os.path.basename(str(r["profile"])) for r in rows)
+        # pid AND the whole profile path: two browsers can share an executable
+        # name, and "(google-chrome-stable, google-chrome-stable)" is a message
+        # nobody can act on (observed)
+        names = "; ".join(f'{os.path.basename(str(r["profile"]))} '
+                          f'(pid {r["pid"]}, {r["profile"]})' for r in rows)
         fail("ambiguous-browser",
-             f"{len(rows)} managed browsers are up ({names}) — pass "
+             f"{len(rows)} managed browsers are up: {names} — pass "
              "--browser NAME")
     if rows:
         return str(rows[0]["profile"])
@@ -864,23 +887,55 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     return reply
 
 
-def stop(browser: str = "") -> dict:
+def _page_count(profile: str) -> int | None:
+    """How many page tabs answer on that profile, or None when it is silent.
+
+    None is not zero: a browser whose endpoint is already gone cannot be asked
+    what it holds, and the difference decides whether `close` may warn.
+    """
+    try:
+        return len(cdp.page_rows(profile))
+    except ControlError:
+        return None
+
+
+def stop(browser: str = "", force: bool = False) -> dict:
     """Stop the managed browser this CLI started, and prove it stopped.
 
-    Only the pid running on THIS profile's user-data-dir is signalled —
-    recorded, else re-found by cmdline and exe — and the reply requires the
-    process AND the endpoint to be gone. Nothing is SIGKILLed.
+    Three things it will not do:
+
+    * **It will not take tabs down silently.** A browser with page tabs open
+      refuses `tabs-open`, naming the count, because Chromium exits with its
+      last window — `--force` says the caller means it. An endpoint that no
+      longer answers cannot be asked, so nothing is claimed about its tabs.
+    * **It will not signal a pid that does not claim this profile.** The pid
+      file is a hint: the process's own cmdline has to carry
+      `--user-data-dir=<profile>`, or the pid is re-found, or the stop refuses
+      rather than aim SIGTERM at whatever inherited a recycled pid.
+    * **It will not SIGKILL.** A process that ignores SIGTERM is the caller's
+      to stop, and the refusal says so.
+
+    The reply requires the process AND the endpoint to be gone: `stopped: true`
+    only after both, plus `tabs` (the count it saw, or null) and `forced`.
     """
     profile = managed_profile(browser)
     pid = _pid_of(profile)
+    tabs = _page_count(profile)
     if not pid:
         if not cdp.reachable(profile):
             return {"ok": True, "stopped": False, "profile": profile,
+                    "tabs": tabs,
                     "reason": "no managed browser was running"}
         fail("browser-not-stopped",
              f"a browser answers on {profile} but no Chromium process on it "
              "can be identified — refusing to signal a process this CLI did "
              "not start")
+    if tabs and not force:
+        fail("tabs-open",
+             f"{tabs} page tab(s) are open in {profile} and stopping the "
+             "browser closes them with it (Chromium exits with its last "
+             "window) — pass --force to stop it anyway, or take the tabs "
+             "first with `tab close ...` (`tab list` shows them)")
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as e:
@@ -900,7 +955,8 @@ def stop(browser: str = "") -> dict:
              f"pid {pid} is gone but the CDP endpoint on {profile} still "
              "answers")
     Path(_pid_file(profile)).unlink(missing_ok=True)
-    return {"ok": True, "stopped": True, "pid": pid, "profile": profile}
+    return {"ok": True, "stopped": True, "pid": pid, "profile": profile,
+            "tabs": tabs, "forced": bool(tabs and force)}
 
 
 ACTIVE_SPEC = "active"
@@ -983,9 +1039,10 @@ def _resolve_across(specs: list[str], browser: str,
             fail("no-page-tab",
                  f"no tab matches {spec!r} (have: {have or 'none'})")
         if len(hits) > 1:
+            # pid in the message: two browsers can share an executable name
             where = ", ".join(
                 f'{t["title"][:20] or t["id"][:8]} in {r["exe"]}'
-                f':{os.path.basename(str(r["profile"]))}'
+                f':{os.path.basename(str(r["profile"]))} (pid {r["pid"]})'
                 for r, t, _index in hits[:4])
             fail("tab-ambiguous",
                  f"{spec!r} matches {len(hits)} tabs: {where}")
@@ -1168,7 +1225,7 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
 def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
                url: str | None = None, all_tabs: bool = False,
                excepts: list[str] | None = None,
-               like: list[str] | None = None) -> dict:
+               like: list[str] | None = None, dry: bool = False) -> dict:
     """`tab close`: close every tab the arguments name, and prove it.
 
     Five ways to name tabs, one per call:
@@ -1185,6 +1242,11 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
       those specs name; the KEEP side matches loosely (erring toward keeping is
       the safe direction), several are allowed, and one that matches NOTHING
       refuses, so a typo cannot silently keep what should have gone.
+
+    `dry=True` resolves exactly as it would and returns the set instead of
+    closing it — same arguments, same refusals, no `Target.closeTarget`. The
+    reply says `dry: true` and carries `would_close` (never `closed`), so a
+    caller cannot mistake a preview for an action.
 
     Everything to close resolves FIRST, so a bad argument, an unmatched
     exception or an ambiguous filter cannot leave a half-applied close. The
@@ -1272,6 +1334,28 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
                  f"{value!r} — `tab list` shows what is open")
     else:
         ours, skipped = _spec_matches(list(specs), browser)
+    closing: list[dict] = [{"id": tab["id"], "title": tab["title"],
+                            "url": tab["url"], "pid": row["pid"],
+                            "managed": row["managed"]}
+                           for row, tab, _index in ours]
+    if dry:
+        # a preview: same resolution, same refusals, no Target.closeTarget —
+        # and a different KEY, so `closed` never means "would have closed"
+        reply = {"ok": True, "dry": True, "would_close": closing,
+                 "count": _tab_count(),
+                 "note": ("nothing was closed: --dry resolves and reports "
+                          "the set the same call would take")}
+        if all_tabs or excepts:
+            reply["all"] = True
+        if excepts:
+            reply["except"] = list(excepts)
+        if likes:
+            reply["like"] = likes
+        if filter_used:
+            reply["filter"] = {**filter_used, "exact": True}
+        if skipped:
+            reply["skipped"] = skipped
+        return reply
     by_profile: dict[str, list[str]] = {}
     for row, tab, _index in ours:
         by_profile.setdefault(str(row["profile"]), []).append(str(tab["id"]))
@@ -1286,12 +1370,7 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
         fail("close-tab-not-verified",
              f"{len(survivors)} of {len(ours)} tabs are still open: "
              + ", ".join(str(i)[:10] for i in survivors[:4]))
-    reply = {"ok": True,
-             "closed": [{"id": tab["id"], "title": tab["title"],
-                         "url": tab["url"], "pid": row["pid"],
-                         "managed": row["managed"]}
-                        for row, tab, _index in ours],
-             "count": _tab_count()}
+    reply = {"ok": True, "closed": closing, "count": _tab_count()}
     if all_tabs or excepts:
         reply["all"] = True
     if excepts:

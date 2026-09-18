@@ -24,9 +24,11 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from browser_control.cli import main as cli_main  # noqa: E402  # pyright: ignore[reportMissingImports]
-from browser_control.lib import audit, browser, cdp, dom  # noqa: E402  # pyright: ignore[reportMissingImports]
-from browser_control.lib.errors import ControlError  # noqa: E402  # pyright: ignore[reportMissingImports]
+# The sibling modules are not resolvable before the path insert above; the
+# project-level pyright run resolves them, so only `E402` is suppressed here.
+from browser_control.cli import main as cli_main  # noqa: E402
+from browser_control.lib import audit, browser, cdp, dom  # noqa: E402
+from browser_control.lib.errors import ControlError  # noqa: E402
 
 # A hermetic run must not append to the user's REAL action log — it makes
 # hundreds of invocations. Turning the log OFF was worse than it looked: it
@@ -403,9 +405,10 @@ def t_cli_tab_grammar() -> None:
                         url: str | None = None,
                         all_tabs: bool = False,
                         excepts: list[str] | None = None,
-                        like: list[str] | None = None) -> dict:
+                        like: list[str] | None = None,
+                        dry: bool = False) -> dict:
         calls.append(("tab close", tuple(specs), browser, title, url,
-                      all_tabs, tuple(excepts or ()), tuple(like or ())))
+                      all_tabs, tuple(excepts or ()), tuple(like or ()), dry))
         return {"ok": True, "closed": []}
 
     originals = (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
@@ -428,7 +431,7 @@ def t_cli_tab_grammar() -> None:
             ("tab list", "chrome"),
             ("tab info", "id:ABC", ""),
             ("tab info", "a.example", "chromium"),
-            ("tab close", ("a", "b"), "", None, None, False, (), ()),
+            ("tab close", ("a", "b"), "", None, None, False, (), (), False),
         ], calls
     finally:
         (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
@@ -872,9 +875,10 @@ def t_cli_close_bulk() -> None:
                    title: str | None = None, url: str | None = None,
                    all_tabs: bool = False,
                    excepts: list[str] | None = None,
-                   like: list[str] | None = None) -> dict:
+                   like: list[str] | None = None,
+                   dry: bool = False) -> dict:
         calls.append((tuple(specs), browser, title, url, all_tabs,
-                      tuple(excepts or ()), tuple(like or ())))
+                      tuple(excepts or ()), tuple(like or ()), dry))
         return {"ok": True}
 
     original = cli_main.close_tabs
@@ -887,6 +891,8 @@ def t_cli_close_bulk() -> None:
                      ["tab", "close", "http://a/"],
                      ["tab", "close", "--like", "x.com"],
                      ["tab", "close", "--like=a", "--like=b"],
+                     ["tab", "close", "--all", "--dry"],
+                     ["tab", "close", "dry", "--dry"],
                      ["tab", "close", "--all"],
                      ["tab", "close", "--all", "--except", "x.com"],
                      ["tab", "close", "--all", "--except=x.com"],
@@ -894,20 +900,39 @@ def t_cli_close_bulk() -> None:
             rc, _out, err = run_cli(argv)
             assert rc == 0, (argv, rc, err)
         assert calls == [
-            ((), "", "a", None, False, (), ()),
-            ((), "", None, "http://a/", False, (), ()),
-            ((), "chrome", "a", None, False, (), ()),
-            (("id:AB", "id:CD"), "", None, None, False, (), ()),
-            (("http://a/",), "", None, None, False, (), ()),
-            ((), "", None, None, False, (), ("x.com",)),
-            ((), "", None, None, False, (), ("a", "b")),
-            ((), "", None, None, True, (), ()),
-            ((), "", None, None, True, ("x.com",), ()),
-            ((), "", None, None, True, ("x.com",), ()),
-            ((), "", None, None, False, ("a", "b"), ()),
+            ((), "", "a", None, False, (), (), False),
+            ((), "", None, "http://a/", False, (), (), False),
+            ((), "chrome", "a", None, False, (), (), False),
+            (("id:AB", "id:CD"), "", None, None, False, (), (), False),
+            (("http://a/",), "", None, None, False, (), (), False),
+            ((), "", None, None, False, (), ("x.com",), False),
+            ((), "", None, None, False, (), ("a", "b"), False),
+            ((), "", None, None, True, (), (), True),
+            (("dry",), "", None, None, False, (), (), True),
+            ((), "", None, None, True, (), (), False),
+            ((), "", None, None, True, ("x.com",), (), False),
+            ((), "", None, None, True, ("x.com",), (), False),
+            ((), "", None, None, False, ("a", "b"), (), False),
         ], calls
     finally:
         cli_main.close_tabs = original                 # type: ignore[assignment]
+    # `close` reaches the service with --force, and refuses anything else
+    stops: list[tuple] = []
+
+    def fake_stop(browser: str = "", force: bool = False) -> dict:
+        stops.append((browser, force))
+        return {"ok": True}
+
+    original_stop = cli_main.stop
+    cli_main.stop = fake_stop                         # type: ignore[assignment]
+    try:
+        for argv in (["close"], ["close", "--force"],
+                     ["close", "--browser=x", "--force"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert stops == [("", False), ("", True), ("x", True)], stops
+    finally:
+        cli_main.stop = original_stop                  # type: ignore[assignment]
     # a repeatable flag with no value is refused in argv
     for flag in ("--except", "--like", "--title"):
         rc, _out, err = run_cli(["tab", "close", flag])
@@ -934,6 +959,7 @@ def t_cli_close_bulk() -> None:
     refusal(lambda: browser.close_tabs([], like=["x"], excepts=["y"]),
             "bad-args")
     refusal(lambda: browser.close_tabs([], excepts=["a", ""]), "bad-args")
+    refusal(lambda: browser.close_tabs([], dry=True), "bad-args")
     # a SPEC NAMES a tab: `browser._exact_spec_match` is the whole rule, and
     # it is pure — the regression that made this necessary was `tab close a`
     # closing a tab whose title merely CONTAINED an `a`

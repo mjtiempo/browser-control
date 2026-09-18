@@ -954,6 +954,37 @@ def c_tab_close_bulk() -> str:
     return "a SPEC names exactly (`a` spared `/aaa`); `--like` sweeps"
 
 
+def c_tab_close_dry() -> str:
+    """`--dry` resolves exactly what would close, and closes nothing."""
+    base = base_url()
+    ok_json("tab", "nav", f"{base}/dry-keep")
+    twins = [str(ok_json("tab", f"{base}/dry")["id"]) for _ in range(2)]
+    before = {t["id"] for t in pages(STATE["port"])}
+    reply = ok_json("tab", "close", "dry", "--dry")
+    assert reply["dry"] is True and "closed" not in reply, reply
+    assert {str(row["id"]) for row in reply["would_close"]} == set(twins), reply
+    assert {t["id"] for t in pages(STATE["port"])} == before, \
+        "--dry closed something"
+    # the same arguments, for real, close exactly that set
+    real = ok_json("tab", "close", "dry")
+    assert {str(row["id"]) for row in real["closed"]} == set(twins), real
+    # a dry run REFUSES like the real call: a typo shows up before it acts
+    err = refuses("no-page-tab", "tab", "close", "no-such-tab", "--dry")
+    assert "--like" in err, err
+    empty = ok_json("tab", "close", "--all", "--except", "dry-keep",
+                    "--dry")
+    assert empty["dry"] is True and empty["would_close"] == [], empty
+    extra = str(ok_json("tab", f"{base}/dry-extra")["id"])
+    preview = ok_json("tab", "close", "--all", "--except", "dry-keep",
+                      "--dry")
+    assert [row["id"] for row in preview["would_close"]] == [extra], preview
+    assert extra in {t["id"] for t in pages(STATE["port"])}, \
+        "--dry closed the tab it only reported"
+    ok_json("tab", "close", f"id:{extra[:8]}")
+    ok_json("tab", "nav", f"{base}/dom")
+    return "`--dry` reported the set — and a typo — without closing anything"
+
+
 def c_tab_close_all_except() -> str:
     """`--all` closes every page tab this CLI drives; `--except` keeps one."""
     base = base_url()
@@ -1022,8 +1053,18 @@ def c_open_adopts_the_running_browser() -> str:
 
 def c_close_stops_the_browser() -> str:
     pid, port = STATE["pid"], STATE["port"]
-    reply = ok_json("close")
+    tabs = len(pages(port))
+    # with tabs open it REFUSES first: stopping the browser closes them, so
+    # the caller has to say so (and the refusal names the count)
+    err = refuses("tabs-open", "close")
+    assert str(tabs) in err, err
+    assert Path(f"/proc/{pid}").exists(), "a refusal must not have stopped it"
+    reply = ok_json("close", "--force")
     assert reply["stopped"] is True and reply["pid"] == pid, reply
+    assert reply["forced"] is True and reply["tabs"] == tabs, reply
+    decoy = int(STATE.get("decoy") or 0)
+    assert decoy and Path(f"/proc/{decoy}").exists(), \
+        "a stale pid file pointed the stop at the decoy process"
     assert not Path(f"/proc/{pid}").exists(), f"pid {pid} is still in /proc"
     deadline = time.time() + 10
     while time.time() < deadline and listening(port):
@@ -1039,7 +1080,42 @@ def c_close_stops_the_browser() -> str:
     assert all(g["pid"] != pid for g in data["browsers"]), data
     info = ok_json("info")
     assert info["running"] is False, info
-    return f"pid {pid} gone, port {port} closed, tab info refuses ({err.split(']')[0]}])"
+    return (f"tabs-open refused, then --force stopped pid {pid} "
+            f"({err.split(']')[0]}])")
+
+
+def c_close_ignores_a_recycled_pid() -> str:
+    """A stale pid file must not aim SIGTERM at an unrelated process.
+
+    The decoy is left RUNNING and the bogus record is left IN PLACE: the close
+    that follows has to find the profile's own process by itself, and the decoy
+    has to survive it (that check asserts both).
+
+    The library calls need BROWSER_CONTROL_ROOT in THIS process — every CLI
+    call gets it from `env()`, while an in-process call would otherwise look at
+    the default root and find no browser at all (measured: that is what made
+    the first version of this check vacuous, together with writing a pid file
+    name the code never reads).
+    """
+    saved = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = ROOT
+    try:
+        profile = str(browser_lib.managed_profile())
+        real = int(browser_lib._pid_of(profile))                   # noqa: SLF001
+        assert real == STATE["pid"], (real, STATE["pid"])
+        decoy = subprocess.Popen(["sleep", "120"], start_new_session=True)
+        STATE["decoy"] = decoy.pid
+        Path(browser_lib._pid_file(profile)).write_text(           # noqa: SLF001
+            str(decoy.pid), encoding="utf-8")
+        found = int(browser_lib._pid_of(profile))                  # noqa: SLF001
+        assert found == real and found != decoy.pid, (found, real, decoy.pid)
+        assert decoy.poll() is None, "the decoy died just for being recorded"
+    finally:
+        if saved is None:
+            os.environ.pop("BROWSER_CONTROL_ROOT", None)
+        else:
+            os.environ["BROWSER_CONTROL_ROOT"] = saved
+    return f"a recorded pid {decoy.pid} was ignored in favour of {real}"
 
 
 def c_close_is_idempotent() -> str:
@@ -1277,6 +1353,7 @@ CHECKS = (
     ("tab close by id prefix", c_close_tab_by_id_prefix),
     ("tab close names a tab exactly", c_close_tab_by_substring),
     ("tab close SPEC/--like/--title/--url", c_tab_close_bulk),
+    ("tab close --dry previews the same set", c_tab_close_dry),
     ("tab close --all / --except", c_tab_close_all_except),
     ("a page verb refuses ambiguity; a bulk close takes the set",
      c_ambiguous_spec_refuses),
@@ -1310,6 +1387,7 @@ CHECKS = (
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),
     ("open adopts a running browser", c_open_adopts_the_running_browser),
+    ("close ignores a recycled pid", c_close_ignores_a_recycled_pid),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),
     ("a browser outside CDP is listed, not driven",
@@ -1353,8 +1431,11 @@ def cleanup() -> None:
     directory behind.
     """
     try:
+        if STATE.get("decoy"):
+            with contextlib.suppress(OSError):
+                os.kill(int(STATE["decoy"]), signal.SIGTERM)
         if STATE.get("port") and listening(int(STATE["port"])):
-            run("close", timeout=60)
+            run("close", "--force", timeout=60)
         deadline = time.time() + 10
         while True:
             left = procs_on(ROOT)

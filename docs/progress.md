@@ -32,7 +32,7 @@ the other verbs own the browser.
 | Verb | Does | Verified by (the read-back) |
 | --- | --- | --- |
 | `open [URL...]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs | the endpoint must **answer**, then every opened tab must be in the tab list |
-| `close` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs |
+| `close [--force]` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs, never signals a pid whose own cmdline does not name that profile, and refuses `tabs-open` while page tabs are open unless `--force` |
 | `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, and whether CDP answers (+ its tab count) | one `/proc` pass, plus a CDP probe on the port each one names |
 | `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
 | `attach --port N \| --pid N \| --profile DIR` | makes a running browser this CLI did not start writable (a `tab` write target) | the profile comes from a live Chromium-family process of this machine that ANSWERS on its endpoint, never from the caller |
@@ -41,7 +41,7 @@ the other verbs own the browser.
 | `tab [URL...]` | one tab per URL (`about:blank` when none), every id named | each id from `Target.createTarget`, re-read from the tab list |
 | `tab list [--browser NAME]` | the page tabs of every **drivable** browser, grouped and sorted by browser | the same tab list the verbs use, read per browser |
 | `tab info SPEC` | one tab: which browser owns it, its `{id,title,url,index}` now | the spec resolves to exactly one tab or refuses |
-| `tab close SPEC...` / `--like V` / `--title V` / `--url V` / `--all` / `--except SPEC...` | closes the WHOLE set each selector names: a SPEC **names** a tab (its whole URL, its whole title, or `id:<prefix>`), `--like` sweeps substrings, `--all` is every page tab this CLI drives, `--except` keeps the tabs it names (implies `--all`) | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors; a match in a browser this CLI does not drive is reported in `skipped`, never closed; a selector or an `--except` matching nothing refuses, so a typo cannot close the tab it meant to keep |
+| `tab close SPEC...` / `--like V` / `--title V` / `--url V` / `--all` / `--except SPEC...` / `--dry` | closes the WHOLE set each selector names (`--dry` reports it as `would_close` and closes nothing): a SPEC **names** a tab (its whole URL, its whole title, or `id:<prefix>`), `--like` sweeps substrings, `--all` is every page tab this CLI drives, `--except` keeps the tabs it names (implies `--all`) | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors; a match in a browser this CLI does not drive is reported in `skipped`, never closed; a selector or an `--except` matching nothing refuses, so a typo cannot close the tab it meant to keep |
 | `tab nav URL [--tab SPEC]` | navigates one tab | the address **as observed** (`url_read`) + `moved` + `loaded`; `chrome-error://` → `nav-failed`; a tab that never left a page it was not on → `nav-not-verified`; a redirect is a success |
 | `tab back` / `tab forward` | moves the tab's history | the address actually changed (`nav-not-verified` when it did not) |
 | `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
@@ -170,13 +170,12 @@ multi-browser test (two live instances refuse), no CI.
     open shadow roots only (measured and tested); iframe content needs its own
     target scoping, which nothing needs yet.
 11. **`close` cannot tell whose managed browser it is** — one managed instance
-    per profile means it stops the browser whatever invocation started it, and
-    a browser started by hand (or by another agent) looks exactly like one a
-    test left behind. This bit hard during development: a managed browser with
-    a real session was closed as if it were a leftover, which the HISTORY of
-    its own profile then disproved. Before closing, read `tab list`. A
-    guard — refuse while the managed browser has tabs, unless `--force` — is a
-    candidate, and so is printing the tab count in `close`'s reply.
+    per profile means it stops the browser whatever invocation started it. This
+    bit hard during development: a managed browser with a real session was
+    closed as if it were a leftover. MITIGATED since (§5.15): it now refuses
+    while page tabs are open unless `--force`, and only ever signals a pid whose
+    own cmdline names that profile. The inherent part stays: before `close`,
+    read `tab list`.
 
 (Fixed since it was listed here: the default action-log directory was never
 created, so the fail-open log silently dropped every write. `write` now makes
@@ -188,7 +187,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12, 5.13 and 5.14 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12, 5.13, 5.14 and 5.15 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -482,6 +481,42 @@ exception), and `_exact_spec_match` itself — including the assertion that
 substring sweep by request, `a` sparing `/aaa`, exact `--title` sparing
 `twinx`, two specs in one call, a refusal that suggests `--like`, `--all
 --except`, and `--except` alone.
+
+### 5.15 A dry run, and a `close` that cannot take tabs by surprise — done
+
+Two things built together, because the first makes the second inspectable.
+
+**`tab close ... --dry`** resolves exactly as it would — same selectors, same
+refusals — and returns the set instead of closing it: `dry: true`, the rows
+under `would_close` (never `closed`, so a preview cannot be mistaken for an
+action), and `note`. Both accidents that prompts this (`tab close a` matching a
+title; `tab close id:` matching everything) would have been visible in one line
+before anything was taken.
+
+**`close` grew three guards, each because something went wrong without it:**
+
+* **`tabs-open` unless `--force`.** Stopping a browser closes its tabs with it,
+  and Chromium exits with its last window, so `close` refuses while page tabs
+  are open, naming the count, and the reply carries `tabs` and `forced`. An
+  endpoint that no longer answers cannot be asked, so nothing is claimed about
+  its tabs (`tabs: null`).
+* **The recorded pid is a hint, not an order.** `_pid_of` now requires the
+  process's own cmdline to carry `--user-data-dir=<profile>` before that pid is
+  signalled; otherwise the process is re-found by the same marker, or the stop
+  refuses exactly as it did before (“refusing to signal a process this CLI did
+  not start”). Measured in the battery with a decoy process recorded as the
+  browser: the decoy stays alive, the real browser is stopped.
+* **Ambiguity messages name pid and profile PATH**, not just the basename — two
+  browsers can share an executable name, and `(google-chrome-stable,
+  google-chrome-stable)` is a message nobody can act on.
+
+Hermetic 31 (the `--dry` flag, `close --force`, and one more pure refusal:
+`--dry` with nothing named); live 47 → 49 (`--dry` previews the same set and
+refuses the same typos; a recycled pid is ignored). Two mistakes of my own on
+the way are worth recording: the first recycled-pid check wrote a pid-file name
+the code never reads, and called the library in-process where
+`BROWSER_CONTROL_ROOT` is unset — so it passed while testing nothing. It now
+uses `_pid_file()` and sets the root for the duration of those calls.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,

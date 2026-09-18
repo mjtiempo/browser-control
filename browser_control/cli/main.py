@@ -17,9 +17,9 @@ from collections.abc import Callable
 # The project-level pyright run resolves these imports; the line-level ignores
 # are for pi-lens's fallback index, which does not see the sibling modules.
 from browser_control import __version__
+from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
 from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
-from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
 from browser_control.lib import dom  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     activate,
@@ -46,7 +46,8 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
 USAGE = """usage: browser-control-cli VERB [ARGS]
 
   open [URL...]      start (or adopt) the managed browser; each URL opens
-  close              stop the managed browser this CLI started
+  close [--force]    stop the managed browser this CLI started; --force even
+                     when it holds tabs (they close with it)
   list               every Chromium-family browser running here, ours or not
   info               the browser this CLI would drive, and its endpoint
   attach [--port N|--pid N|--profile DIR]
@@ -60,7 +61,8 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab close SPEC... | --like V | --title V | --url V | --all [--except S...]
                      close every tab named, verified as a set; a SPEC names a
                      tab EXACTLY (whole URL or title, or id:<prefix>), --like
-                     sweeps substrings, --all is everything, --except keeps
+                     sweeps substrings, --all is everything, --except keeps;
+                     --dry instead reports `would_close` and closes NOTHING
   tab nav URL [--tab SPEC]       navigate, then read the address back
   tab back|forward [--tab SPEC]  history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
@@ -227,8 +229,14 @@ def cmd_open(rest: list[str], browser: str) -> dict:
 
 
 def cmd_close(rest: list[str], browser: str) -> dict:
+    """`close [--force]` — stop the managed browser, verified.
+
+    A browser with page tabs refuses `tabs-open` unless `--force`: stopping it
+    closes those tabs with it, and the caller should have to say so.
+    """
+    rest, force = _switch(rest, "--force")
     _none(rest, "close")
-    return stop(browser=browser)
+    return stop(browser=browser, force=force)
 
 
 def cmd_list(rest: list[str], browser: str) -> dict:
@@ -391,13 +399,14 @@ def cmd_tab_close(rest: list[str], browser: str) -> dict:
     rest, title = _pop(rest, "--title", "tab close")
     rest, url = _pop(rest, "--url", "tab close")
     rest, every = _switch(rest, "--all")
+    rest, dry = _switch(rest, "--dry")
     rest, excepts = _pop_all(rest, "--except", "tab close")
     rest, likes = _pop_all(rest, "--like", "tab close")
     for arg in rest:
         if str(arg).startswith("-"):
             fail("bad-args", f"tab close: unknown flag {arg!r}")
     return close_tabs(rest, browser=browser, title=title, url=url,
-                      all_tabs=every, excepts=excepts, like=likes)
+                      all_tabs=every, excepts=excepts, like=likes, dry=dry)
 
 
 def cmd_tab_nav(rest: list[str], browser: str) -> dict:
