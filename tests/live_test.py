@@ -68,9 +68,14 @@ def check(name: str, fn) -> None:                              # noqa: ANN001
 
 
 def run(*argv: str, timeout: int = TIMEOUT_S) -> tuple[int, str, str]:
-    """One CLI call on the throwaway root: (returncode, stdout, stderr)."""
-    proc = subprocess.run([sys.executable, CLI, *argv], capture_output=True,
-                          text=True, timeout=timeout, env=ENV)
+    """One CLI call on the throwaway root: (returncode, stdout, stderr).
+
+    The command is executed AS a command, so its own shebang picks the
+    interpreter — a checkout script and an installed console script in some
+    other venv both work.
+    """
+    proc = subprocess.run([CLI, *argv], capture_output=True, text=True,
+                          timeout=timeout, env=ENV)
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
@@ -316,6 +321,8 @@ def prereq() -> str:
     """
     if not Path(CLI).exists() and not shutil.which(CLI):
         return f"no command to test at {CLI}"
+    if Path(CLI).exists() and not os.access(CLI, os.X_OK):
+        return f"{CLI} is not executable"
     rc, out, err = run("selftest", timeout=30)
     if rc != 0:
         return f"`selftest` refused (rc={rc}): {err or out}"
@@ -330,18 +337,39 @@ def prereq() -> str:
 
 
 def cleanup() -> None:
-    """Close what we opened, kill what we started, remove what we made."""
+    """Close what we opened, kill what we started (and wait for it to go),
+    then remove the temp root.
+
+    The wait matters: a browser that has just been SIGTERMed still writes to
+    its profile for a moment, and removing the tree under it leaves an empty
+    directory behind.
+    """
     try:
         if STATE.get("port") and listening(int(STATE["port"])):
             run("close", timeout=60)
-        for pid in procs_on(ROOT):          # ours by construction: the root
-            with contextlib.suppress(OSError):
-                os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 10
+        while True:
+            left = procs_on(ROOT)
+            if not left or time.time() >= deadline:
+                break
+            for pid in left:            # ours by construction: the root
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
+            time.sleep(0.2)
+        left = procs_on(ROOT)
+        if left:
+            print(f"      (cleanup: {left} still running on {ROOT})")
     finally:
         if SERVER is not None:
             SERVER.shutdown()
             SERVER.server_close()
-        shutil.rmtree(ROOT, ignore_errors=True)
+        for _ in range(3):
+            shutil.rmtree(ROOT, ignore_errors=True)
+            if not Path(ROOT).exists():
+                break
+            time.sleep(0.3)
+        if Path(ROOT).exists():
+            print(f"      (cleanup: {ROOT} survived removal)")
 
 
 def main() -> int:
