@@ -1,7 +1,7 @@
 # browser-control — progress
 
-Status: **slice 1 delivered, packaged, and live-verified.** Repo `main`,
-worktree clean, 10/10 hermetic checks passing.
+Status: **slice 1 delivered, packaged, and covered by a committed battery.**
+Repo `main`, worktree clean, 11 hermetic + 12 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,11 +15,12 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 138 | `HANDLERS` table, `--browser`, JSON out / `ERR[code]` exit 2 |
+| `browser_control/cli/main.py` | 180 | `HANDLERS` table, `--browser`, `selftest`, JSON out / `ERR[code]` exit 2 |
 | `browser_control/lib/browser.py` | 462 | managed profile, resolve, launch, verified stop, tab ops |
 | `browser_control/lib/cdp.py` | 189 | endpoint (`DevToolsActivePort`), capped JSON GET, one websocket call |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 246 | 10 hermetic checks, no browser needed |
+| `tests/test_unit.py` | 269 | 11 hermetic checks, no browser needed |
+| `tests/live_test.py` | 373 | 12 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -30,6 +31,7 @@ Five verbs, browser-only:
 | `tabs` | page tabs, id-sorted | `/json` shape-checked |
 | `new-tab [URL]` | one tab, named `id:<target id>` | the id is re-read from the tab list |
 | `close-tab SPEC` | one tab: `id:<prefix>` or a title/url substring | the id must be **absent** afterwards, else `close-tab-not-verified` |
+| `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
 Contract: one JSON object on stdout; `ERR[code]: message` on stderr; exit 2 on
 a refusal. `--browser NAME` selects the Chromium; otherwise the first on PATH,
@@ -66,8 +68,16 @@ refusing `cdp-unreachable`.
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
-**Not proven yet**: no committed live battery (the run above was by hand), no
-concurrent-`open` test, no multi-browser test, no CI.
+**Live battery** — `python3 tests/live_test.py` → **12 passed, 0 failed, 0
+skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
+independent state back — a raw socket connect, a direct `/json` GET, `/proc`
+for the pid — for open, the tab list, new-tab, both `close-tab` spec forms,
+an ambiguous spec, five refusals, adoption of the running browser, the
+verified close, the idempotent close, and "nothing left running". With the
+command missing it reports 12 skips and exits 2.
+
+**Not proven yet**: no concurrent-`open` test (there is no lock), no
+multi-browser test (two live instances refuse), no CI.
 
 ## 3. Deviations from the plan
 
@@ -92,8 +102,7 @@ concurrent-`open` test, no multi-browser test, no CI.
    live instances refuse instead of being addressable.
 5. **Not published** — the wheel builds and installs locally, but there is no
    README, no declared license, and no index to publish to.
-6. **Live checks are not committed** — the battery that produced §2 lives in
-   shell history, not in `tests/`.
+6. **No CI** — both suites run by hand; nothing runs them on a push.
 7. **No human output** — every verb prints JSON; there is no `--json` switch
    because there is no alternative format yet.
 8. **`stop` refuses when the pid cannot be identified** — honest, but it means
@@ -101,23 +110,24 @@ concurrent-`open` test, no multi-browser test, no CI.
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least": 5.1–5.3 are infrastructure the
-other steps then lean on. **Packaging itself has landed** (§1, §2); what is
-left of that step is 5.1.
+Ordered by "unblocks the most with the least". **5.1 and 5.2 have landed**
+(§1, §2) — the next actionable step is 5.3 (seeding) or 5.4 (`nav`), and
+every later verb is expected to add its check to `tests/live_test.py`.
 
-### 5.1 `selftest` verb (small)
-A `selftest` verb — interpreter, `websockets` version, verb table — so an
-installed command can prove itself without a browser; it is what the plan's
-packaging step promised beside the install. *Done when* an installed command
-answers `selftest`, and it fails loudly when `websockets` is missing.
-Runtime here is Python 3.14.7; the floor stays 3.11 because nothing uses newer
-syntax.
+### 5.1 `selftest` verb — done
+Landed as `browser-control-cli selftest`: interpreter, `python_version`,
+`websockets`, `profile_root`, the verb table and the browsers it can find on
+PATH — and it refuses `ERR[no-websockets]` when the dependency is missing,
+the one thing that makes an install unusable. Covered hermetically (that
+refusal included) and by the battery's first check.
 
-### 5.2 The live battery, committed
-`tests/live_test.py`: the §2 sequence, each check with a skip-if-prereq
-(skip ≠ pass), a temp `BROWSER_CONTROL_ROOT`, and mandatory cleanup (close
-what you opened, kill what you started). *Done when* it exits 0 on a machine
-with a browser and 2 on skips, and every later verb adds its check here.
+### 5.2 The live battery — done
+`tests/live_test.py` (373 lines, 12 checks): a temp `BROWSER_CONTROL_ROOT`, a
+local page server so tabs have distinct URLs without the network, a
+skip-if-prereq that exits 2, and mandatory cleanup — close what you opened,
+kill what you started, remove the temp root (the skip path leaked one until
+it was fixed). Every check reads independent state (raw socket, direct
+`/json`, `/proc`) instead of trusting the reply.
 
 ### 5.3 Profile seeding — `profile-sync`
 Reflink-first copy of the user's own profile, atomic swap, Chrome singleton
@@ -195,6 +205,8 @@ Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
 python3 tests/test_unit.py            # hermetic, no browser
+python3 tests/live_test.py            # 12 live checks, needs a browser
+browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com
 browser-control-cli tabs
 browser-control-cli new-tab https://example.net
@@ -203,4 +215,5 @@ browser-control-cli close
 ```
 
 Set `BROWSER_CONTROL_ROOT` to keep a session's profiles out of
-`~/.local/share/browser-control/cdp-profiles` (the tests do).
+`~/.local/share/browser-control/cdp-profiles` (the tests do), and
+`BROWSER_CONTROL_CLI` to point the battery at an installed command.

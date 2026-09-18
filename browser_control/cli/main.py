@@ -8,11 +8,16 @@ caller-producible input can produce a traceback.
 from __future__ import annotations
 
 import json
+import platform
+import shutil
 import sys
 from collections.abc import Callable
 
-# The project-level pyright run resolves these imports; the line-level ignore
-# is for pi-lens's fallback index, which does not see the sibling modules.
+# The project-level pyright run resolves these imports; the line-level ignores
+# are for pi-lens's fallback index, which does not see the sibling modules.
+from browser_control import __version__
+from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
+from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     close_tab,
     launch,
@@ -32,6 +37,7 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tabs              list the browser's page tabs
   new-tab [URL]     open a tab (about:blank when no URL)
   close-tab SPEC    close ONE tab: `id:<prefix>` or a title/url substring
+  selftest          prove the install: interpreter, websockets, verbs
 
 flags: --browser NAME   the installed Chromium-family browser to drive
                         (default: the first on PATH; a live managed browser wins)
@@ -81,6 +87,41 @@ def cmd_close_tab(rest: list[str], browser: str) -> dict:
     return close_tab(_one(rest, "close-tab", required=True), browser=browser)
 
 
+def cmd_selftest(rest: list[str], browser: str) -> dict:
+    """Prove the install without a browser: interpreter, dependency, verbs.
+
+    The one thing that FAILS here is a missing `websockets`: without it no
+    verb can speak CDP, and an install that cannot reach a browser should say
+    so at once rather than at the first `tabs`. A machine with no browser is
+    reported, not failed — the command is installed either way.
+    """
+    _none(rest, "selftest")
+    if cdp.websockets is None:
+        fail("no-websockets",
+             "the `websockets` package is required to speak CDP "
+             "(pip install websockets)")
+    found = []
+    for name in browser_lib.BROWSER_BINS:
+        path = shutil.which(name)
+        if path:
+            found.append({"name": name, "path": path})
+    reply = {"ok": True, "command": "browser-control-cli",
+             "version": __version__,
+             "python": sys.executable,
+             "python_version": platform.python_version(),
+             "websockets": getattr(cdp.websockets, "__version__", "unknown"),
+             "profile_root": browser_lib.root(),
+             "verbs": sorted(HANDLERS),
+             "browsers": found}
+    if browser:
+        reply["requested"] = {"name": browser,
+                              "path": shutil.which(browser) or ""}
+    if not found:
+        reply["warning"] = ("no Chromium-family browser on PATH — `open` "
+                            "will refuse until one is installed")
+    return reply
+
+
 Handler = Callable[[list[str], str], dict]
 
 HANDLERS: dict[str, Handler] = {
@@ -89,6 +130,7 @@ HANDLERS: dict[str, Handler] = {
     "tabs": cmd_tabs,
     "new-tab": cmd_new_tab,
     "close-tab": cmd_close_tab,
+    "selftest": cmd_selftest,
 }
 
 

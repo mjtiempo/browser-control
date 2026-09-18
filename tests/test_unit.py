@@ -219,6 +219,28 @@ def t_cli_argv_is_strict() -> None:
     assert rc == 0 and out.startswith("usage: browser-control-cli"), out
 
 
+def t_selftest() -> None:
+    rc, out, err = run_cli(["selftest"])
+    assert rc == 0, (rc, err)
+    data = json.loads(out)
+    assert data["ok"] is True and data["command"] == "browser-control-cli", data
+    for verb in ("open", "close", "tabs", "new-tab", "close-tab",
+                 "selftest"):
+        assert verb in data["verbs"], data["verbs"]
+    assert data["version"] and data["python"], data
+    # the one thing selftest must FAIL on: without websockets no verb can
+    # speak CDP, and an install that cannot reach a browser should say so at
+    # once rather than at the first `tabs`
+    original = cli_main.cdp.websockets
+    cli_main.cdp.websockets = None
+    try:
+        rc, _out, err = run_cli(["selftest"])
+        assert rc == 2, (rc, err)
+        assert "ERR[no-websockets]" in err, err
+    finally:
+        cli_main.cdp.websockets = original
+
+
 def t_pid_alive() -> None:
     assert browser._pid_alive(os.getpid()) is True                 # noqa: SLF001
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
@@ -235,6 +257,7 @@ def main() -> int:
         ("cli dispatches with flags stripped", t_cli_dispatch),
         ("cli prints the service reply", t_cli_prints_the_service_reply),
         ("cli argv is strict", t_cli_argv_is_strict),
+        ("selftest proves the install", t_selftest),
         ("pid liveness", t_pid_alive),
     ):
         check(name, fn)
