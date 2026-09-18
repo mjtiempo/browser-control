@@ -1075,16 +1075,47 @@ def _exact_matches(field: str, value: str,
     return ours, foreign
 
 
-def _spec_matches(specs: list[str], browser: str) -> tuple[
+def _exact_spec_match(tab: dict, spec: str) -> bool:
+    """Does this spec NAME that tab — exactly?
+
+    `id:<prefix>`, the whole URL (a trailing slash is not a different page,
+    the same rule `_same_page` uses), or the whole title, case-insensitively.
+    A SUBSTRING is not a name: `tab close a` closed a tab whose title merely
+    contained an `a` (measured, on a real browser), which is why the sweeping
+    form has to be asked for by name (`--like`).
+    """
+    needle = str(spec or "").strip()
+    if not needle:
+        return False
+    if needle.lower().startswith("id:"):
+        # `id:` with no prefix names NOTHING. `"".startswith("")` is True, so
+        # an unchecked empty prefix matched every tab — measured: `tab close
+        # id:` closed the last tab on the page, and Chromium took the window
+        # with it. `_match_spec` refuses it; this must not match it.
+        prefix = needle[3:].strip().lower()
+        return bool(prefix) and str(tab.get("id") or "").lower().startswith(
+            prefix)
+    low = needle.lower()
+    return (str(tab.get("url") or "").rstrip("/").lower()
+            == low.rstrip("/")
+            or str(tab.get("title") or "").strip().lower() == low)
+
+
+def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
         list[tuple[dict, dict, int]], list[dict]]:
     """Every tab a SPEC set names — the union, deduplicated.
 
-    `tab close "x.com"` closes EVERY tab whose title or URL contains it: a
-    page verb refuses that ambiguity (`tab info x.com`), because it must not
-    pick among tabs nobody named, but a bulk close is exactly where a set is
-    the point. A spec that matches nothing refuses instead of reading as
-    "nothing to do", and one that matches only foreign tabs refuses
-    `not-managed`, naming the browser to attach.
+    Two rules, and the difference matters for a verb that DESTROYS tabs:
+
+    * a SPEC NAMES a tab (`_exact_spec_match`): `tab close http://a` closes
+      every tab on `http://a/`, `tab close a` closes the tabs titled `a`, and
+      neither touches a tab that merely mentions them;
+    * `loose=True` (the `--like` flag) matches a SUBSTRING, which is a sweep —
+      every tab whose title or URL contains it — and exists because a caller
+      sometimes means exactly that, asked for out loud.
+
+    A spec that matches nothing refuses instead of reading as "nothing to do",
+    and one that matches only foreign tabs refuses `not-managed`.
 
     Closing the LAST page tab of a browser takes its window with it, and
     Chromium exits with its last window — so `--all` on the only tab stops the
@@ -1096,10 +1127,14 @@ def _spec_matches(specs: list[str], browser: str) -> tuple[
     foreign: list[dict] = []
     seen: set[str] = set()
     for spec in specs:
+        if not loose and not str(spec).strip():
+            fail("bad-args", "tab close: a TAB spec cannot be empty")
         hits = 0
         for row in rows:
             for index, tab in enumerate(_tabs_of(row)[0]):
-                if not _match_spec([tab], spec):
+                named = (bool(_match_spec([tab], spec)) if loose
+                         else _exact_spec_match(tab, spec))
+                if not named:
                     continue
                 hits += 1
                 if str(tab["id"]) in seen:
@@ -1112,8 +1147,15 @@ def _spec_matches(specs: list[str], browser: str) -> tuple[
         if not hits:
             have = ", ".join(f'{t["title"][:20] or t["url"][:20]}'
                              for r in rows for t in _tabs_of(r)[0][:2])
+            if loose:
+                fail("no-page-tab",
+                     f"no tab contains {spec!r} in its title or URL "
+                     f"(have: {have or 'none'})")
             fail("no-page-tab",
-                 f"no tab matches {spec!r} (have: {have or 'none'})")
+                 f"no tab is NAMED {spec!r}: a SPEC names a tab exactly — its "
+                 "whole URL, its whole title, or id:<prefix> — and for a "
+                 f"substring sweep use `tab close --like {spec!r}` "
+                 f"(have: {have or 'none'})")
         if not ours and foreign:
             fail("not-managed",
                  f"every tab matching {spec!r} is in a browser this CLI did "
@@ -1125,18 +1167,24 @@ def _spec_matches(specs: list[str], browser: str) -> tuple[
 
 def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
                url: str | None = None, all_tabs: bool = False,
-               excepts: list[str] | None = None) -> dict:
+               excepts: list[str] | None = None,
+               like: list[str] | None = None) -> dict:
     """`tab close`: close every tab the arguments name, and prove it.
 
-    Four ways to name tabs, one per call:
+    Five ways to name tabs, one per call:
 
-    * **SPECs** — `id:<prefix>` or a title/url substring; EVERY match closes
-      (`tab close "x.com"`), the union of the specs, deduplicated;
-    * **`--title VALUE` / `--url VALUE`** — an EXACT (case-insensitive) match;
+    * **SPECs** — `id:<prefix>`, the whole URL (a trailing slash is not a
+      different page) or the whole title, case-insensitively; every match
+      closes, so `tab close http://a/` takes all of them;
+    * **`--like VALUE`** — a SUBSTRING sweep over titles and URLs: the loose
+      form, which has to be asked for by name because `tab close a` used to
+      sweep up a tab whose title merely CONTAINED an `a` (measured);
+    * **`--title VALUE` / `--url VALUE`** — an exact match in one field;
     * **`--all`** — every page tab this CLI drives;
     * **`--except SPEC`** (which implies `--all`) — everything but the tabs
-      those specs name; several are allowed, and one that matches NOTHING
-      refuses, so a typo cannot silently close the tab it was meant to keep.
+      those specs name; the KEEP side matches loosely (erring toward keeping is
+      the safe direction), several are allowed, and one that matches NOTHING
+      refuses, so a typo cannot silently keep what should have gone.
 
     Everything to close resolves FIRST, so a bad argument, an unmatched
     exception or an ambiguous filter cannot leave a half-applied close. The
@@ -1145,37 +1193,54 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
     manages nor has attached are reported in `skipped`, never closed.
     """
     excepts = list(excepts or [])
-    named = bool(specs) or title is not None or url is not None
+    likes = list(like or [])
+    named = bool(specs) or title is not None or url is not None or bool(likes)
     for flag, value in (("--title", title), ("--url", url)):
         if value is not None and not str(value):
             fail("bad-args",
                  f"tab close: {flag} needs a value — an exact title or URL")
     if any(not str(spec) for spec in excepts):
         fail("bad-args", "tab close: --except needs a value — a TAB spec")
+    if any(not str(value) for value in likes):
+        fail("bad-args",
+             "tab close: --like needs a value — the substring to sweep for")
+    if any(not str(spec).strip() for spec in specs):
+        fail("bad-args", "tab close: a TAB spec cannot be empty")
+    if any(str(spec).strip().lower() in ("id:", "id: ")
+           for spec in specs):
+        fail("bad-args",
+             "tab close: `id:` needs a target id prefix — without one it "
+             "names every tab")
     if title is not None and url is not None:
         fail("bad-args",
              "tab close: name tabs by --title or by --url, not both")
     if specs and (title is not None or url is not None):
         fail("bad-args",
              "tab close: name tabs by SPEC or by --title/--url, not both")
+    if likes and (specs or title is not None or url is not None):
+        fail("bad-args",
+             "tab close: --like is a substring sweep, so it takes no SPEC, "
+             "--title or --url — name tabs one way per call")
     if all_tabs and named:
         fail("bad-args",
-             "tab close: --all takes no SPEC, --title or --url — it already "
-             "names every tab")
+             "tab close: --all takes no SPEC, --like, --title or --url — it "
+             "already names every tab")
     if excepts and named:
         fail("bad-args",
              "tab close: --except means EVERY tab but those, so it takes no "
-             "SPEC, --title or --url (add --all to say it explicitly)")
+             "SPEC, --like, --title or --url (add --all to say it explicitly)")
     if not named and not all_tabs and not excepts:
         fail("bad-args",
-             "tab close: name tabs with SPEC, --title VALUE, --url URL, or "
-             "--all [--except SPEC]")
+             "tab close: name tabs with SPEC, --like VALUE, --title VALUE, "
+             "--url URL, or --all [--except SPEC]")
     skipped: list[dict] = []
     filter_used: dict = {}
     if all_tabs or excepts:
         ours, foreign = _split(_closeable(browser))
         keepers: set[str] = set()
         for spec in excepts:
+            if not str(spec).strip():
+                fail("bad-args", "tab close: a --except spec cannot be empty")
             matched = [tab for _r, tab, _i in ours if _match_spec([tab], spec)]
             matched += [tab for tab in foreign if _match_spec([tab], spec)]
             if not matched and (ours or foreign):
@@ -1186,6 +1251,8 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
         ours = [(row, tab, index) for row, tab, index in ours
                 if str(tab["id"]) not in keepers]
         skipped = [tab for tab in foreign if str(tab["id"]) not in keepers]
+    elif likes:
+        ours, skipped = _spec_matches(likes, browser, loose=True)
     elif title is not None or url is not None:
         field = "title" if title is not None else "url"
         value = str(title if title is not None else url)
@@ -1229,6 +1296,8 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
         reply["all"] = True
     if excepts:
         reply["except"] = list(excepts)
+    if likes:
+        reply["like"] = likes
     if filter_used:
         reply["filter"] = {**filter_used, "exact": True}
     if skipped:

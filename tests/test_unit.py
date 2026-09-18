@@ -402,9 +402,10 @@ def t_cli_tab_grammar() -> None:
                         title: str | None = None,
                         url: str | None = None,
                         all_tabs: bool = False,
-                        excepts: list[str] | None = None) -> dict:
+                        excepts: list[str] | None = None,
+                        like: list[str] | None = None) -> dict:
         calls.append(("tab close", tuple(specs), browser, title, url,
-                      all_tabs, tuple(excepts or ())))
+                      all_tabs, tuple(excepts or ()), tuple(like or ())))
         return {"ok": True, "closed": []}
 
     originals = (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
@@ -427,7 +428,7 @@ def t_cli_tab_grammar() -> None:
             ("tab list", "chrome"),
             ("tab info", "id:ABC", ""),
             ("tab info", "a.example", "chromium"),
-            ("tab close", ("a", "b"), "", None, None, False, ()),
+            ("tab close", ("a", "b"), "", None, None, False, (), ()),
         ], calls
     finally:
         (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
@@ -864,15 +865,16 @@ def t_cli_click_scroll_grammar() -> None:
 
 
 def t_cli_close_bulk() -> None:
-    """`tab close --title/--url/--all/--except`: argv, and the pure refusals."""
+    """`tab close`: argv for every selector, and the pure refusals."""
     calls: list[tuple] = []
 
     def fake_close(specs: list[str], browser: str = "",
                    title: str | None = None, url: str | None = None,
                    all_tabs: bool = False,
-                   excepts: list[str] | None = None) -> dict:
+                   excepts: list[str] | None = None,
+                   like: list[str] | None = None) -> dict:
         calls.append((tuple(specs), browser, title, url, all_tabs,
-                      tuple(excepts or ())))
+                      tuple(excepts or ()), tuple(like or ())))
         return {"ok": True}
 
     original = cli_main.close_tabs
@@ -882,7 +884,9 @@ def t_cli_close_bulk() -> None:
                      ["tab", "close", "--url", "http://a/"],
                      ["tab", "close", "--title=a", "--browser", "chrome"],
                      ["tab", "close", "id:AB", "id:CD"],
-                     ["tab", "close", "x.com"],
+                     ["tab", "close", "http://a/"],
+                     ["tab", "close", "--like", "x.com"],
+                     ["tab", "close", "--like=a", "--like=b"],
                      ["tab", "close", "--all"],
                      ["tab", "close", "--all", "--except", "x.com"],
                      ["tab", "close", "--all", "--except=x.com"],
@@ -890,26 +894,30 @@ def t_cli_close_bulk() -> None:
             rc, _out, err = run_cli(argv)
             assert rc == 0, (argv, rc, err)
         assert calls == [
-            ((), "", "a", None, False, ()),
-            ((), "", None, "http://a/", False, ()),
-            ((), "chrome", "a", None, False, ()),
-            (("id:AB", "id:CD"), "", None, None, False, ()),
-            (("x.com",), "", None, None, False, ()),
-            ((), "", None, None, True, ()),
-            ((), "", None, None, True, ("x.com",)),
-            ((), "", None, None, True, ("x.com",)),
-            ((), "", None, None, False, ("a", "b")),
+            ((), "", "a", None, False, (), ()),
+            ((), "", None, "http://a/", False, (), ()),
+            ((), "chrome", "a", None, False, (), ()),
+            (("id:AB", "id:CD"), "", None, None, False, (), ()),
+            (("http://a/",), "", None, None, False, (), ()),
+            ((), "", None, None, False, (), ("x.com",)),
+            ((), "", None, None, False, (), ("a", "b")),
+            ((), "", None, None, True, (), ()),
+            ((), "", None, None, True, ("x.com",), ()),
+            ((), "", None, None, True, ("x.com",), ()),
+            ((), "", None, None, False, ("a", "b"), ()),
         ], calls
     finally:
         cli_main.close_tabs = original                 # type: ignore[assignment]
     # a repeatable flag with no value is refused in argv
-    rc, _out, err = run_cli(["tab", "close", "--except"])
-    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
-    rc, _out, err = run_cli(["tab", "close", "--title"])
-    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    for flag in ("--except", "--like", "--title"):
+        rc, _out, err = run_cli(["tab", "close", flag])
+        assert rc == 2 and "ERR[bad-args]" in err, (flag, rc, err)
     # and these are refused by the SERVICE, before any browser is touched:
     # one way to name tabs per call, never two, never none, never empty
     refusal(lambda: browser.close_tabs([]), "bad-args")
+    refusal(lambda: browser.close_tabs([""]), "bad-args")
+    refusal(lambda: browser.close_tabs(["  "]), "bad-args")
+    refusal(lambda: browser.close_tabs(["id:"]), "bad-args")
     refusal(lambda: browser.close_tabs([], title=""), "bad-args")
     refusal(lambda: browser.close_tabs([], url=""), "bad-args")
     refusal(lambda: browser.close_tabs([], title="a", url="b"), "bad-args")
@@ -919,8 +927,33 @@ def t_cli_close_bulk() -> None:
     refusal(lambda: browser.close_tabs([], all_tabs=True, title="a"),
             "bad-args")
     refusal(lambda: browser.close_tabs(["id:AB"], all_tabs=True), "bad-args")
-    refusal(lambda: browser.close_tabs(["id:AB"], all_tabs=True), "bad-args")
+    refusal(lambda: browser.close_tabs([], like=[""]), "bad-args")
+    refusal(lambda: browser.close_tabs(["id:AB"], like=["x"]), "bad-args")
+    refusal(lambda: browser.close_tabs([], like=["x"], all_tabs=True),
+            "bad-args")
+    refusal(lambda: browser.close_tabs([], like=["x"], excepts=["y"]),
+            "bad-args")
     refusal(lambda: browser.close_tabs([], excepts=["a", ""]), "bad-args")
+    # a SPEC NAMES a tab: `browser._exact_spec_match` is the whole rule, and
+    # it is pure — the regression that made this necessary was `tab close a`
+    # closing a tab whose title merely CONTAINED an `a`
+    match = browser._exact_spec_match                            # noqa: SLF001
+    a_tab = {"id": "AB12CD34", "url": "http://a/", "title": "a"}
+    assert match(a_tab, "a") is True                            # its title
+    assert match(a_tab, "http://a") is True                     # its URL
+    assert match(a_tab, "http://a/") is True                    # trailing slash
+    assert match(a_tab, "A") is True                            # case-insensitive
+    assert match(a_tab, "id:AB12") is True                      # id prefix
+    assert match(a_tab, "id:ab12") is True                      # prefix, case
+    assert match(a_tab, "") is False                            # empty names nothing
+    assert match(a_tab, "id:") is False      # an empty prefix names every
+    assert match(a_tab, "id:  ") is False    # ...tab, so it names none
+    x_tab = {"id": "FF00FF00", "url": "https://x.com/",
+             "title": "X. It\u2019s what\u2019s happening / X"}
+    assert match(x_tab, "a") is False       # the bug, in one assertion
+    assert match(x_tab, "x.com") is False   # not the whole URL or title
+    assert match(x_tab, "https://x.com") is True                # the whole URL
+    assert match(x_tab, "X. It\u2019s what\u2019s happening / X") is True
 
 
 def t_keys_and_verdicts() -> None:

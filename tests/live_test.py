@@ -482,7 +482,7 @@ def c_close_tab_by_substring() -> str:
     reply = ok_json("tab", "close", "three")
     assert [row["id"] for row in reply["closed"]] == [tid], reply
     assert tid not in {t["id"] for t in pages(STATE["port"])}, reply
-    return "a title/url substring resolves to exactly one tab"
+    return "a title NAMES the tab, and it closes"
 
 
 def c_nav_reads_the_address_back() -> str:
@@ -908,36 +908,50 @@ def c_tab_dialog() -> str:
 
 
 def c_tab_close_bulk() -> str:
-    """A selector names a SET: substrings close every match, exact filters stay exact."""
+    """A SPEC NAMES a tab; `--like` sweeps substrings; exact stays exact.
+
+    The `a` / `aaa` pair is the regression this check exists for: `tab close a`
+    closed a tab whose title merely CONTAINED an `a` (a real browser, a real
+    x.com tab), which is why a spec names a tab and a sweep must be asked for.
+    """
     base = base_url()
     ok_json("tab", "nav", f"{base}/keep")
+    # the whole title, and every tab that has it
     dups = [str(ok_json("tab", f"{base}/dup")["id"]) for _ in range(2)]
-    dupe = str(ok_json("tab", f"{base}/dupe")["id"])
-    # a SUBSTRING closes every tab it names — the point of `tab close "x.com"`
-    only = ok_json("tab", "close", "dupe")
-    assert [row["id"] for row in only["closed"]] == [dupe], only
     both = ok_json("tab", "close", "dup")
     assert {str(row["id"]) for row in both["closed"]} == set(dups), both
-    assert not set(dups) & {t["id"] for t in pages(STATE["port"])}, \
-        "the substring close left a duplicate behind"
-    # ...while `--title` is EXACT: `twinx` is not the tab called `twin`
+    # the whole URL, with or without the trailing slash Chromium adds
+    dupe = str(ok_json("tab", f"{base}/dupe")["id"])
+    by_spec = ok_json("tab", "close", f"{base}/dupe")
+    assert [row["id"] for row in by_spec["closed"]] == [dupe], by_spec
+    # THE REGRESSION: containing the needle is not being named by it
+    contains = str(ok_json("tab", f"{base}/aaa")["id"])
+    named_a = str(ok_json("tab", f"{base}/a")["id"])
+    named = ok_json("tab", "close", "a")
+    assert [row["id"] for row in named["closed"]] == [named_a], named
+    assert contains in {t["id"] for t in pages(STATE["port"])}, \
+        "a tab whose title merely CONTAINS the spec was closed"
+    # ...and the sweep is asked for by name, and reported as one
+    swept = ok_json("tab", "close", "--like", "aaa")
+    assert [row["id"] for row in swept["closed"]] == [contains], swept
+    assert swept["like"] == ["aaa"], swept
+    # exact in ONE field, and a near-miss title survives it
     twin = str(ok_json("tab", f"{base}/twin")["id"])
     twinx = str(ok_json("tab", f"{base}/twinx")["id"])
-    exact = ok_json("tab", "close", "--title", "twin")
-    assert [row["id"] for row in exact["closed"]] == [twin], exact
-    assert exact["filter"] == {"title": "twin", "exact": True}, exact
+    one_field = ok_json("tab", "close", "--title", "twin")
+    assert [row["id"] for row in one_field["closed"]] == [twin], one_field
+    assert one_field["filter"] == {"title": "twin", "exact": True}, one_field
     assert twinx in {t["id"] for t in pages(STATE["port"])}, \
         "an exact --title must not close a near-miss title"
     by_url = ok_json("tab", "close", "--url", f"{base}/twinx")
     assert [row["id"] for row in by_url["closed"]] == [twinx], by_url
-    assert by_url["filter"] == {"url": f"{base}/twinx", "exact": True}, by_url
-    # several specs in one call, verified together, and a typo still refuses
+    # several specs in one call, verified together, and the refusal TEACHES
     pair = [str(ok_json("tab", f"{base}/pair-{n}")["id"]) for n in (1, 2)]
     joined = ok_json("tab", "close", f"id:{pair[0][:8]}", f"id:{pair[1][:8]}")
     assert {row["id"] for row in joined["closed"]} == set(pair), joined
     err = refuses("no-page-tab", "tab", "close", "no-such-tab-anywhere")
-    assert "no-such-tab-anywhere" in err, err
-    return "a substring closed every match; `--title twin` left `twinx` alone"
+    assert "--like" in err, err
+    return "a SPEC names exactly (`a` spared `/aaa`); `--like` sweeps"
 
 
 def c_tab_close_all_except() -> str:
@@ -977,7 +991,7 @@ def c_ambiguous_spec_refuses() -> str:
     assert first in left and second in left, \
         "the refusal must not have touched anything"
     # ...while a bulk close is exactly where a SET is the point
-    reply = ok_json("tab", "close", "four")
+    reply = ok_json("tab", "close", "--like", "four")
     assert {row["id"] for row in reply["closed"]} == {first, second}, reply
     left = {t["id"] for t in pages(STATE["port"])}
     assert first not in left and second not in left, left
@@ -1261,9 +1275,11 @@ CHECKS = (
     ("tab with several URLs", c_new_tab_several),
     ("open with several URLs", c_open_several),
     ("tab close by id prefix", c_close_tab_by_id_prefix),
-    ("tab close by substring", c_close_tab_by_substring),
-    ("tab close --title/--url closes every exact match", c_tab_close_bulk),
+    ("tab close names a tab exactly", c_close_tab_by_substring),
+    ("tab close SPEC/--like/--title/--url", c_tab_close_bulk),
     ("tab close --all / --except", c_tab_close_all_except),
+    ("a page verb refuses ambiguity; a bulk close takes the set",
+     c_ambiguous_spec_refuses),
     ("tab nav reads the address back", c_nav_reads_the_address_back),
     ("tab nav refuses a dead end", c_nav_refuses_a_dead_end),
     ("tab back/forward move the address", c_history_moves_the_address),
@@ -1291,7 +1307,6 @@ CHECKS = (
     ("tab select uses real arrow keys", c_tab_select),
     ("tab screenshot writes a verified PNG", c_tab_screenshot),
     ("tab dialog names the dialog and recovery works", c_tab_dialog),
-    ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),
     ("open adopts a running browser", c_open_adopts_the_running_browser),

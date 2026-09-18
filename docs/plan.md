@@ -153,7 +153,8 @@ browser of its own) — and later `ensure [URL] [--relaunch] [--no-seed]` ·
 Page-level, under `tab`:
 
 `tab [URL…]` · `tab list` · `tab info SPEC` ·
-`tab close SPEC… | --title VALUE | --url URL | --all [--except SPEC…]` ·
+`tab close SPEC… | --like VALUE | --title VALUE | --url VALUE |
+`--all [--except SPEC…]` ·
 `tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
 `tab reload` · `tab js EXPR` · `tab wait --for …` ·
 `tab find TEXT|--selector CSS` · `tab text` · `tab click TEXT|--selector CSS` ·
@@ -174,11 +175,14 @@ at most one per window; a page whose title merely contains the word is reached
 by `id:` or a longer substring, the way `tab list` is never a site called
 “list”), or a title/url substring; one
 
-For `tab close` every selector names a SET, and the whole set closes: a
-substring (`tab close x.com`), an exact `--title`/`--url`, every page tab
-(`--all`), or every tab except the ones named (`--except SPEC…`, which implies
-`--all`). A page verb still refuses more than one match — it must never pick
-among tabs nobody named — but a bulk close is where a set is the point.
+For `tab close` a SPEC NAMES a tab — its whole URL (a trailing slash is not a
+different page), its whole title, or `id:<prefix>` — and every tab it names
+closes. The SWEEP is a separate, explicit flag: `--like VALUE` closes every tab
+whose title or URL CONTAINS it. That split exists because the loose form closed
+the wrong tab in practice: `tab close a` matched a title reading “X. It’s
+wh*a*t’s h*a*ppening / X”. `--except SPEC…` (which implies `--all`) matches
+loosely, because erring toward KEEPING is the safe direction, and one that
+matches nothing refuses so a typo cannot keep what should have gone.
 match is required, several refuse with the candidates named. A page verb with
 no `--tab` acts on the only page tab of a browser this CLI DRIVES (managed or
 attached) — never on a tab nobody named, and never made ambiguous by whatever
@@ -261,7 +265,7 @@ unclear oracle into a claim of absence.**
 | `tab nav` · `tab back`/`forward` | mutation | `Page.navigate` (browser-side, so a PARKED renderer still navigates), then the MOVE (a new document or a changed address), then `readyState` + not an error page | L3 | `nav-failed` (an error page, a refused navigation, or a download), `nav-not-verified` |
 | `tab reload` | mutation | `performance.timeOrigin` changed: a NEW document | L3 | `reload-not-verified` |
 | `tab [URL…]` | mutation | the tab row exists, the id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
-| `tab close SPEC… / --title / --url / --all / --except` | mutation | every requested id ABSENT from the re-read list, over the UNION of the matches, all resolved before anything closes | L3 | `no-page-tab` (naming the value, or the exception that kept nothing), `not-managed` (every match foreign), `close-tab-not-verified` (report survivors); foreign matches are REPORTED in `skipped`, never closed silently. Closing the LAST tab stops the browser with its last window |
+| `tab close SPEC… / --like / --title / --url / --all / --except` | mutation | every requested id ABSENT from the re-read list, over the UNION of the matches, all resolved before anything closes | L3 | `no-page-tab` (naming the value and suggesting `--like`, or the exception that kept nothing), `not-managed` (every match foreign), `close-tab-not-verified` (report survivors); foreign matches are REPORTED in `skipped`, never closed silently. A SPEC names a tab exactly (`id:` with no prefix refuses); `--like` is the declared sweep. Closing the LAST tab stops the browser with its last window |
 | `tab activate` | mutation | the page's own `document.visibilityState` before and after `Page.bringToFront` | L2 | `activate-not-verified` (the window may be hidden entirely) |
 | `tab click` | mutation | hit-test before, then url/title/focus/scroll before-and-after | L4 | `occluded`, `no-viewport-target`, `ambiguous-element` |
 | `tab hover` | mutation | the engine's `:hover` state at the point, and that the point still hit-tests into the element | L4 | `hover-not-verified`, `occluded`, `no-viewport-target` |

@@ -57,10 +57,10 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab [URL...]       open one tab per URL (about:blank when none)
   tab list           every drivable browser's page tabs, by browser
   tab info SPEC      one tab: `id:<prefix>` or a title/url substring
-  tab close SPEC... | --title V | --url V | --all [--except SPEC...]
-                     close every tab named, verified as a set; each selector
-                     matches a SET (a substring closes all of them), --all
-                     closes every page tab, --except keeps the ones it names
+  tab close SPEC... | --like V | --title V | --url V | --all [--except S...]
+                     close every tab named, verified as a set; a SPEC names a
+                     tab EXACTLY (whole URL or title, or id:<prefix>), --like
+                     sweeps substrings, --all is everything, --except keeps
   tab nav URL [--tab SPEC]       navigate, then read the address back
   tab back|forward [--tab SPEC]  history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
@@ -379,22 +379,25 @@ def _pop_all(rest: list[str], flag: str,
 
 
 def cmd_tab_close(rest: list[str], browser: str) -> dict:
-    """`tab close SPEC... | --title V | --url V | --all [--except SPEC...]`.
+    """`tab close SPEC... | --like V | --title V | --url V | --all [--except S]`.
 
-    SPEC, `--title` and `--url` each name a SET of tabs and close every one of
-    them; `--all` names every page tab this CLI drives, and `--except SPEC`
-    keeps the tabs those specs name (it implies `--all`). One way to name tabs
-    per call, never two.
+    A SPEC NAMES a tab (its whole URL, its whole title, or `id:<prefix>`) and
+    every tab named closes. `--like VALUE` is the sweep: every tab whose title
+    or URL CONTAINS it — the loose form, asked for by name, because a spec
+    that merely contains something must never be enough to close a tab.
+    `--all` names every page tab this CLI drives and `--except SPEC` keeps the
+    tabs those specs name (it implies `--all`; the keep side matches loosely).
     """
     rest, title = _pop(rest, "--title", "tab close")
     rest, url = _pop(rest, "--url", "tab close")
     rest, every = _switch(rest, "--all")
     rest, excepts = _pop_all(rest, "--except", "tab close")
+    rest, likes = _pop_all(rest, "--like", "tab close")
     for arg in rest:
         if str(arg).startswith("-"):
             fail("bad-args", f"tab close: unknown flag {arg!r}")
     return close_tabs(rest, browser=browser, title=title, url=url,
-                      all_tabs=every, excepts=excepts)
+                      all_tabs=every, excepts=excepts, like=likes)
 
 
 def cmd_tab_nav(rest: list[str], browser: str) -> dict:

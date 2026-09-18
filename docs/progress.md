@@ -41,7 +41,7 @@ the other verbs own the browser.
 | `tab [URL...]` | one tab per URL (`about:blank` when none), every id named | each id from `Target.createTarget`, re-read from the tab list |
 | `tab list [--browser NAME]` | the page tabs of every **drivable** browser, grouped and sorted by browser | the same tab list the verbs use, read per browser |
 | `tab info SPEC` | one tab: which browser owns it, its `{id,title,url,index}` now | the spec resolves to exactly one tab or refuses |
-| `tab close SPEC...` / `--title V` / `--url V` / `--all` / `--except SPEC...` | closes the WHOLE set each selector names: a substring (`x.com`), an exact title/url, every page tab (`--all`), or everything but the tabs named (`--except`, which implies `--all`) | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors; a match in a browser this CLI does not drive is reported in `skipped`, never closed; a selector or an `--except` matching nothing refuses, so a typo cannot close the tab it meant to keep |
+| `tab close SPEC...` / `--like V` / `--title V` / `--url V` / `--all` / `--except SPEC...` | closes the WHOLE set each selector names: a SPEC **names** a tab (its whole URL, its whole title, or `id:<prefix>`), `--like` sweeps substrings, `--all` is every page tab this CLI drives, `--except` keeps the tabs it names (implies `--all`) | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors; a match in a browser this CLI does not drive is reported in `skipped`, never closed; a selector or an `--except` matching nothing refuses, so a typo cannot close the tab it meant to keep |
 | `tab nav URL [--tab SPEC]` | navigates one tab | the address **as observed** (`url_read`) + `moved` + `loaded`; `chrome-error://` → `nav-failed`; a tab that never left a page it was not on → `nav-not-verified`; a redirect is a success |
 | `tab back` / `tab forward` | moves the tab's history | the address actually changed (`nav-not-verified` when it did not) |
 | `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
@@ -437,42 +437,51 @@ filling (a missing bracket is invisible to Python and shipped once as
 `js-error: SyntaxError`), the PNG helpers, and the dialog-mode check.
 
 ### 5.14 Bulk closing — `tab close` names SETS — done
-Four ways to name tabs, one per call:
 
 | form | matches | closes |
 | --- | --- | --- |
-| `tab close SPEC...` | `id:<prefix>`, or a title/url SUBSTRING | every match — the union of the specs, deduplicated |
-| `tab close --title V` / `--url V` | the WHOLE title/url, case-insensitive | every match |
+| `tab close SPEC...` | `id:<prefix>`, the WHOLE URL (a trailing slash is not a different page) or the WHOLE title, case-insensitive | every tab it names — the union of the specs, deduplicated |
+| `tab close --like V` | a SUBSTRING of the title or URL | every match (the sweep, declared) |
+| `tab close --title V` / `--url V` | the whole value in that one field | every match |
 | `tab close --all` | every page tab this CLI drives | all of them |
-| `tab close --except SPEC...` | (implies `--all`) | every tab the specs do NOT name |
+| `tab close --except SPEC...` | (implies `--all`) matches LOOSELY | every tab the specs do NOT name |
 
-The rules that hold for all four: everything resolves **before** anything
+The rules that hold for all of them: everything resolves **before** anything
 closes, so a bad argument or an unmatched exception cannot leave a half-applied
 close; every id is read back, and a survivor is `close-tab-not-verified` naming
 it; a match in a browser this CLI neither manages nor has attached is REPORTED
-(`skipped`: id, title, url, pid, exe, profile) and never closed, and when every
-match is foreign the verb refuses `not-managed`; a selector that matches
-nothing refuses `no-page-tab`, **including an `--except` spec** — a typo must
-not close the tab it was meant to keep; and mixing selectors is `bad-args`.
+(`skipped`: id, title, url, pid, exe, profile) and never closed, with
+`not-managed` when every match is foreign; a selector that matches nothing
+refuses `no-page-tab` — **including an `--except` spec**, so a typo cannot keep
+what should have gone; and mixing selectors is `bad-args`.
 
-Two behaviours worth knowing:
+**A SPEC names a tab; a sweep must be asked for.** The first version of this
+made the substring form bulk, and it closed the wrong tab in the field:
+`tab close a` swept up a tab whose title read “X. It’s wh*a*t’s h*a*ppening /
+X”. So `--like VALUE` is now the declared loose form, `--title`/`--url` stay
+exact, and `--except` matches loosely on purpose (erring toward KEEPING is the
+safe direction). The refusal teaches the difference: “no tab is NAMED ‘a’ … for
+a substring sweep use `tab close --like 'a'`”.
 
-* **A substring closes a SET now.** `tab close x.com` used to refuse
-  `tab-ambiguous`; a *page* verb still refuses it (`tab info x.com`), because
-  it must never pick among tabs nobody named, while a bulk close is exactly
-  where a set is the point. `--title`/`--url` remain exact: `--title twin`
-  leaves a tab called `twinx` alone.
-* **Closing the last page tab stops the browser.** Chromium exits with its last
-  window, so `tab close --all` on a single-tab browser ends it too; the ids are
-  verified gone either way, which is why that reads as a success with
-  `count: 0` and a note rather than as a lost endpoint.
+Two more behaviours worth knowing:
 
-Hermetic: argv for all four forms (a repeated `--except`, `--except=x`), a
-value-less flag, and the service's pure refusals (none, two, empty,
-SPEC+filter, `--all`+selector, an empty exception). Battery: a substring closes
-every match, `--title twin` leaves `twinx` alone, two specs close in one call,
-a typo refuses, `--all --except` keeps the named tab, and `--except` alone (and
-with nothing left to close) behaves.
+* **`id:` with no prefix names nothing.** `"".startswith("")` is True, so the
+  first version matched EVERY tab: `tab close id:` closed the last tab on the
+  page and Chromium took the window with it (the battery caught it — the
+  fixture browser died mid-run). It refuses `bad-args` now.
+* **Closing the last page tab stops the browser**, since Chromium exits with
+  its last window: `tab close --all` on a single-tab browser ends it. The ids
+  are verified gone either way, so that reads as a success with `count: 0` plus
+  a note.
+
+Hermetic: argv for all five forms (a repeated `--except`/`--like`, `--except=x`,
+`--like=x`), a value-less flag, the service's pure refusals (none, two, empty
+spec, `id:`, SPEC+filter, `--all`+selector, `--like`+anything, empty
+exception), and `_exact_spec_match` itself — including the assertion that
+`a` does NOT name a tab titled “X. It’s what’s happening / X”. Battery: a
+substring sweep by request, `a` sparing `/aaa`, exact `--title` sparing
+`twinx`, two specs in one call, a refusal that suggests `--like`, `--all
+--except`, and `--except` alone.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
