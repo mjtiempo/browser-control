@@ -111,8 +111,9 @@ multi-browser test (two live instances refuse), no CI.
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1 and 5.2 have landed**
-(§1, §2) — the next actionable step is 5.3 (seeding) or 5.4 (`nav`), and
-every later verb is expected to add its check to `tests/live_test.py`.
+(§1, §2) and **5.3 is deferred by decision** — the next actionable step is
+5.4 (`nav`), and every later verb is expected to add its check to
+`tests/live_test.py`.
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -129,14 +130,15 @@ kill what you started, remove the temp root (the skip path leaked one until
 it was fixed). Every check reads independent state (raw socket, direct
 `/json`, `/proc`) instead of trusting the reply.
 
-### 5.3 Profile seeding — `profile-sync`
-Reflink-first copy of the user's own profile, atomic swap, Chrome singleton
-files dropped, `copied: reflink|copy|empty` named honestly, `--status`,
-`--source DIR`, `--browser NAME`, `--force` (stops only the instance this CLI
-started). *Done when* a login made in the user's browser is present in the
-managed one after a sync, and `--status` reports path/source/files/bytes/age/
-`in_use` truthfully.
-*Decision needed*: seed automatically on first `open`, or explicit only.
+### 5.3 Profile seeding — deferred
+Deliberately not being built yet, so the managed browser starts with none of
+the user's logins: `open`, `tabs` and the verbs above them all work, but a
+page that wants a session renders logged out. When it lands it is still the
+plan's design — reflink-first copy of the user's own profile, atomic swap,
+Chrome singleton files dropped, honest `copied: reflink|copy|empty`, and
+`--status`/`--source DIR`/`--browser NAME`/`--force` (stopping only the
+instance this CLI started). The policy question (auto-seed on first `open`
+vs explicit only) is deferred with it.
 
 ### 5.4 `nav` + history
 `nav URL [--tab]`, `back`, `forward`, `reload`. Assignment, then read back the
@@ -185,8 +187,8 @@ Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
 
 ## 6. Decisions needed
 
-1. **Seeding policy** — auto-seed on first `open`, or explicit `profile-sync`
-   only (current)?
+1. ~~**Seeding policy**~~ — deferred with the feature (5.3); the managed
+   browser stays login-less until then.
 2. **`open` semantics** — always make a page (current), or also support
    `ensure` (windowless, no page) for scripted use?
 3. ~~**Install story**~~ — answered: `pyproject.toml` installs a console
