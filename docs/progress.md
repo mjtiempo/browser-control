@@ -18,12 +18,12 @@ it and puts one console script on PATH.
 | `browser_control/cli/main.py` | 857 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
 | `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
 | `browser_control/lib/audit.py` | 158 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<timestamp>`, and a proven secret written as a length |
-| `browser_control/lib/browser.py` | 1386 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate` |
+| `browser_control/lib/browser.py` | 2056 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
 | `browser_control/lib/cdp.py` | 656 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
 | `browser_control/lib/capabilities.py` | 108 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
-| `tests/test_unit.py` | 1484 | 33 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1596 | 51 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 1515 | 34 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1639 | 52 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -146,8 +146,10 @@ multi-browser test (two live instances refuse), no CI.
 ## 4. Known gaps and debt
 
 1. **No seeding** — the managed browser has none of the user's logins.
-2. **No lock/serialization** — two concurrent `open` calls race the profile
-   (Chrome's singleton makes it mostly benign; the plan's lock is not there).
+2. ~~**No lock/serialization**~~ — DONE (§5.18): `open`/`close` hold a
+   per-profile `flock` across their check-then-act and `attach`/`detach` hold
+   one for the root's records, so `started: true` happens exactly once and no
+   verb leaves others guessing.
 3. ~~**No fixed-port ownership guard**~~ — DONE (§5.16): the process holding
    the port is checked in `/proc`, every drive of an unverified endpoint
    refuses `cdp-not-local`, and `list`/`tab list` name the pid and exe that
@@ -190,7 +192,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.17 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.18 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -596,6 +598,53 @@ enforcement (if ever wanted — `--allow read,file`) belongs to whoever reads it
 That is why it was the prerequisite for the policy gate and not the gate
 itself.
 
+### 5.18 The lifecycle lock — `started: true` happens exactly once — done
+
+`launch` is check-then-act with a window between them:
+
+```
+owner   = endpoint_owner(profile, port) if cdp.reachable(profile) else {}
+already = bool(owner.get("verified"))            # the check
+...
+_record_pid(profile, _spawn([path, *flags(profile), first]))    # the act
+```
+
+Two `open`s at once both found "nothing running", both started a browser on ONE
+profile — the corruption Chrome's own "profile appears to be in use" warning
+describes — and both reported `started: true`. Chrome's process singleton made
+that *usually* harmless, which is exactly the problem: our invariants (one
+managed instance per profile, the recorded pid identifies it, every
+authorization is recorded) were guaranteed by a third party's behaviour rather
+than by us, and where its singleton differs the outcome is a corrupted profile.
+
+`flock` on a file now serializes it, chosen over an `O_EXCL` file precisely
+because the kernel drops it when the holder dies: nothing to clean up, nothing
+to trust. Held across the WHOLE decision:
+
+| verb | lock | held across |
+| --- | --- | --- |
+| `open` | `<profile>/.browser-control.lock` | read the port → check the endpoint → spawn → wait for it → record the pid |
+| `close` | same | the pid decision, `SIGTERM`, and the death + endpoint waits |
+| `attach` / `detach` | `<root>/.browser-control.lock` | the read-modify-write of `attached.json` |
+
+A caller that cannot take it waits (up to 20 s, a cold launch's budget), then
+refuses `profile-busy` naming the pid, verb and start time the holder wrote
+into the file. A filesystem that cannot lock at all is a `warning` in the reply,
+not a silent nothing — and not a failure either.
+
+The check found a real bug, which is the point of adding one: the losing call
+read the port BEFORE taking the lock, so inside it `cdp.reachable(profile)` was
+true while its own `port` was still `0` — and the guard faithfully reported "no
+process holds port 0", turning a race into `cdp-not-local`. The port is now read
+inside the lock, and a zero port is not treated as an endpoint to judge.
+
+Evidence: hermetic (a held lock makes the second caller wait 0.3 s and refuse
+`profile-busy` naming `pid … (open)`; it is free again afterwards with nothing
+to clean up; an unopenable path is a warning, never a failure); battery (two
+`open`s launched at once on one root → **one started, one adopted the same
+pid, both URLs in the tab list, exactly one live browser for that profile** —
+and the whole battery then closes what it started).
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -609,9 +658,9 @@ plugin can fail but cannot claim success. *Done when* one out-of-core adapter
 passes its own live check through the contract.
 
 ### 5.10 Hardening (parallel, any time)
-Launch/sync lock; a `--profile`/instance selector; richer `stop` identity.
-(DONE here: the `/proc` ownership guard — §5.16 — and the capability surface —
-§5.17.)
+A `--profile`/instance selector; richer `stop` identity. (DONE here: the
+`/proc` ownership guard — §5.16 — the capability surface — §5.17 — and the
+launch/sync lock — §5.18.)
 
 ### 5.11 `open --windowless` — built, measured, REJECTED
 A windowless start (`--no-startup-window`: CDP up, no window, no page) was built

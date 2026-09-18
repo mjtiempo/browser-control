@@ -1286,6 +1286,48 @@ def c_list_tabs_groups_by_browser() -> str:
             "drivable browser(s), grouped and id-matched")
 
 
+def c_concurrent_open_is_serialized() -> str:
+    """Two `open`s at once: ONE reports started, and both URLs land.
+
+    This is what the profile lock is for. Without it both calls find "nothing
+    running", both start a browser on ONE profile — the corruption Chrome's own
+    singleton warning describes — and both report `started: true`. With it the
+    loser waits, sees a verified endpoint, and ADOPTS.
+
+    Runs where no browser is up yet, and closes what it started. A loser that
+    ran out of its bounded wait must refuse `profile-busy` (honest, and nothing
+    was raced) rather than collide.
+    """
+    urls = [f"{base_url()}/race-a", f"{base_url()}/race-b"]
+    procs = [subprocess.Popen([CLI, "open", url], env=env(),
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+             for url in urls]
+    outs = [proc.communicate(timeout=120) for proc in procs]
+    parsed = [(proc.returncode, out, err)
+              for proc, (out, err) in zip(procs, outs, strict=True)]
+    assert all(rc in (0, 2) for rc, _o, _e in parsed), parsed
+    refused = [err for rc, _o, err in parsed if rc == 2]
+    replies = [json.loads(out) for rc, out, _e in parsed if rc == 0]
+    assert replies, parsed
+    for err in refused:                 # a bounded wait that ran out
+        assert "ERR[profile-busy]" in err, err
+    started = [r for r in replies if r.get("started") is True]
+    assert len(started) == 1, (replies, refused)
+    winner = started[0]
+    assert all(r.get("pid") == winner["pid"] for r in replies), replies
+    names = {str(t["url"]).rsplit("/", 1)[-1]
+             for t in pages(winner["port"])}
+    if not refused:                     # the ordinary outcome: both landed
+        assert {"race-a", "race-b"} <= names, names
+    live = [b for b in ok_json("list")["browsers"]
+            if b["profile"] == winner["profile"]]
+    assert len(live) == 1 and live[0]["pid"] == winner["pid"], live
+    ok_json("close", "--force")        # leave the battery where it was
+    return (f"one started (pid {winner['pid']}), {len(replies) - 1} adopted "
+            f"the same browser, {len(refused)} refused")
+
+
 def c_list_shows_a_browser_outside_cdp() -> str:
     """A browser with no debugging port is LISTED, and never driven.
 
@@ -1487,6 +1529,7 @@ CHECKS = (
     ("close ignores a recycled pid", c_close_ignores_a_recycled_pid),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),
+    ("two opens at once are serialized", c_concurrent_open_is_serialized),
     ("a browser outside CDP is listed, not driven",
      c_list_shows_a_browser_outside_cdp),
     ("a foreign CDP browser is read, then attached for writes",

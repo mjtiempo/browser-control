@@ -253,7 +253,12 @@ unclear oracle into a claim of absence.**
    file; the process holding the listening socket is checked in `/proc`, and a
    drive of anything else refuses `cdp-not-local` naming the holder. `list`
    reports the listener, `tab list` reports it under `unverified`.
-10. **The surface is DECLARED.** Every verb carries capability classes
+10. **Lifecycle verbs serialize themselves.** `open`/`close` hold a per-profile
+    `flock` (and `attach`/`detach` one for the root's records) across their whole
+    check-then-act, so `started: true` happens exactly once; a caller that
+    cannot be served waits, then refuses `profile-busy` naming the holder, and a
+    filesystem that cannot lock is reported as a warning rather than ignored.
+11. **The surface is DECLARED.** Every verb carries capability classes
     (`read`/`write`/`code`/`file`/`egress`) per resolved action in
     `lib/capabilities.py`; `selftest` reports them and a hermetic check keeps
     them complete. It declares, it does not enforce.
@@ -288,7 +293,7 @@ unclear oracle into a claim of absence.**
 | `tab insert` · `tab type` | mutation | the focused field's text LENGTH grew — never the value | L2 | `no-focus`, `insert-not-verified`/`type-not-verified`; `verified:false` when the field is unreadable |
 | `tab upload` | mutation | `input.files` read back (name + size) | L2 | `no-file`, `upload-not-verified` |
 | `media-play/pause` | mutation | `video.paused` read back | L2 | `media-not-verified` |
-| `open` | mutation | window + tab identity re-read | L4 | `launch-failed`, `tab_refused` (window kept, reason named) |
+| `open` | mutation | window + tab identity re-read, under the profile lock (one `started: true`, ever) | L4 | `launch-failed`, `profile-busy` (naming the holder), `cdp-not-local`, `tab_refused` (window kept, reason named) |
 | `close` | mutation (lifecycle) | the pid AND the endpoint gone, the pid identified by its own cmdline | L4 | `tabs-open` unless `--force` (a browser with tabs refuses), `browser-not-stopped` (never SIGKILLs, never signals an unidentifiable process), `ambiguous-browser` (pid + profile path) |
 | `ensure` | mutation | port answers + pid recorded | L3 | `cdp-unreachable` with the real reason |
 | `profile-sync` | mutation | destination exists + file/byte count + copy kind | L2 | `profile-sync-failed` |

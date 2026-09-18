@@ -1431,6 +1431,36 @@ def t_capability_surface() -> None:
     assert caps["by_class"]["egress"] == [], caps["by_class"]["egress"]
 
 
+def t_lock_serializes_a_check_then_act() -> None:
+    """A held lock makes the second caller wait, then refuse by NAME.
+
+    In one process on purpose: `flock` belongs to the open file DESCRIPTION,
+    so two `open` calls on one path conflict even from here — which is what
+    makes this hermetic, and why flock was chosen over an `O_EXCL` file (the
+    kernel drops it when the holder dies, so there is no stale lock).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "lock")
+        with browser._lock(path, "open", wait=0.0) as first:      # noqa: SLF001
+            assert first == {"held": True, "warning": ""}, first
+            try:
+                with browser._lock(path, "tab", wait=0.3):        # noqa: SLF001
+                    raise AssertionError("a held lock was taken")
+            except ControlError as e:
+                assert e.code == "profile-busy", e
+                assert str(os.getpid()) in e.message, e.message
+                assert "(open)" in e.message, e.message    # names the holder
+        # free again, with nothing to clean up: the lock file may stay
+        with browser._lock(path, "open", wait=0.0) as again:      # noqa: SLF001
+            assert again["held"] is True, again
+        assert os.path.exists(path), path
+        # a path that cannot be opened at all is a WARNING, never a failure:
+        # a guard that silently does nothing would be worse than none
+        with browser._lock("/proc/nope/lock", "open") as broken:  # noqa: SLF001
+            assert broken["held"] is False, broken
+            assert broken["warning"], broken
+
+
 def t_pid_alive() -> None:
     assert browser._pid_alive(os.getpid()) is True                 # noqa: SLF001
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
@@ -1460,6 +1490,7 @@ def main() -> int:
         ("a working log makes no scratch directory",
          t_a_working_log_makes_no_scratch_dirs),
         ("the port is checked against the kernel", t_endpoint_ownership),
+        ("the lock serializes a check-then-act", t_lock_serializes_a_check_then_act),
         ("every verb is classified", t_capability_surface),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),

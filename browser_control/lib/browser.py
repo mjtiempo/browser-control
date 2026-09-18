@@ -24,6 +24,7 @@ publishes rather than an assumed 9222.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -570,17 +571,23 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
               "port": _to_int(row["cdp"]["port"]), "exe": row["exe"],
               "managed": row["managed"],
               "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-    records = _attached()
-    already = record["profile"] in records
-    records[record["profile"]] = record
-    _write_attached(records)
-    return {"ok": True, "attached": True, "already": already,
-            "browser": {"pid": record["pid"], "exe": record["exe"],
-                        "profile": record["profile"],
-                        "managed": record["managed"]},
-            "cdp": {"port": record["port"], "reachable": True},
-            "note": ("tab writes only — `close` will not stop it; "
-                     "`detach` revokes this")}
+    # the read-modify-write of the records runs under the root's lock: two
+    # `attach`s at once used to overwrite each other's line
+    with _lock(_lock_path(root()), "attach") as lock:
+        records = _attached()
+        already = record["profile"] in records
+        records[record["profile"]] = record
+        _write_attached(records)
+    reply = {"ok": True, "attached": True, "already": already,
+             "browser": {"pid": record["pid"], "exe": record["exe"],
+                         "profile": record["profile"],
+                         "managed": record["managed"]},
+             "cdp": {"port": record["port"], "reachable": True},
+             "note": ("tab writes only — `close` will not stop it; "
+                      "`detach` revokes this")}
+    if lock["warning"]:
+        reply["warning"] = lock["warning"]
+    return reply
 
 
 def detach(port: int = 0, pid: int = 0, profile: str = "",
@@ -589,30 +596,40 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
     if detach_all:
         if port or pid or profile:
             fail("bad-args", "detach: --all takes no other selector")
-        keys = sorted(_attached())
-        _write_attached({})
-        return {"ok": True, "detached": keys, "count": 0}
+        with _lock(_lock_path(root()), "detach") as lock:
+            keys = sorted(_attached())
+            _write_attached({})
+        reply = {"ok": True, "detached": keys, "count": 0}
+        if lock["warning"]:
+            reply["warning"] = lock["warning"]
+        return reply
     given = [name for name, value in (("--port", port), ("--pid", pid),
                                       ("--profile", profile)) if value]
     if len(given) != 1:
         fail("bad-args",
              "detach: name ONE browser — --port N, --pid N, --profile DIR, "
              "or --all")
-    records = _attached()
-    if profile:
-        keys = [key for key in records if key == _norm(profile)]
-    elif pid:
-        keys = [key for key, rec in records.items()
-                if _to_int(rec.get("pid")) == _to_int(pid)]
-    else:
-        keys = [key for key, rec in records.items()
-                if _to_int(rec.get("port")) == _to_int(port)]
-    if not keys:
-        fail("not-attached", f"nothing is attached for {given[0]}")
-    for key in keys:
-        records.pop(key, None)
-    _write_attached(records)
-    return {"ok": True, "detached": keys, "count": len(records)}
+    # the read-modify-write of the records runs under the root's lock, so two
+    # `attach`/`detach` calls cannot lose each other's line
+    with _lock(_lock_path(root()), "detach") as lock:
+        records = _attached()
+        if profile:
+            keys = [key for key in records if key == _norm(profile)]
+        elif pid:
+            keys = [key for key, rec in records.items()
+                    if _to_int(rec.get("pid")) == _to_int(pid)]
+        else:
+            keys = [key for key, rec in records.items()
+                    if _to_int(rec.get("port")) == _to_int(port)]
+        if not keys:
+            fail("not-attached", f"nothing is attached for {given[0]}")
+        for key in keys:
+            records.pop(key, None)
+        _write_attached(records)
+    reply = {"ok": True, "detached": keys, "count": len(records)}
+    if lock["warning"]:
+        reply["warning"] = lock["warning"]
+    return reply
 
 
 # One /proc walk per (profile, port) per process: the guard runs on every drive
@@ -952,6 +969,155 @@ def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
 
 
 # ------------------------------------------------------------------ verbs
+# ------------------------------------------------------------------ the lock
+# A check-then-act two processes can enter at once is two browsers on one
+# profile — the corruption Chrome's own "profile appears to be in use" warning
+# exists to prevent. These verbs serialize it themselves: `flock` on a file in
+# the profile (or in the root, for the attach records), which the kernel
+# releases when the holder dies, so there is no stale lock to clean up.
+LOCK_FILE = ".browser-control.lock"
+LOCK_WAIT_S = 20.0          # as long as a cold launch is given
+
+
+def _lock_path(profile: str) -> str:
+    return os.path.join(profile, LOCK_FILE)
+
+
+def _lock_holder(handle: Any) -> str:
+    """What the holder wrote: "pid 123 since 12:34:56 (open)", or ""."""
+    try:
+        handle.seek(0)
+        parts = handle.read().strip().split("\t")
+    except OSError:
+        return ""
+    if len(parts) < 2:
+        return ""
+    stamp = parts[1][11:19] or parts[1]
+    verb = f" ({parts[2]})" if len(parts) > 2 and parts[2] else ""
+    return f"pid {parts[0]} since {stamp}{verb}"
+
+
+def _hold(handle: Any, verb: str) -> None:
+    """Say who holds it, and since when, so a refusal can name them."""
+    with contextlib.suppress(OSError):
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\t{time.strftime('%Y-%m-%dT%H:%M:%S')}\t"
+                     f"{verb}\n")
+        handle.flush()
+
+
+def _contention(error: OSError) -> bool:
+    """Is that flock failure someone else holding the lock?
+
+    The difference decides what happens next: contention is worth waiting for,
+    while a filesystem that cannot lock at all has to be reported instead.
+    """
+    return error.errno in (errno.EACCES, errno.EAGAIN)
+
+
+def _expired(deadline: float) -> bool:
+    """Has the wait run out? A call, so a refusal handler reads as one."""
+    return time.time() >= deadline
+
+
+def _holder_text(handle: Any) -> str:
+    """What the holder wrote, or a phrase for "nothing usable"."""
+    return _lock_holder(handle) or "no details"
+
+
+def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
+    """Take the lock, or say why not: "" when taken, else a warning.
+
+    Contention is waited on and then refused `profile-busy` (naming the pid
+    and verb the holder wrote); a filesystem that cannot lock at all comes back
+    as a warning, which the caller REPORTS rather than failing the verb — a
+    guard that silently does nothing would be worse than none.
+    """
+    import fcntl
+
+    deadline = time.time() + wait
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _hold(handle, verb)
+            return ""
+        except OSError as e:
+            if _contention(e):
+                if _expired(deadline):
+                    fail("profile-busy",
+                         f"another browser-control call holds {path} "
+                         f"[{_holder_text(handle)}] and has been for "
+                         f"{wait:g}s — nothing was started or stopped here. "
+                         "Wait for that call, then run this again")
+                time.sleep(0.15)
+                continue
+            return f"{path} cannot be locked ({e})"
+
+
+@contextlib.contextmanager
+def _lock(path: str, verb: str, wait: float = LOCK_WAIT_S):
+    """Hold `path` while a check-then-act runs, or refuse `profile-busy`.
+
+    Yields ``{"held": bool, "warning": str}``: `held: False` is the
+    filesystem-cannot-lock case, which the caller proceeds through and reports.
+    Contention never reaches the caller as a warning — it waits, then refuses.
+
+    `flock` rather than an `O_EXCL` file precisely for the stale case: the
+    kernel drops it when the holder exits, crashes or is killed, so there is
+    nothing to clean up and nothing to trust.
+    """
+    import fcntl
+
+    with contextlib.ExitStack() as stack:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            handle = stack.enter_context(
+                open(path, "a+", encoding="utf-8"))
+        except OSError as e:
+            yield {"held": False,
+                   "warning": f"could not open a lock at {path}: {e}"}
+            return
+        warning = _acquire(handle, path, verb, wait)
+        try:
+            yield {"held": bool(not warning), "warning": warning}
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _await_owner(profile: str, port: int) -> dict:
+    """The endpoint's owner, waiting out a browser that is still STARTING.
+
+    A port file appears before the listener answers — Chrome writes it and
+    binds a moment later, the same gap `_wait_port` covers — so a second
+    caller that takes the lock inside that window must not read it as a
+    stranger. It waits, and only an endpoint that still does not verify while a
+    process on that profile IS running is treated as suspicious; if the port
+    answers and nothing on the profile runs, the file is stale and the caller
+    starts a browser anyway (`warning`).
+
+    The memo is EVICTED before every re-check: an unverified verdict from a
+    moment ago must not be allowed to outlive the listener it was about.
+    """
+    owner = endpoint_owner(profile, port) if cdp.reachable(profile) else {}
+    if not port:
+        # no port at all is not an endpoint to judge: whoever asked may have
+        # read the port file before the browser wrote it (measured in the
+        # concurrent `open` case, where that stale 0 refused a whole call)
+        return {}
+    if not owner or owner.get("verified") or not owner.get("profile_pid"):
+        return owner
+    deadline = time.time() + LAUNCH_WAIT_S
+    while time.time() < deadline:
+        time.sleep(0.25)
+        _OWNER_CACHE.pop((profile, port), None)
+        owner = endpoint_owner(profile, port) if cdp.reachable(profile) else {}
+        if owner.get("verified"):
+            return owner
+    return owner
+
+
 def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     """Start (or adopt) the managed browser and prove the pages are there.
 
@@ -965,6 +1131,14 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     browser is refused when a process on that profile is running, and IGNORED
     (with a `warning` in the reply) when nothing is — a stale file must not
     stop a fresh start, and it must not make `open` hand URLs to a stranger.
+
+    The whole check-and-act runs under the profile's lock (`_lock`). Without
+    it, two `open`s at once both find "nothing running" and both start a
+    browser on one profile — which is the corruption Chrome's own singleton
+    warning describes — and both would report `started: true`. With it, the
+    loser waits, then sees the endpoint (a real one, verified) and ADOPTS:
+    `started: true` happens exactly once, or the loser refuses `profile-busy`
+    naming the holder. Nothing is left to a third party's behaviour.
     """
     wanted = [safe_url(url) for url in (urls or [])]
     path = binary(browser)
@@ -974,42 +1148,50 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     except OSError as e:
         raise ControlError("profile-unusable",
                            f"cannot create {profile}: {e}") from e
-    port = cdp.port_of(profile)
-    owner = endpoint_owner(profile, port) if cdp.reachable(profile) else {}
-    if owner and not owner.get("verified"):
-        if owner.get("profile_pid"):
-            not_local_refusal(profile, port, str(owner.get("reason") or ""))
-        stale = (f"ignored a stale DevTools port ({port}): "
-                 f"{owner.get('reason') or 'nothing of this browser holds it'}")
-    else:
-        stale = ""
-    already = bool(owner.get("verified"))
-    requests: list[str] = []
-    opened: list[dict] = []
-    if already:
-        if wanted:
-            requests = wanted
-            opened = _open_tabs(profile, wanted)
-    else:
-        first = wanted[0] if wanted else "about:blank"
-        requests = [first, *wanted[1:]]
-        _record_pid(profile, _spawn([path, *flags(profile), first]))
-        if not _wait_port(profile):
-            fail("launch-failed",
-                 f"started {path} on {profile} but no CDP endpoint answered "
-                 f"within {LAUNCH_WAIT_S:g}s")
-        row = _wait_url(profile, first)
-        if row is None:
-            fail("no-page-tab",
-                 f"{path} is up on {profile} but shows no tab for {first!r}")
-        opened = [row]
-        if len(wanted) > 1:
-            opened += _open_tabs(profile, wanted[1:])
-    rows = _wait_rows(profile)
+    with _lock(_lock_path(profile), "open") as lock:
+        # the port is read INSIDE the lock: a value from before it can be 0
+        # while the browser another call just started is already answering,
+        # and judging that stale 0 is what turned a race into a refusal
+        port = cdp.port_of(profile)
+        owner = _await_owner(profile, port)
+        if owner and not owner.get("verified"):
+            if owner.get("profile_pid"):
+                not_local_refusal(profile, port,
+                                  str(owner.get("reason") or ""))
+            reason = str(owner.get("reason") or
+                         "nothing of this browser holds it")
+            stale = f"ignored a stale DevTools port ({port}): {reason}"
+        else:
+            stale = ""
+        already = bool(owner.get("verified"))
+        requests: list[str] = []
+        opened: list[dict] = []
+        if already:
+            if wanted:
+                requests = wanted
+                opened = _open_tabs(profile, wanted)
+        else:
+            first = wanted[0] if wanted else "about:blank"
+            requests = [first, *wanted[1:]]
+            _record_pid(profile, _spawn([path, *flags(profile), first]))
+            if not _wait_port(profile):
+                fail("launch-failed",
+                     f"started {path} on {profile} but no CDP endpoint "
+                     f"answered within {LAUNCH_WAIT_S:g}s")
+            row = _wait_url(profile, first)
+            if row is None:
+                fail("no-page-tab",
+                     f"{path} is up on {profile} but shows no tab for "
+                     f"{first!r}")
+            opened = [row]
+            if len(wanted) > 1:
+                opened += _open_tabs(profile, wanted[1:])
+        rows = _wait_rows(profile)
     if not rows:
         fail("no-page-tab",
              f"{path} is up on {profile} but shows no page tab — pass a URL "
              "(browser-control-cli open https://…)")
+    notes = [text for text in (stale, lock["warning"]) if text]
     reply = {"ok": True, "started": not already, "browser": path,
              "profile": profile, "port": cdp.port_of(profile),
              "pid": _pid_of(profile), "tabs": rows,
@@ -1018,8 +1200,8 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
                         for index, row in enumerate(opened)]}
     if len(opened) == 1:
         reply["tab"] = f"id:{opened[0]['id']}"
-    if stale:
-        reply["warning"] = stale
+    if notes:
+        reply["warning"] = "; ".join(notes)
     return reply
 
 
@@ -1060,46 +1242,56 @@ def stop(browser: str = "", force: bool = False) -> dict:
 
     The reply requires the process AND the endpoint to be gone: `stopped: true`
     only after both, plus `tabs` (the count it saw, or null) and `forced`.
+
+    The decision and the signal run under the profile's lock, so a `close`
+    cannot land in the middle of an `open` that is starting the same browser.
     """
     profile = managed_profile(browser)
-    pid = _pid_of(profile)
-    tabs = _page_count(profile)
-    if not pid:
-        if not cdp.reachable(profile):
-            return {"ok": True, "stopped": False, "profile": profile,
-                    "tabs": tabs,
-                    "reason": "no managed browser was running"}
-        fail("browser-not-stopped",
-             f"a browser answers on {profile} but no Chromium process on it "
-             "can be identified — refusing to signal a process this CLI did "
-             "not start")
-    if tabs and not force:
-        fail("tabs-open",
-             f"{tabs} page tab(s) are open in {profile} and stopping the "
-             "browser closes them with it (Chromium exits with its last "
-             "window) — pass --force to stop it anyway, or take the tabs "
-             "first with `tab close ...` (`tab list` shows them)")
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as e:
-        fail("browser-not-stopped", f"cannot stop pid {pid}: {e}")
-    deadline = time.time() + STOP_WAIT_S
-    while time.time() < deadline and _pid_alive(pid):
-        time.sleep(0.2)
-    if _pid_alive(pid):
-        fail("browser-not-stopped",
-             f"pid {pid} survived SIGTERM for {STOP_WAIT_S:g}s — stop it "
-             "yourself; this CLI does not SIGKILL a browser")
-    deadline = time.time() + PORT_WAIT_S
-    while time.time() < deadline and cdp.reachable(profile):
-        time.sleep(0.2)
-    if cdp.reachable(profile):
-        fail("browser-not-stopped",
-             f"pid {pid} is gone but the CDP endpoint on {profile} still "
-             "answers")
-    Path(_pid_file(profile)).unlink(missing_ok=True)
-    return {"ok": True, "stopped": True, "pid": pid, "profile": profile,
-            "tabs": tabs, "forced": bool(tabs and force)}
+    with _lock(_lock_path(profile), "close") as lock:
+        pid = _pid_of(profile)
+        tabs = _page_count(profile)
+        if not pid:
+            if not cdp.reachable(profile):
+                reply = {"ok": True, "stopped": False, "profile": profile,
+                         "tabs": tabs,
+                         "reason": "no managed browser was running"}
+                if lock["warning"]:
+                    reply["warning"] = lock["warning"]
+                return reply
+            fail("browser-not-stopped",
+                 f"a browser answers on {profile} but no Chromium process on it "
+                 "can be identified — refusing to signal a process this CLI did "
+                 "not start")
+        if tabs and not force:
+            fail("tabs-open",
+                 f"{tabs} page tab(s) are open in {profile} and stopping the "
+                 "browser closes them with it (Chromium exits with its last "
+                 "window) — pass --force to stop it anyway, or take the tabs "
+                 "first with `tab close ...` (`tab list` shows them)")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as e:
+            fail("browser-not-stopped", f"cannot stop pid {pid}: {e}")
+        deadline = time.time() + STOP_WAIT_S
+        while time.time() < deadline and _pid_alive(pid):
+            time.sleep(0.2)
+        if _pid_alive(pid):
+            fail("browser-not-stopped",
+                 f"pid {pid} survived SIGTERM for {STOP_WAIT_S:g}s — stop it "
+                 "yourself; this CLI does not SIGKILL a browser")
+        deadline = time.time() + PORT_WAIT_S
+        while time.time() < deadline and cdp.reachable(profile):
+            time.sleep(0.2)
+        if cdp.reachable(profile):
+            fail("browser-not-stopped",
+                 f"pid {pid} is gone but the CDP endpoint on {profile} still "
+                 "answers")
+        Path(_pid_file(profile)).unlink(missing_ok=True)
+    reply = {"ok": True, "stopped": True, "pid": pid, "profile": profile,
+             "tabs": tabs, "forced": bool(tabs and force)}
+    if lock["warning"]:
+        reply["warning"] = lock["warning"]
+    return reply
 
 
 ACTIVE_SPEC = "active"
