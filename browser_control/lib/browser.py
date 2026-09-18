@@ -172,10 +172,12 @@ def safe_url(url: str) -> str:
     return text
 
 
-def resolve_tab(rows: list[dict], spec: str) -> dict:
-    """One page row for a spec: `id:<prefix>`, else a title/URL substring.
+def _match_spec(tabs: list[dict], spec: str) -> list[dict]:
+    """The tabs of ONE browser a spec names — 0, 1 or several.
 
-    Nothing, or several, refuses — never a silent first match.
+    `id:<prefix>` matches ids, anything else a title/URL substring; both
+    case-insensitive. Pure and per-browser, so the cross-browser resolver can
+    ask every browser and decide on the whole picture.
     """
     needle = str(spec or "").strip()
     if not needle:
@@ -185,20 +187,28 @@ def resolve_tab(rows: list[dict], spec: str) -> dict:
         want = needle[3:].strip().lower()
         if not want:
             fail("bad-args", "id: needs a target id prefix")
-        hits = [r for r in rows
-                if str(r.get("id") or "").lower().startswith(want)]
-        if not hits:
-            fail("no-page-tab",
-                 f"no tab with id {want!r} (the tab was probably closed)")
-    else:
-        low = needle.lower()
-        hits = [r for r in rows
-                if low in str(r.get("url") or "").lower()
-                or low in str(r.get("title") or "").lower()]
-        if not hits:
-            have = ", ".join(str(r.get("title") or "")[:30]
-                             for r in rows[:4]) or "none"
-            fail("no-page-tab", f"no tab matches {needle!r} (have: {have})")
+        return [t for t in tabs
+                if str(t.get("id") or "").lower().startswith(want)]
+    low = needle.lower()
+    return [t for t in tabs
+            if low in str(t.get("url") or "").lower()
+            or low in str(t.get("title") or "").lower()]
+
+
+def resolve_tab(rows: list[dict], spec: str) -> dict:
+    """One page row for a spec, within ONE browser's tabs.
+
+    Nothing, or several, refuses — never a silent first match.
+    """
+    needle = str(spec or "").strip()
+    hits = _match_spec(rows, spec)
+    if not hits:
+        if needle.lower().startswith("id:"):
+            fail("no-page-tab", f"no tab with id {needle[3:]!r} "
+                                "(the tab was probably closed)")
+        have = ", ".join(str(r.get("title") or "")[:30]
+                          for r in rows[:4]) or "none"
+        fail("no-page-tab", f"no tab matches {needle!r} (have: {have})")
     if len(hits) > 1:
         titles = ", ".join(str(r.get("title") or "")[:30] for r in hits[:5])
         fail("tab-ambiguous", f"{needle!r} matches {len(hits)} tabs: {titles}")
@@ -320,9 +330,9 @@ def _spawn(argv: list[str]) -> int:
 
 
 # ------------------------------------------------------------ what is running
-def _to_int(text: str) -> int:
+def _to_int(value: object) -> int:
     try:
-        return int(str(text).strip())
+        return int(str(value).strip())
     except (TypeError, ValueError):
         return 0
 
@@ -382,30 +392,118 @@ def list_browsers() -> dict:
             "browsers": rows}
 
 
-def list_tabs() -> dict:
-    """`list-tabs`: the page tabs of every DRIVABLE browser, by browser.
+def _drivable(browser: str = "") -> list[dict]:
+    """The running browsers that answer CDP, sorted by browser.
 
-    Grouped by browser, because that is what tells two tabs with the same
-    title apart — and a tab handle (`id:`) is only meaningful against the
-    browser it came from. Window grouping is not in this scope.
+    `browser` narrows to the one named — its executable, or the basename of
+    its profile, which is the name `open --browser NAME` keys a profile by.
+    One name can match two browsers (the same browser on two profiles, as a
+    tool that manages its own copy makes likely): the MANAGED one wins, since
+    that is the browser this CLI would drive and the only one a write may
+    touch. An empty result is []: whether that is a refusal is the caller's
+    question.
+    """
+    rows = [r for r in browsers() if r["cdp"]["reachable"]]
+    if browser:
+        wanted = os.path.basename(str(browser).strip())
+        matches = [r for r in rows
+                   if wanted in (r["exe"],
+                                 os.path.basename(str(r["profile"])))]
+        rows = [r for r in matches if r["managed"]] or matches
+    return sorted(rows, key=lambda r: (r["exe"], str(r["profile"])))
+
+
+def _tabs_of(row: dict) -> tuple[list[dict], str]:
+    """(page tabs, error) for one browser row.
+
+    A browser that stopped answering between the probe and the read is
+    REPORTED: an empty list is "no tabs", an error is "no answer".
+    """
+    try:
+        port = _to_int(row["cdp"]["port"])
+        return cdp.rows_to_tabs(cdp.page_rows_at(port)), ""
+    except ControlError as e:
+        return [], e.message
+
+
+def _brief(row: dict) -> dict:
+    """One browser row, small enough to ride along in a tab reply."""
+    return {"pid": row["pid"], "exe": row["exe"], "profile": row["profile"],
+            "managed": row["managed"], "port": _to_int(row["cdp"]["port"])}
+
+
+def _row(row: dict) -> dict:
+    """One browser row without its endpoint block (reported apart)."""
+    return {key: row[key] for key in ("pid", "exe", "path", "profile",
+                                      "profile_from", "managed")}
+
+
+def _endpoint_details(row: dict) -> dict:
+    """One browser row's endpoint, with the version it reports itself."""
+    details = dict(row["cdp"])
+    if details.get("reachable"):
+        version = cdp.version_at(_to_int(details.get("port")))
+        details["version"] = str(version.get("Browser") or "")
+        details["protocol"] = str(version.get("Protocol-Version") or "")
+        details["user_agent"] = str(version.get("User-Agent") or "")
+    return details
+
+
+def list_tabs(browser: str = "") -> dict:
+    """`tab list`: the page tabs of every DRIVABLE browser, by browser.
+
+    Sorted by browser, which is the order `list` uses and the reason a tab
+    handle only means something next to the browser it came from: two tabs
+    with the same title in two browsers are two rows, not one. `browser`
+    narrows the answer to one of them.
     """
     groups: list[dict] = []
     total = 0
-    for row in browsers():
-        port = _to_int(row["cdp"]["port"])
-        if not row["cdp"]["reachable"]:
-            continue
-        group = {"pid": row["pid"], "exe": row["exe"],
-                 "profile": row["profile"], "managed": row["managed"],
-                 "port": port, "tabs": []}
-        try:
-            group["tabs"] = cdp.rows_to_tabs(cdp.page_rows_at(port))
-        except ControlError as e:      # answered /json/version, then stopped
-            group["error"] = e.message
-        group["count"] = len(group["tabs"])
-        total += group["count"]
+    for row in _drivable(browser):
+        tabs, error = _tabs_of(row)
+        group = {**_brief(row), "tabs": tabs, "count": len(tabs)}
+        if error:
+            group["error"] = error
+        total += len(tabs)
         groups.append(group)
     return {"ok": True, "count": total, "browsers": groups}
+
+
+def browser_info(browser: str = "") -> dict:
+    """`info`: the browser this CLI would drive — or the one named — and its
+    endpoint.
+
+    `running: false` is an ANSWER, not a refusal: which browser `open` would
+    start, and where its profile lives, is knowable without one running.
+    """
+    name = os.path.basename(str(browser).strip())
+    rows = browsers()
+    if name:
+        matches = [r for r in rows if name in (
+            r["exe"], os.path.basename(str(r["profile"])))]
+        row = next((r for r in matches if r["managed"]),
+                   matches[0] if matches else None)
+        if row is not None:
+            return {"ok": True, "running": True, "browser": _row(row),
+                    "cdp": _endpoint_details(row)}
+        path = binary(browser)          # refuses no-browser when unknown
+    else:
+        live = [r for r in rows if r["managed"] and r["cdp"]["reachable"]]
+        if len(live) > 1:
+            fail("ambiguous-browser",
+                 f"{len(live)} managed browsers are up "
+                 f"({', '.join(os.path.basename(str(r['profile'])) for r in live)})"
+                 " — name one with --browser NAME")
+        if live:
+            return {"ok": True, "running": True, "browser": _row(live[0]),
+                    "cdp": _endpoint_details(live[0])}
+        path = binary()
+    profile = profile_dir(path)
+    return {"ok": True, "running": False,
+            "browser": {"pid": 0, "exe": os.path.basename(path),
+                        "path": path, "profile": profile,
+                        "profile_from": "managed", "managed": True},
+            "cdp": {"port": 0, "reachable": False}}
 
 
 # ------------------------------------------------------------- read-backs
@@ -472,19 +570,23 @@ def _wait_url(profile: str, url: str,
     return None
 
 
-def _wait_gone(profile: str, target_id: str,
-               timeout: float = PORT_WAIT_S) -> bool:
-    """True when the id is STILL open after a bounded wait.
+def _wait_ids_gone(profile: str, ids: list[str],
+                   timeout: float = PORT_WAIT_S) -> list[str]:
+    """The ids STILL in that browser's tab list after a bounded wait.
 
     `Target.closeTarget` answers before the tab is gone, and a page with a
-    beforeunload handler can keep it open: the list is the only honest proof.
+    beforeunload handler can keep it open: the list is the only honest proof,
+    and its survivors ARE the report.
     """
     deadline = time.time() + timeout
     while True:
-        if target_id not in {r["id"] for r in _rows(profile)}:
-            return False
-        if time.time() >= deadline:
-            return True
+        try:
+            open_ids = {r["id"] for r in _rows(profile)}
+        except ControlError:
+            open_ids = set()          # the browser is gone: so are its tabs
+        left = [i for i in ids if i in open_ids]
+        if not left or time.time() >= deadline:
+            return left
         time.sleep(0.2)
 
 
@@ -605,24 +707,118 @@ def stop(browser: str = "") -> dict:
     return {"ok": True, "stopped": True, "pid": pid, "profile": profile}
 
 
-def tabs(browser: str = "") -> dict:
-    """Every page tab, id-sorted."""
-    profile = resolve_profile(browser)
-    ensure_up(profile)
-    rows = _rows(profile)
-    return {"ok": True, "profile": profile, "port": cdp.port_of(profile),
-            "count": len(rows), "tabs": rows}
+def _resolve_across(specs: list[str], browser: str,
+                    for_write: bool) -> list[tuple[dict, dict, int]]:
+    """[(browser row, tab, index)] for every spec, across the drivable ones.
+
+    EVERY spec is resolved before any of them is acted on, so an ambiguous or
+    missing one cannot leave a half-applied change; two specs that name the
+    same tab collapse into one entry. `for_write` refuses a tab in a browser
+    this CLI did not start: reads cover every drivable browser, writes only
+    its own.
+    """
+    rows = _drivable(browser)
+    if not rows:
+        fail("cdp-unreachable",
+             "no drivable browser"
+             + (f" matching {browser!r}" if browser else "")
+             + " — run `browser-control-cli open`")
+    tabs_of = {row["pid"]: _tabs_of(row)[0] for row in rows}
+    found: list[tuple[dict, dict, int]] = []
+    for spec in specs:
+        hits: list[tuple[dict, dict, int]] = []
+        for row in rows:
+            tabs = tabs_of[row["pid"]]
+            positions = {str(t["id"]): index
+                         for index, t in enumerate(tabs)}
+            hits += [(row, tab, positions[str(tab["id"])])
+                     for tab in _match_spec(tabs, spec)]
+        if not hits:
+            have = ", ".join(f'{t["title"][:20] or t["url"][:20]} '
+                             f'({r["exe"]})'
+                             for r in rows for t in tabs_of[r["pid"]][:2])
+            fail("no-page-tab",
+                 f"no tab matches {spec!r} (have: {have or 'none'})")
+        if len(hits) > 1:
+            where = ", ".join(
+                f'{t["title"][:20] or t["id"][:8]} in {r["exe"]}'
+                f':{os.path.basename(str(r["profile"]))}'
+                for r, t, _index in hits[:4])
+            fail("tab-ambiguous",
+                 f"{spec!r} matches {len(hits)} tabs: {where}")
+        row, tab, index = hits[0]
+        if for_write and not row["managed"]:
+            fail("not-managed",
+                 f"{spec!r} is in {row['exe']} on {row['profile']}, which "
+                 "this CLI did not start — `tab list` and `tab info` read "
+                 "every drivable browser, but only a managed browser is "
+                 "written to")
+        if not any(str(t["id"]) == str(tab["id"]) for _r, t, _i in found):
+            found.append((row, tab, index))
+    return found
+
+
+def _tab_count() -> int:
+    """How many page tabs the drivable browsers show right now."""
+    return sum(len(_tabs_of(row)[0]) for row in _drivable())
+
+
+def tab_info(spec: str, browser: str = "") -> dict:
+    """`tab info`: one tab, resolved across the drivable browsers.
+
+    The read side of a handle: which browser owns it, and what it is now.
+    """
+    (row, tab, index), = _resolve_across([spec], browser, for_write=False)
+    return {"ok": True, "tab": {**tab, "index": index},
+            "browser": _brief(row)}
+
+
+def close_tabs(specs: list[str], browser: str = "") -> dict:
+    """`tab close`: close every tab the specs name, and prove the set is gone.
+
+    All specs resolve first (across the drivable browsers), so nothing is
+    closed when one of them is ambiguous, missing, or in a browser this CLI
+    did not start. The close then goes per browser, and every requested id is
+    read back: a survivor is a refusal that names it.
+    """
+    if not specs:
+        fail("bad-args",
+             "tab close: at least one TAB spec is required (id:<prefix> or a "
+             "title/url substring)")
+    found = _resolve_across(list(specs), browser, for_write=True)
+    by_profile: dict[str, list[str]] = {}
+    for row, tab, _index in found:
+        by_profile.setdefault(str(row["profile"]), []).append(str(tab["id"]))
+    for profile, ids in by_profile.items():
+        for target_id in ids:
+            cdp.browser_call(profile, "Target.closeTarget",
+                             {"targetId": target_id})
+    survivors: list[str] = []
+    for profile, ids in by_profile.items():
+        survivors += _wait_ids_gone(profile, ids)
+    if survivors:
+        fail("close-tab-not-verified",
+             f"{len(survivors)} of {len(found)} tabs are still open: "
+             + ", ".join(str(i)[:10] for i in survivors[:4]))
+    return {"ok": True,
+            "closed": [{"id": tab["id"], "title": tab["title"],
+                        "url": tab["url"], "pid": row["pid"],
+                        "managed": row["managed"]}
+                       for row, tab, _index in found],
+            "count": _tab_count()}
 
 
 def new_tab(urls: list[str] | None = None, browser: str = "") -> dict:
     """Open one tab per URL (`about:blank` when none was given), all named.
 
-    The reply carries `opened` — one entry per tab this call made — plus, for
-    a single URL, the `tab`/`id`/`url`/`title` keys the first slice had.
+    A write, so it goes to a MANAGED browser: the one `--browser` names, else
+    the live managed one — never a browser this CLI did not start.
     """
+    # the URL policy comes FIRST: an address this tool will never open is
+    # wrong whether or not a browser is running (the order `launch` uses)
+    wanted = [safe_url(url) for url in (urls or [])] or ["about:blank"]
     profile = resolve_profile(browser)
     ensure_up(profile)
-    wanted = [safe_url(url) for url in (urls or [])] or ["about:blank"]
     opened = _open_tabs(profile, wanted)
     reply: dict = {
         "ok": True, "count": len(_rows(profile)),
@@ -633,20 +829,3 @@ def new_tab(urls: list[str] | None = None, browser: str = "") -> dict:
         reply.update({"tab": f"id:{opened[0]['id']}", "id": opened[0]["id"],
                       "url": opened[0]["url"], "title": opened[0]["title"]})
     return reply
-
-
-def close_tab(spec: str, browser: str = "") -> dict:
-    """Close ONE tab and prove it is gone."""
-    profile = resolve_profile(browser)
-    ensure_up(profile)
-    target = resolve_tab(cdp.page_rows(profile), spec)
-    target_id = str(target["id"])
-    cdp.browser_call(profile, "Target.closeTarget", {"targetId": target_id})
-    if _wait_gone(profile, target_id):
-        fail("close-tab-not-verified",
-             f"tab {target_id} is still open after the close")
-    return {"ok": True,
-            "closed": {"id": target_id,
-                       "title": str(target.get("title") or ""),
-                       "url": str(target.get("url") or "")},
-            "count": len(_rows(profile))}

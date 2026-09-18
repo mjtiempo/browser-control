@@ -106,6 +106,21 @@ def answers(port: int) -> bool:
         return False
 
 
+def version_at(port: int) -> dict:
+    """What `/json/version` says about the browser on `port`, or {}.
+
+    The product and protocol versions come from the BROWSER, not from the
+    binary's name, which is what makes them worth reporting.
+    """
+    if not port:
+        return {}
+    try:
+        info = _get_port(port, "/json/version")
+    except ControlError:
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
 def reachable(profile: str) -> bool:
     """Is a browser answering CDP on this profile right now?"""
     return answers(port_of(profile))

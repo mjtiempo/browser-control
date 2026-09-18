@@ -19,13 +19,14 @@ from browser_control import __version__
 from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
-    close_tab,
+    browser_info,
+    close_tabs,
     launch,
     list_browsers,
     list_tabs,
     new_tab,
     stop,
-    tabs,
+    tab_info,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ControlError,
@@ -34,17 +35,21 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
 
 USAGE = """usage: browser-control-cli VERB [ARGS]
 
-  open [URL...]     start (or adopt) the managed browser; each URL opens
-  close             stop the managed browser this CLI started
-  tabs              the managed browser's page tabs, id-sorted
-  list              every Chromium-family browser running here, ours or not
-  list-tabs         the page tabs of every DRIVABLE browser, by browser
-  new-tab [URL...]  one tab per URL (about:blank when none)
-  close-tab SPEC    close ONE tab: `id:<prefix>` or a title/url substring
-  selftest          prove the install: interpreter, websockets, verbs
+  open [URL...]      start (or adopt) the managed browser; each URL opens
+  close              stop the managed browser this CLI started
+  list               every Chromium-family browser running here, ours or not
+  info               the browser this CLI would drive, and its endpoint
+  tab [URL...]       open one tab per URL (about:blank when none)
+  tab list           every drivable browser's page tabs, by browser
+  tab info SPEC      one tab: `id:<prefix>` or a title/url substring
+  tab close SPEC...  close every tab the specs name, verified as a set
+  selftest           prove the install: interpreter, websockets, verbs
 
-flags: --browser NAME   the installed Chromium-family browser to drive
-                        (default: the first on PATH; a live managed browser wins)
+SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
+       spec matching nothing, or several tabs, refuses and names them
+flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
+                        (info/tab list); default: a live managed browser, else
+                        the first Chromium-family one on PATH
 out:   one JSON object on stdout; ERR[code]: message on stderr, exit 2"""
 
 
@@ -89,6 +94,22 @@ def _no_browser_flag(verb: str, browser: str) -> None:
              "browser on the machine")
 
 
+def _specs(rest: list[str], verb: str) -> list[str]:
+    """Every TAB spec this verb was given, in order — at least one.
+
+    A flag is refused rather than ignored (`--browser` is taken by `main`),
+    and a caller that names three tabs gets three closed.
+    """
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"{verb}: unknown flag {arg!r}")
+    if not rest:
+        fail("bad-args",
+             f"{verb}: at least one TAB spec is required (id:<prefix> or a "
+             "title/url substring)")
+    return list(rest)
+
+
 def cmd_open(rest: list[str], browser: str) -> dict:
     return launch(_urls(rest, "open"), browser=browser)
 
@@ -98,29 +119,28 @@ def cmd_close(rest: list[str], browser: str) -> dict:
     return stop(browser=browser)
 
 
-def cmd_tabs(rest: list[str], browser: str) -> dict:
-    _none(rest, "tabs")
-    return tabs(browser=browser)
-
-
-def cmd_new_tab(rest: list[str], browser: str) -> dict:
-    return new_tab(_urls(rest, "new-tab"), browser=browser)
-
-
 def cmd_list(rest: list[str], browser: str) -> dict:
     _none(rest, "list")
     _no_browser_flag("list", browser)
     return list_browsers()
 
 
-def cmd_list_tabs(rest: list[str], browser: str) -> dict:
-    _none(rest, "list-tabs")
-    _no_browser_flag("list-tabs", browser)
-    return list_tabs()
+def cmd_info(rest: list[str], browser: str) -> dict:
+    _none(rest, "info")
+    return browser_info(browser=browser)
 
 
-def cmd_close_tab(rest: list[str], browser: str) -> dict:
-    return close_tab(_one(rest, "close-tab", required=True), browser=browser)
+def cmd_tab(rest: list[str], browser: str) -> dict:
+    """`tab [URL...]` opens tabs; `tab list|info|close` are subcommands.
+
+    A subcommand is a reserved word, so `tab list` can never mean "open the
+    site `list`" — a URL carries a scheme (`https://…`, `about:blank`), which
+    is what the URL policy enforces anyway.
+    """
+    handler = TAB_SUBCOMMANDS.get(str(rest[0]) if rest else "")
+    if handler is not None:
+        return handler(rest[1:], browser)
+    return new_tab(_urls(rest, "tab"), browser=browser)
 
 
 def cmd_selftest(rest: list[str], browser: str) -> dict:
@@ -160,14 +180,34 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
 
 Handler = Callable[[list[str], str], dict]
 
+
+def cmd_tab_list(rest: list[str], browser: str) -> dict:
+    _none(rest, "tab list")
+    return list_tabs(browser=browser)
+
+
+def cmd_tab_info(rest: list[str], browser: str) -> dict:
+    return tab_info(_one(rest, "tab info", required=True), browser=browser)
+
+
+def cmd_tab_close(rest: list[str], browser: str) -> dict:
+    return close_tabs(_specs(rest, "tab close"), browser=browser)
+
+
+# `tab`'s subcommands: a reserved first word, so a URL can never be mistaken
+# for one (and vice versa).
+TAB_SUBCOMMANDS: dict[str, Handler] = {
+    "list": cmd_tab_list,
+    "info": cmd_tab_info,
+    "close": cmd_tab_close,
+}
+
 HANDLERS: dict[str, Handler] = {
     "open": cmd_open,
     "close": cmd_close,
-    "tabs": cmd_tabs,
     "list": cmd_list,
-    "list-tabs": cmd_list_tabs,
-    "new-tab": cmd_new_tab,
-    "close-tab": cmd_close_tab,
+    "info": cmd_info,
+    "tab": cmd_tab,
     "selftest": cmd_selftest,
 }
 

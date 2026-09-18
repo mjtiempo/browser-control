@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 13 hermetic + 17 live checks passing.
+Repo `main`, worktree clean, 13 hermetic + 20 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,25 +15,36 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 218 | `HANDLERS` table, `--browser`, `selftest`, JSON out / `ERR[code]` exit 2 |
-| `browser_control/lib/browser.py` | 652 | managed profile, resolve, launch, verified stop, tab ops, browser discovery |
-| `browser_control/lib/cdp.py` | 214 | endpoint (`DevToolsActivePort`), capped JSON GET, explicit-port reads, one websocket call |
+| `browser_control/cli/main.py` | 258 | `HANDLERS` table, `tab` subcommands, `--browser`, `selftest` |
+| `browser_control/lib/browser.py` | 831 | managed profile, launch, verified stop, discovery, the `tab` operations |
+| `browser_control/lib/cdp.py` | 229 | endpoint (`DevToolsActivePort`), capped JSON GET, explicit-port reads, one websocket call |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 340 | 13 hermetic checks, no browser needed |
-| `tests/live_test.py` | 518 | 17 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 387 | 13 hermetic checks, no browser needed |
+| `tests/live_test.py` | 626 | 20 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
+
+The surface is a noun and its verb: `tab` owns everything about a page tab,
+the other verbs own the browser.
 
 | Verb | Does | Verified by (the read-back) |
 | --- | --- | --- |
 | `open [URL...]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs | the endpoint must **answer**, then every opened tab must be in the tab list |
 | `close` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs |
-| `tabs` | the managed browser's page tabs, id-sorted | `/json` shape-checked |
 | `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, and whether CDP answers (+ its tab count) | one `/proc` pass, plus a CDP probe on the port each one names |
-| `list-tabs` | the page tabs of every **drivable** browser, grouped by browser | the same tab list the verbs use, read per browser |
-| `new-tab [URL...]` | one tab per URL (`about:blank` when none), every id named | each id from `Target.createTarget`, re-read from the tab list |
-| `close-tab SPEC` | one tab: `id:<prefix>` or a title/url substring | the id must be **absent** afterwards, else `close-tab-not-verified` |
+| `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
+| `tab [URL...]` | one tab per URL (`about:blank` when none), every id named | each id from `Target.createTarget`, re-read from the tab list |
+| `tab list [--browser NAME]` | the page tabs of every **drivable** browser, grouped and sorted by browser | the same tab list the verbs use, read per browser |
+| `tab info SPEC` | one tab: which browser owns it, its `{id,title,url,index}` now | the spec resolves to exactly one tab or refuses |
+| `tab close SPEC...` | closes every tab the specs name, **all specs resolved before anything is closed** | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
+
+Reads span every drivable browser; **writes only a managed one** (a profile
+under this invocation's root). A tab in a browser this CLI did not start is
+readable (`tab list`, `tab info`) and refused for `tab close`/`tab` with
+`ERR[not-managed]`. `--browser NAME` narrows a read to one browser and picks
+the one a write goes to; when two running browsers share the name, the
+managed one wins.
 
 Contract: one JSON object on stdout; `ERR[code]: message` on stderr; exit 2 on
 a refusal. `--browser NAME` selects the Chromium; otherwise the first on PATH,
@@ -70,15 +81,17 @@ refusing `cdp-unreachable`.
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
-**Live battery** — `python3 tests/live_test.py` → **17 passed, 0 failed, 0
+**Live battery** — `python3 tests/live_test.py` → **20 passed, 0 failed, 0
 skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
 independent state back — a raw socket connect, a direct `/json` GET, `/proc`
-for the pid — for open, `list`, the tab list, `list-tabs` grouping, new-tab
-(single and several URLs), open with several URLs, both `close-tab` spec
-forms, an ambiguous spec, five refusals, adoption of the running browser, the
-verified close, the idempotent close, a browser with **no** debugging port
-(listed, never driven) and "nothing left running". With the command missing it
-reports 17 skips and exits 2.
+for the pid — for open, `list`, `tab list`/`tab info`, `tab` (single and
+several URLs), open with several URLs, `tab close` by id and by substring,
+an ambiguous spec (refused with **nothing** closed), a two-spec close in one
+call, refusals, `info`, adoption of the running browser, the verified close,
+the idempotent close, a browser with no debugging port (listed, never
+driven), a **foreign drivable** browser (read, refused for write) and
+"nothing left running". With the command missing it reports 20 skips and
+exits 2.
 
 **Not proven yet**: no concurrent-`open` test (there is no lock), no
 multi-browser test (two live instances refuse), no CI.
@@ -117,7 +130,9 @@ multi-browser test (two live instances refuse), no CI.
 Ordered by "unblocks the most with the least". **5.1 and 5.2 have landed**
 (§1, §2) and **5.3 is deferred by decision** — the next actionable step is
 5.4 (`nav`), and every later verb is expected to add its check to
-`tests/live_test.py`.
+`tests/live_test.py`. The CLI grammar is settled (§1): page work lives under
+`tab`, browser work stays top-level, so `nav` lands as `tab nav URL` rather
+than a new top-level name.
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -127,13 +142,15 @@ the one thing that makes an install unusable. Covered hermetically (that
 refusal included) and by the battery's first check.
 
 ### 5.2 The live battery — done
-`tests/live_test.py` (518 lines, 17 checks): a temp `BROWSER_CONTROL_ROOT`, a
+`tests/live_test.py` (626 lines, 20 checks): a temp `BROWSER_CONTROL_ROOT`, a
 local page server so tabs have distinct URLs without the network, a
 skip-if-prereq that exits 2, and mandatory cleanup — close what you opened,
 kill what you started (and wait for it), remove the temp root (the skip path
 leaked one until it was fixed, and the removal has to outlive a dying
 browser). Every check reads independent state (raw socket, direct `/json`,
-`/proc`) instead of trusting the reply.
+`/proc`) instead of trusting the reply, and two of them launch browsers this
+CLI does **not** manage — one with no debugging port, one drivable — to prove
+the read/write boundary.
 
 ### 5.3 Profile seeding — deferred
 Deliberately not being built yet, so the managed browser starts with none of
@@ -145,11 +162,12 @@ Chrome singleton files dropped, honest `copied: reflink|copy|empty`, and
 instance this CLI started). The policy question (auto-seed on first `open`
 vs explicit only) is deferred with it.
 
-### 5.4 `nav` + history
-`nav URL [--tab]`, `back`, `forward`, `reload`. Assignment, then read back the
+### 5.4 `tab nav` + history
+`tab nav URL [--tab SPEC]`, `tab back`, `tab forward`, `tab reload`.
+Assignment, then read back the
 observed URL and `readyState`; `chrome-error://` → `nav-failed`; the
 "net change" test, not string equality, so a normalization-only difference is
-not a false `nav-not-verified`. One URL validator shared with `open`/`new-tab`.
+not a false `nav-not-verified`. One URL validator shared with `open`/`tab`.
 *Done when* a dead domain refuses `nav-failed`, a redirect reports `url_read`,
 and navigating to the page you are on is not an error.
 
@@ -202,7 +220,8 @@ Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
    installed wheel, so drop it if you pip-install.
 4. **Command name** — the plan says `bctl`; the delivered command is
    `browser-control-cli`. Keep one, or ship both (long name for discovery,
-   short alias for typing)?
+   short alias for typing)? *(The verb grammar itself is settled: `tab` owns
+   page work, the rest stay top-level.)*
 5. **Output** — JSON-only (current) or JSON by default plus a human format?
 6. **Plugin discovery** — entry points (packaging) or a scanned directory?
 

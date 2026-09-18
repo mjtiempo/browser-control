@@ -135,29 +135,42 @@ redaction, fail-open), `config.py` (env + config file), `__init__.py` exposing
 
 ## 3. `cli/` verbs (v1)
 
-`status` · `ensure [URL] [--relaunch] [--no-seed]` · `open URL…` · `stop` ·
-`restart` · `profile-status` · `profile-sync [--source DIR] [--browser NAME]
-[--force]` · `tabs` · `list` · `list-tabs` · `new-tab URL…` ·
-`close-tab SPEC` ·
-`activate-tab [--tab S]` · `nav URL [--tab S]` · `back` · `forward` ·
-`reload` · `js EXPR [--tab S]` · `wait --for …` · `find TEXT|--selector CSS` ·
-`text` · `focus-el` · `press KEY` · `insert-text TEXT` ·
-`type-keystrokes TEXT` · `upload FILE` · `media-state|play|pause` ·
-`ad-state` · `skip-ad` · `search QUERY [--engine E] [--limit N]` ·
-`cdp METHOD [PARAMS_JSON] [--target ID|--browser]` · `selftest` · `help`.
+The surface is a noun and its verb: `tab` owns everything about a page tab,
+the other verbs own the browser.
 
-`open` and `new-tab` take any number of URLs (a fresh `open` loads the first
-as its startup page and the rest as tabs); `list` reports every browser
-running on the machine, drivable or not, and `list-tabs` reports the tabs of
-every drivable one, grouped by browser.
+Browser-level:
 
-Shape: one `cmd_*` per verb in a `HANDLERS` table; `main` parses `--tab`,
-dispatches, logs, prints `ERR[code]: message` on stderr, exit 2. Unknown flag
-or extra positional → `bad-args` (never dropped).
+`open URL…` · `close` · `list` · `info` · `selftest` · `help` ·
+`cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the raw escape hatch) ·
+`search QUERY [--engine E] [--limit N]` (headless, in a browser of its own) —
+and later `ensure [URL] [--relaunch] [--no-seed]` · `restart` ·
+`profile-status` · `profile-sync [--source DIR] [--browser NAME] [--force]`.
 
-Delivered so far: `open`, `close`, `tabs`, `list`, `list-tabs`, `new-tab`,
-`close-tab`, `selftest` — the rest of the list is the target surface;
-[`progress.md`](progress.md) is the state of the work.
+Page-level, under `tab`:
+
+`tab [URL…]` · `tab list` · `tab info SPEC` · `tab close SPEC…` ·
+`tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
+`tab reload` · `tab js EXPR` · `tab wait --for …` ·
+`tab find TEXT|--selector CSS` · `tab text` · `tab focus-el` · `tab press KEY` ·
+`tab insert-text TEXT` · `tab type-keystrokes TEXT` · `tab upload FILE` ·
+`tab media state|play|pause` · `tab ad-state` · `tab skip-ad`.
+
+A SPEC is a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; one
+match is required, several refuse with the candidates named. `open` and `tab`
+take any number of URLs (a fresh `open` loads the first as its startup page
+and the rest as tabs); `list` reports every browser running on the machine,
+drivable or not, and `tab list` the tabs of every drivable one, grouped by
+browser. Reads span every drivable browser; **writes go only to a managed
+one** (a profile under this invocation's root).
+
+Shape: one `cmd_*` per verb in a `HANDLERS` table (`tab`'s subcommands in
+`TAB_SUBCOMMANDS`); `main` parses `--browser`, dispatches, logs, prints
+`ERR[code]: message` on stderr, exit 2. An unknown flag, an extra positional,
+or a bare word that is not a URL → `bad-args` (never dropped).
+
+Delivered so far: `open`, `close`, `list`, `info`, `tab [URL…]`, `tab list`,
+`tab info`, `tab close`, `selftest` — the rest of the list is the target
+surface; [`progress.md`](progress.md) is the state of the work.
 
 ## 4. Verification appetite
 

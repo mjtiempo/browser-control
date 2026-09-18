@@ -165,10 +165,24 @@ def base_url() -> str:
 
 
 # ------------------------------------------------------------------- checks
+def our_tabs() -> list[dict]:
+    """Our managed browser's tabs, narrowed by its own profile name.
+
+    `--browser` prefers the managed match, so a browser the user also has open
+    under the same name cannot leak into the answer.
+    """
+    reply = ok_json("tab", "list", "--browser", str(STATE["name"]))
+    groups = reply["browsers"]
+    assert groups, (f"`tab list --browser {STATE['name']}` found nothing",
+                    reply)
+    assert all(g["managed"] for g in groups), groups
+    return [t for g in groups for t in g["tabs"]]
+
+
 def c_selftest() -> str:
     data = ok_json("selftest")
     assert data["ok"] is True, data
-    for verb in ("open", "close", "tabs", "new-tab", "close-tab", "selftest"):
+    for verb in ("open", "close", "list", "info", "tab", "selftest"):
         assert verb in data["verbs"], data["verbs"]
     assert data["websockets"] and data["python"], data
     assert Path(data["python"]).exists(), data["python"]
@@ -184,7 +198,8 @@ def c_open_starts_a_browser() -> str:
     profile = str(reply["profile"])
     assert profile.startswith(ROOT), \
         f"the browser runs outside the throwaway root: {profile}"
-    STATE.update(port=port, pid=pid, profile=profile)
+    STATE.update(port=port, pid=pid, profile=profile,
+                 name=os.path.basename(profile))
     # independent: the port answers, and the pid is a process on our profile
     deadline = time.time() + 10
     while time.time() < deadline and not listening(port):
@@ -201,62 +216,78 @@ def c_open_starts_a_browser() -> str:
     return f"pid {pid}, port {port}, tab {rows[0]['id'][:8]}…"
 
 
-def c_tabs_matches_the_tab_list() -> str:
-    reply = ok_json("tabs")
-    assert reply["count"] == len(reply["tabs"]) == 1, reply
-    assert reply["tabs"][0]["id"] == STATE["tab"], reply
-    assert [t["id"] for t in pages(STATE["port"])] == [STATE["tab"]], \
-        "the CLI's tab list and /json disagree"
-    return "the CLI's tab list is /json, filtered and id-sorted"
+def c_tab_list_matches_the_tab_list() -> str:
+    """`tab list --browser <ours>` is the browser's own tab list, re-read."""
+    rows = our_tabs()
+    assert [t["id"] for t in rows] == [t["id"] for t in pages(STATE["port"])], \
+        (rows, pages(STATE["port"]))
+    assert STATE["tab"] in {t["id"] for t in rows}, rows
+    return "`tab list` for our browser is /json, filtered and id-sorted"
+
+
+def c_tab_info_names_the_browser() -> str:
+    """`tab info SPEC` resolves one handle and names the browser owning it."""
+    reply = ok_json("tab", "info", f"id:{STATE['tab'][:8]}")
+    assert reply["tab"]["id"] == STATE["tab"], reply
+    assert isinstance(reply["tab"]["index"], int), reply
+    assert reply["browser"]["managed"] is True, reply
+    assert reply["browser"]["pid"] == STATE["pid"], reply
+    return (f'tab {STATE["tab"][:8]}… is index {reply["tab"]["index"]} in '
+            f'pid {reply["browser"]["pid"]}')
 
 
 def c_new_tab() -> str:
-    reply = ok_json("new-tab", f"{base_url()}/two")
+    reply = ok_json("tab", f"{base_url()}/two")
     tid = str(reply["id"])
     assert tid and reply["tab"] == f"id:{tid}", reply
     assert reply["count"] == 2, reply
-    assert tid in {t["id"] for t in ok_json("tabs")["tabs"]}, reply
+    assert tid in {t["id"] for t in our_tabs()}, reply
     STATE["second"] = tid
     return f"tab {tid[:8]}… re-read from the tab list"
 
 
 def c_close_tab_by_id_prefix() -> str:
     tid = str(STATE["second"])
-    reply = ok_json("close-tab", f"id:{tid[:8]}")
-    assert reply["closed"]["id"] == tid, reply
-    assert reply["count"] == 1, reply
+    reply = ok_json("tab", "close", f"id:{tid[:8]}")
+    assert [row["id"] for row in reply["closed"]] == [tid], reply
     assert tid not in {t["id"] for t in pages(STATE["port"])}, \
         "the tab is still in /json"
     return f"{tid[:8]}… closed and absent from /json"
 
 
 def c_close_tab_by_substring() -> str:
-    tid = str(ok_json("new-tab", f"{base_url()}/three")["id"])
-    reply = ok_json("close-tab", "three")
-    assert reply["closed"]["id"] == tid, reply
+    tid = str(ok_json("tab", f"{base_url()}/three")["id"])
+    reply = ok_json("tab", "close", "three")
+    assert [row["id"] for row in reply["closed"]] == [tid], reply
     assert tid not in {t["id"] for t in pages(STATE["port"])}, reply
     return "a title/url substring resolves to exactly one tab"
 
 
 def c_ambiguous_spec_refuses() -> str:
-    first = str(ok_json("new-tab", f"{base_url()}/four-a")["id"])
-    second = str(ok_json("new-tab", f"{base_url()}/four-b")["id"])
-    err = refuses("tab-ambiguous", "close-tab", "four")
+    first = str(ok_json("tab", f"{base_url()}/four-a")["id"])
+    second = str(ok_json("tab", f"{base_url()}/four-b")["id"])
+    err = refuses("tab-ambiguous", "tab", "close", "four")
     assert first[:6] in err or "four" in err, err
-    for tid in (first, second):
-        ok_json("close-tab", f"id:{tid}")
+    left = {t["id"] for t in pages(STATE["port"])}
+    assert first in left and second in left, \
+        "the refusal must not have closed anything"
+    # several specs in ONE call, both verified together
+    reply = ok_json("tab", "close", f"id:{first[:8]}", f"id:{second[:8]}")
+    assert {row["id"] for row in reply["closed"]} == {first, second}, reply
     left = {t["id"] for t in pages(STATE["port"])}
     assert first not in left and second not in left, left
-    return "two matches refused rather than picked, both closed by id"
+    return "ambiguous refused with nothing closed; two specs closed in one call"
 
 
 def c_refusals() -> str:
-    refuses("no-page-tab", "close-tab", "zzz-nothing")
-    refuses("bad-args", "close-tab")
+    refuses("no-page-tab", "tab", "close", "zzz-nothing")
+    refuses("bad-args", "tab", "close")
+    refuses("bad-args", "tab", "info")
+    refuses("bad-args", "tab", "close", "id:")
+    refuses("bad-args", "tab", "frobnicate")      # a bare word is not a URL
     refuses("bad-args", "open", "file:///etc/passwd")
-    refuses("bad-args", "open", "a", "b")
     refuses("unknown-command", "frobnicate")
-    return "five refusals, each with its own code, exit 2"
+    return "seven refusals, each with its own code, exit 2"
 
 
 def c_open_adopts_the_running_browser() -> str:
@@ -279,8 +310,12 @@ def c_close_stops_the_browser() -> str:
     while time.time() < deadline and listening(port):
         time.sleep(0.2)
     assert not listening(port), f"port {port} still accepts connections"
-    refuses("cdp-unreachable", "tabs")
-    return f"pid {pid} gone, port {port} closed, tabs refuses"
+    refuses("no-page-tab", "tab", "info", f"id:{STATE['tab'][:8]}")
+    data = ok_json("tab", "list")
+    assert all(g["pid"] != pid for g in data["browsers"]), data
+    info = ok_json("info")
+    assert info["running"] is False, info
+    return f"pid {pid} gone, port {port} closed, tab info refuses"
 
 
 def c_close_is_idempotent() -> str:
@@ -297,11 +332,11 @@ def c_no_leftover_process() -> str:
 
 
 def c_new_tab_several() -> str:
-    """`new-tab a b c` — one call, three tabs, every id re-read."""
+    """`tab a b c` — one call, three tabs, every id re-read."""
     base = base_url()
     urls = [f"{base}/six-a", f"{base}/six-b", f"{base}/six-c"]
     before = len(pages(STATE["port"]))
-    reply = ok_json("new-tab", *urls)
+    reply = ok_json("tab", *urls)
     opened = [row["id"] for row in reply["opened"]]
     assert len(opened) == 3 and len(set(opened)) == 3, reply
     assert [row["requested"] for row in reply["opened"]] == urls, reply
@@ -309,8 +344,8 @@ def c_new_tab_several() -> str:
     assert len(rows) == before + 3, (before, rows)
     assert set(opened) <= {r["id"] for r in rows}, (opened, rows)
     assert reply["count"] == len(rows), reply
-    for tid in opened:                       # leave it as we found it
-        ok_json("close-tab", f"id:{tid}")
+    ok_json("tab", "close", *[f"id:{i[:8]}" for i in opened])
+    assert opened[0] not in {t["id"] for t in pages(STATE["port"])}
     return f"3 tabs from one call: {', '.join(i[:6] for i in opened)}"
 
 
@@ -328,7 +363,7 @@ def c_open_several() -> str:
     for url in urls:
         assert any(str(r["url"]).startswith(url) for r in rows), (url, rows)
     for row in reply["opened"]:                       # leave it as we found it
-        ok_json("close-tab", f'id:{row["id"]}')
+        ok_json("tab", "close", f'id:{row["id"]}')
     return "3 sites in one call, each named by its id"
 
 
@@ -348,7 +383,7 @@ def c_list_sees_our_browser() -> str:
 
 
 def c_list_tabs_groups_by_browser() -> str:
-    data = ok_json("list-tabs")
+    data = ok_json("tab", "list")
     groups = [g for g in data["browsers"] if g["pid"] == STATE["pid"]]
     assert len(groups) == 1, data
     group = groups[0]
@@ -390,7 +425,7 @@ def c_list_shows_a_browser_outside_cdp() -> str:
         assert row["profile"] == profile, row
         assert row["cdp"] == {"port": 0, "reachable": False}, row
         assert all(g["pid"] != proc.pid
-                   for g in ok_json("list-tabs")["browsers"]), row
+                   for g in ok_json("tab", "list")["browsers"]), row
     finally:
         with contextlib.suppress(OSError):
             os.kill(proc.pid, signal.SIGTERM)
@@ -404,27 +439,100 @@ def c_list_shows_a_browser_outside_cdp() -> str:
                 break
             time.sleep(0.3)
     assert stopped, f"pid {proc.pid} survived SIGTERM"
-    return f"pid {proc.pid} listed, cdp unreachable, absent from list-tabs"
+    return f"pid {proc.pid} listed, cdp unreachable, absent from tab list"
+
+
+def c_info_reports_the_endpoint() -> str:
+    """`info` names the browser this CLI would drive, endpoint included."""
+    data = ok_json("info")
+    assert data["running"] is True, data
+    assert data["browser"]["pid"] == STATE["pid"], data
+    assert data["browser"]["managed"] is True, data
+    assert data["cdp"]["reachable"] is True, data
+    assert data["cdp"]["port"] == STATE["port"], data
+    assert data["cdp"]["tabs"] == len(pages(STATE["port"])), data
+    assert "Chrome" in data["cdp"]["version"], data
+    assert data["cdp"]["protocol"], data
+    return (f'info: {data["cdp"]["version"]}, protocol '
+            f'{data["cdp"]["protocol"]}, {data["cdp"]["tabs"]} tabs')
+
+
+def c_tab_write_needs_managed() -> str:
+    """A drivable browser this CLI did not start is READ, never written.
+
+    Launched on its own throwaway profile with `--remote-debugging-port=0`, so
+    it is a real CDP endpoint that is not ours: `tab list` shows it, `tab info`
+    reads it, and `tab close` must refuse `not-managed` — with the tab still
+    open afterwards.
+    """
+    path = browser_lib.binary()
+    profile = tempfile.mkdtemp(prefix="browser-control-foreign-")
+    proc = subprocess.Popen(
+        [path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
+         "--no-first-run", "--no-default-browser-check", "about:blank"],
+        start_new_session=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    stopped = False
+    try:
+        port, deadline = 0, time.time() + 20
+        while time.time() < deadline:
+            try:
+                with open(Path(profile, "DevToolsActivePort")) as handle:
+                    port = int(handle.readline().strip() or 0)
+            except (OSError, ValueError):
+                port = 0
+            if port and listening(port):
+                break
+            time.sleep(0.5)
+        assert port, f"the foreign browser never published a port: {profile}"
+        group = next((g for g in ok_json("tab", "list")["browsers"]
+                      if g["pid"] == proc.pid), None)
+        assert group is not None, "`tab list` does not show the foreign browser"
+        assert group["managed"] is False, group
+        tid = str(group["tabs"][0]["id"])
+        info = ok_json("tab", "info", f"id:{tid[:8]}")
+        assert info["browser"]["managed"] is False, info
+        err = refuses("not-managed", "tab", "close", f"id:{tid[:8]}")
+        assert "did not start" in err, err
+        assert tid in {t["id"] for t in pages(port)}, \
+            "the refusal closed a tab in someone else's browser"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        stopped = not browser_lib._pid_alive(proc.pid)  # noqa: SLF001
+        for _ in range(3):
+            shutil.rmtree(profile, ignore_errors=True)
+            if not Path(profile).exists():
+                break
+            time.sleep(0.3)
+    assert stopped, f"pid {proc.pid} survived SIGTERM"
+    return f"foreign pid {proc.pid} read, its tab refused for close"
 
 
 CHECKS = (
     ("selftest answers without a browser", c_selftest),
     ("open starts a managed browser", c_open_starts_a_browser),
     ("list sees it, drivable", c_list_sees_our_browser),
-    ("tabs reads the tab list back", c_tabs_matches_the_tab_list),
-    ("list-tabs groups by browser", c_list_tabs_groups_by_browser),
-    ("new-tab names the tab it made", c_new_tab),
-    ("new-tab with several URLs", c_new_tab_several),
+    ("tab list reads the tab list back", c_tab_list_matches_the_tab_list),
+    ("tab info names the browser", c_tab_info_names_the_browser),
+    ("tab list groups by browser", c_list_tabs_groups_by_browser),
+    ("tab names the tab it made", c_new_tab),
+    ("tab with several URLs", c_new_tab_several),
     ("open with several URLs", c_open_several),
-    ("close-tab by id prefix", c_close_tab_by_id_prefix),
-    ("close-tab by substring", c_close_tab_by_substring),
+    ("tab close by id prefix", c_close_tab_by_id_prefix),
+    ("tab close by substring", c_close_tab_by_substring),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
+    ("info reports the endpoint", c_info_reports_the_endpoint),
     ("open adopts a running browser", c_open_adopts_the_running_browser),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),
     ("a browser outside CDP is listed, not driven",
      c_list_shows_a_browser_outside_cdp),
+    ("a foreign CDP browser is read, not written",
+     c_tab_write_needs_managed),
     ("no process is left behind", c_no_leftover_process),
 )
 

@@ -194,51 +194,93 @@ def t_cli_dispatch() -> None:
         cli_main.launch = original         # type: ignore[assignment]
 
 
-def t_cli_prints_the_service_reply() -> None:
-    rows = [{"id": "A", "title": "t", "url": "u"}]
+def t_cli_tab_grammar() -> None:
+    """`tab [URL...]`, `tab list`, `tab info SPEC`, `tab close SPEC...`.
 
-    def fake_tabs(browser: str = "") -> dict:
-        return {"ok": True, "tabs": rows}
+    The subcommand is a reserved first word, so every call here must land in
+    exactly one service — with the arguments it was given, none dropped.
+    """
+    calls: list[tuple] = []
 
-    original = cli_main.tabs
-    cli_main.tabs = fake_tabs              # type: ignore[assignment]
+    def fake_new_tab(urls: list[str] | None = None,
+                     browser: str = "") -> dict:
+        calls.append(("tab", tuple(urls or ()), browser))
+        return {"ok": True, "opened": []}
+
+    def fake_list_tabs(browser: str = "") -> dict:
+        calls.append(("tab list", browser))
+        return {"ok": True, "count": 0, "browsers": []}
+
+    def fake_tab_info(spec: str, browser: str = "") -> dict:
+        calls.append(("tab info", spec, browser))
+        return {"ok": True, "tab": {"id": spec}}
+
+    def fake_close_tabs(specs: list[str], browser: str = "") -> dict:
+        calls.append(("tab close", tuple(specs), browser))
+        return {"ok": True, "closed": []}
+
+    originals = (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
+                 cli_main.close_tabs)
+    (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
+     cli_main.close_tabs) = (fake_new_tab, fake_list_tabs, fake_tab_info,
+                             fake_close_tabs)          # type: ignore[assignment]
     try:
-        rc, out, err = run_cli(["tabs", "--browser=chromium"])
-        assert rc == 0, (rc, err)
-        assert json.loads(out)["tabs"] == rows, out
+        for argv in (["tab"], ["tab", "https://a.example", "https://b.example"],
+                     ["tab", "list"], ["tab", "list", "--browser=chrome"],
+                     ["tab", "info", "id:ABC"],
+                     ["tab", "info", "a.example", "--browser", "chromium"],
+                     ["tab", "close", "a", "b"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("tab", (), ""),
+            ("tab", ("https://a.example", "https://b.example"), ""),
+            ("tab list", ""),
+            ("tab list", "chrome"),
+            ("tab info", "id:ABC", ""),
+            ("tab info", "a.example", "chromium"),
+            ("tab close", ("a", "b"), ""),
+        ], calls
     finally:
-        cli_main.tabs = original           # type: ignore[assignment]
+        (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
+         cli_main.close_tabs) = originals             # type: ignore[assignment]
+    # a bare word is not a URL — and that is decided before any browser is
+    # touched (the real service, not the fake)
+    rc, _out, err = run_cli(["tab", "frobnicate"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
 
 
 def t_cli_lists() -> None:
-    """`list` and `list-tabs` print the service reply and take no flags."""
+    """`list` and `info` print the service reply and take no arguments."""
     rows = [{"pid": 1, "exe": "chrome", "managed": False,
              "cdp": {"port": 0, "reachable": False}}]
-    calls: list[str] = []
+    calls: list[tuple] = []
 
     def fake_list_browsers() -> dict:
-        calls.append("list")
+        calls.append(("list",))
         return {"ok": True, "count": 1, "browsers": rows}
 
-    def fake_list_tabs() -> dict:
-        calls.append("list-tabs")
-        return {"ok": True, "count": 0, "browsers": []}
+    def fake_browser_info(browser: str = "") -> dict:
+        calls.append(("info", browser))
+        return {"ok": True, "running": False}
 
-    originals = (cli_main.list_browsers, cli_main.list_tabs)
+    originals = (cli_main.list_browsers, cli_main.browser_info)
     cli_main.list_browsers = fake_list_browsers     # type: ignore[assignment]
-    cli_main.list_tabs = fake_list_tabs             # type: ignore[assignment]
+    cli_main.browser_info = fake_browser_info       # type: ignore[assignment]
     try:
         rc, out, err = run_cli(["list"])
         assert rc == 0 and json.loads(out)["browsers"] == rows, (rc, out, err)
-        rc, out, _err = run_cli(["list-tabs"])
-        assert rc == 0 and json.loads(out)["count"] == 0, out
-        assert calls == ["list", "list-tabs"], calls
+        rc, out, _err = run_cli(["info", "--browser", "chromium"])
+        assert rc == 0 and json.loads(out)["running"] is False, out
+        assert calls == [("list",), ("info", "chromium")], calls
         for argv in (["list", "extra"], ["list", "--browser", "chromium"],
-                     ["list-tabs", "x"], ["list-tabs", "--browser=chrome"]):
+                     ["info", "extra"], ["tab", "list", "x"],
+                     ["tab", "close"], ["tab", "info"],
+                     ["tab", "info", "a", "b"], ["tab", "close", "-x"]):
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     finally:
-        (cli_main.list_browsers, cli_main.list_tabs) = originals  # type: ignore[assignment]
+        (cli_main.list_browsers, cli_main.browser_info) = originals  # type: ignore[assignment]
 
 
 def t_cmdline_value() -> None:
@@ -264,18 +306,23 @@ def t_cli_argv_is_strict() -> None:
     def boom(*_args: object, **_kwargs: object) -> dict:
         raise AssertionError("an argv that must be refused reached the service")
 
-    originals = (cli_main.launch, cli_main.new_tab)
-    cli_main.launch = boom                 # type: ignore[assignment]
-    cli_main.new_tab = boom                # type: ignore[assignment]
+    originals = (cli_main.launch, cli_main.new_tab, cli_main.close_tabs,
+                 cli_main.stop)
+    (cli_main.launch, cli_main.new_tab, cli_main.close_tabs,
+     cli_main.stop) = (boom, boom, boom, boom)   # type: ignore[assignment]
     try:
         rc, _out, err = run_cli(["frobnicate"])
         assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
         for argv in (["open", "--workspace", "1"],
                      ["open", "https://a", "-x"],
                      ["close", "now"],
-                     ["tabs", "extra"],
-                     ["close-tab"],
-                     ["new-tab", "-x"],
+                     ["close", "--browser", "x", "now"],
+                     ["tab", "-x"],
+                     ["tab", "list", "extra"],
+                     ["tab", "close"],
+                     ["tab", "info"],
+                     ["tab", "info", "a", "b"],
+                     ["info", "extra"],
                      ["list", "extra"]):
             rc, _out, err = run_cli(argv)
             assert rc == 2, (argv, rc)
@@ -285,7 +332,8 @@ def t_cli_argv_is_strict() -> None:
         rc, out, _err = run_cli(["--help"])
         assert rc == 0 and out.startswith("usage: browser-control-cli"), out
     finally:
-        (cli_main.launch, cli_main.new_tab) = originals  # type: ignore[assignment]
+        (cli_main.launch, cli_main.new_tab, cli_main.close_tabs,
+         cli_main.stop) = originals              # type: ignore[assignment]
 
 
 def t_selftest() -> None:
@@ -293,8 +341,7 @@ def t_selftest() -> None:
     assert rc == 0, (rc, err)
     data = json.loads(out)
     assert data["ok"] is True and data["command"] == "browser-control-cli", data
-    for verb in ("open", "close", "tabs", "new-tab", "close-tab",
-                 "selftest"):
+    for verb in ("open", "close", "list", "info", "tab", "selftest"):
         assert verb in data["verbs"], data["verbs"]
     assert data["version"] and data["python"], data
     # the one thing selftest must FAIL on: without websockets no verb can
@@ -324,9 +371,9 @@ def main() -> int:
         ("port file is not proof of a port", t_port_file),
         ("page rows from a fake endpoint", t_page_rows_from_a_fake_endpoint),
         ("cli dispatches with flags stripped", t_cli_dispatch),
-        ("cli lists browsers and tabs", t_cli_lists),
+        ("tab grammar lands in one service", t_cli_tab_grammar),
+        ("cli lists browsers and their info", t_cli_lists),
         ("cmdline flag values are read", t_cmdline_value),
-        ("cli prints the service reply", t_cli_prints_the_service_reply),
         ("cli argv is strict", t_cli_argv_is_strict),
         ("selftest proves the install", t_selftest),
         ("pid liveness", t_pid_alive),
