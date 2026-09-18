@@ -140,11 +140,13 @@ the other verbs own the browser.
 
 Browser-level:
 
-`open URL…` · `close` · `list` · `info` · `selftest` · `help` ·
-`cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the raw escape hatch) ·
-`search QUERY [--engine E] [--limit N]` (headless, in a browser of its own) —
-and later `ensure [URL] [--relaunch] [--no-seed]` · `restart` ·
-`profile-status` · `profile-sync [--source DIR] [--browser NAME] [--force]`.
+`open URL…` · `close` · `list` · `info` · `attach [--port N|--pid N|--profile
+DIR]` · `attach --list` · `detach [--port N|--pid N|--profile DIR|--all]` ·
+`selftest` · `help` · `cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the
+raw escape hatch) · `search QUERY [--engine E] [--limit N]` (headless, in a
+browser of its own) — and later `ensure [URL] [--relaunch] [--no-seed]` ·
+`restart` · `profile-status` · `profile-sync [--source DIR] [--browser NAME]
+[--force]`.
 
 Page-level, under `tab`:
 
@@ -160,8 +162,11 @@ match is required, several refuse with the candidates named. `open` and `tab`
 take any number of URLs (a fresh `open` loads the first as its startup page
 and the rest as tabs); `list` reports every browser running on the machine,
 drivable or not, and `tab list` the tabs of every drivable one, grouped by
-browser. Reads span every drivable browser; **writes go only to a managed
-one** (a profile under this invocation's root).
+browser. Reads span every drivable browser; **writes go to a managed browser
+or to an attached one** — `attach` grants tab writes to a browser this tool
+did not start, `detach` revokes it, and `close` never stops an attached one
+(attaching is not ownership). `list` and `info` report `managed` and
+`attached` on every browser.
 
 Shape: one `cmd_*` per verb in a `HANDLERS` table (`tab`'s subcommands in
 `TAB_SUBCOMMANDS`); `main` parses `--browser`, dispatches, logs, prints

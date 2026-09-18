@@ -283,6 +283,129 @@ def t_cli_lists() -> None:
         (cli_main.list_browsers, cli_main.browser_info) = originals  # type: ignore[assignment]
 
 
+def t_cli_attach_grammar() -> None:
+    """`attach`/`detach` argv lands in the right service call, none dropped."""
+    calls: list[tuple] = []
+
+    def fake_attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
+        calls.append(("attach", port, pid, profile))
+        return {"ok": True}
+
+    def fake_attachments() -> dict:
+        calls.append(("attach --list",))
+        return {"ok": True, "count": 0, "attached": []}
+
+    def fake_detach(port: int = 0, pid: int = 0, profile: str = "",
+                    detach_all: bool = False) -> dict:
+        calls.append(("detach", port, pid, profile, detach_all))
+        return {"ok": True}
+
+    originals = (cli_main.attach, cli_main.attachments, cli_main.detach)
+    (cli_main.attach, cli_main.attachments,
+     cli_main.detach) = (fake_attach, fake_attachments,
+                         fake_detach)                # type: ignore[assignment]
+    try:
+        for argv in (["attach", "--port", "43903"],
+                     ["attach", "--pid", "209380"],
+                     ["attach", "--profile", "/x/y"],
+                     ["attach", "--list"],
+                     ["detach", "--port", "1"],
+                     ["detach", "--all"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("attach", 43903, 0, ""),
+            ("attach", 0, 209380, ""),
+            ("attach", 0, 0, "/x/y"),
+            ("attach --list",),
+            ("detach", 1, 0, "", False),
+            ("detach", 0, 0, "", True),
+        ], calls
+        for argv in (["attach", "--port"], ["attach", "--port", "x"],
+                     ["attach", "--port", "1", "--bogus"],
+                     ["attach", "--list", "--port", "1"],
+                     ["attach", "--browser", "chrome"],
+                     ["detach", "--all", "--port", "1"],
+                     ["detach", "--pid", "abc"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    finally:
+        (cli_main.attach, cli_main.attachments,
+         cli_main.detach) = originals                # type: ignore[assignment]
+    # the library refuses what the CLI cannot know: none, or two selectors
+    for argv in (["attach"], ["attach", "--port", "1", "--pid", "2"],
+                 ["detach"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
+def t_attach_bookkeeping() -> None:
+    """attach → the write gate opens → detach closes it again.
+
+    Two fake browsers on a throwaway root: ours (managed) and a foreign one
+    (attached). The point is the boundary, not the plumbing.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["BROWSER_CONTROL_ROOT"] = tmp
+        ours = os.path.join(tmp, "ours")
+        foreign = os.path.join(tmp, "foreign")
+        real_browsers = browser.browsers
+        real_rows = browser.cdp.page_rows_at
+
+        def rows() -> list[dict]:
+            return [
+                {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
+                 "profile": ours, "profile_from": "flag",
+                 "managed": True, "attached": browser.is_attached(ours),
+                 "cdp": {"port": 1616, "reachable": True, "tabs": 1}},
+                {"pid": 2, "exe": "chrome", "path": "/usr/bin/chrome",
+                 "profile": foreign, "profile_from": "flag",
+                 "managed": False,
+                 "attached": browser.is_attached(foreign),
+                 "cdp": {"port": 1515, "reachable": True, "tabs": 1}},
+            ]
+
+        def page_rows_at(port: int) -> list[dict]:
+            ident = "AB12" if port == 1515 else "CD34"
+            return [{"type": "page", "id": ident, "title": ident,
+                     "url": f"https://{port}/"}]
+
+        browser.browsers = rows                      # type: ignore[assignment]
+        browser.cdp.page_rows_at = page_rows_at      # type: ignore[assignment]
+        try:
+            # the foreign tab is READABLE, and refused for a write
+            assert browser.tab_info("id:AB12")["browser"]["managed"] is False
+            refusal(lambda: browser._resolve_across(["id:AB12"], "foreign",
+                                                    for_write=True),
+                    "not-managed")
+            # lifecycle resolution never picks an attached browser
+            assert browser.managed_profile("") == ours
+            reply = browser.attach(port=1515)
+            assert reply["attached"] is True, reply
+            assert reply["already"] is False, reply
+            assert reply["browser"]["profile"] == browser._norm(foreign), reply
+            # two writable browsers refuse rather than pick one
+            refusal(lambda: browser._writable_profile(""), "ambiguous-browser")
+            # the same spec now resolves for a write
+            found = browser._resolve_across(["id:AB12"], "foreign",
+                                            for_write=True)
+            assert found and found[0][1]["id"] == "AB12", found
+            listed = browser.attachments()["attached"]
+            assert listed and listed[0]["running"] is True, listed
+            assert listed[0]["managed"] is False, listed
+            # detach puts the refusal back
+            gone = browser.detach(profile=foreign)
+            assert gone["detached"] == [browser._norm(foreign)], gone
+            refusal(lambda: browser._resolve_across(["id:AB12"], "foreign",
+                                                    for_write=True),
+                    "not-managed")
+            refusal(lambda: browser.detach(port=1515), "not-attached")
+        finally:
+            browser.browsers = real_browsers          # type: ignore[assignment]
+            browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
+            del os.environ["BROWSER_CONTROL_ROOT"]
+
+
 def t_cmdline_value() -> None:
     """Chrome writes `--flag=value` and `--flag value`; both are read."""
     value = browser._cmdline_value                            # noqa: SLF001
@@ -372,6 +495,8 @@ def main() -> int:
         ("page rows from a fake endpoint", t_page_rows_from_a_fake_endpoint),
         ("cli dispatches with flags stripped", t_cli_dispatch),
         ("tab grammar lands in one service", t_cli_tab_grammar),
+        ("attach/detach grammar", t_cli_attach_grammar),
+        ("attach opens the write gate", t_attach_bookkeeping),
         ("cli lists browsers and their info", t_cli_lists),
         ("cmdline flag values are read", t_cmdline_value),
         ("cli argv is strict", t_cli_argv_is_strict),

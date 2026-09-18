@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 13 hermetic + 20 live checks passing.
+Repo `main`, worktree clean, 15 hermetic + 20 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,12 +15,12 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 258 | `HANDLERS` table, `tab` subcommands, `--browser`, `selftest` |
-| `browser_control/lib/browser.py` | 831 | managed profile, launch, verified stop, discovery, the `tab` operations |
+| `browser_control/cli/main.py` | 334 | `HANDLERS` table, `tab` subcommands, `--browser`, `attach`/`detach` argv |
+| `browser_control/lib/browser.py` | 1015 | managed profile, launch, verified stop, discovery, attach records, tab ops |
 | `browser_control/lib/cdp.py` | 229 | endpoint (`DevToolsActivePort`), capped JSON GET, explicit-port reads, one websocket call |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 387 | 13 hermetic checks, no browser needed |
-| `tests/live_test.py` | 626 | 20 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 512 | 15 hermetic checks, no browser needed |
+| `tests/live_test.py` | 653 | 20 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -33,18 +33,25 @@ the other verbs own the browser.
 | `close` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs |
 | `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, and whether CDP answers (+ its tab count) | one `/proc` pass, plus a CDP probe on the port each one names |
 | `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
+| `attach --port N \| --pid N \| --profile DIR` | makes a running browser this CLI did not start writable (a `tab` write target) | the profile comes from a live Chromium-family process of this machine that ANSWERS on its endpoint, never from the caller |
+| `attach --list` | what is attached, and whether it is still running | each record re-checked against `/proc` + a CDP probe |
+| `detach --port N \| --pid N \| --profile DIR \| --all` | revokes that authorization | `not-attached` when there is nothing to revoke |
 | `tab [URL...]` | one tab per URL (`about:blank` when none), every id named | each id from `Target.createTarget`, re-read from the tab list |
 | `tab list [--browser NAME]` | the page tabs of every **drivable** browser, grouped and sorted by browser | the same tab list the verbs use, read per browser |
 | `tab info SPEC` | one tab: which browser owns it, its `{id,title,url,index}` now | the spec resolves to exactly one tab or refuses |
 | `tab close SPEC...` | closes every tab the specs name, **all specs resolved before anything is closed** | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
-Reads span every drivable browser; **writes only a managed one** (a profile
-under this invocation's root). A tab in a browser this CLI did not start is
-readable (`tab list`, `tab info`) and refused for `tab close`/`tab` with
-`ERR[not-managed]`. `--browser NAME` narrows a read to one browser and picks
-the one a write goes to; when two running browsers share the name, the
-managed one wins.
+Reads span every drivable browser; **writes go to a managed one (a profile
+under this invocation's root) or to an attached one** (`attach` grants TAB
+writes only — `close` never stops an attached browser, and `detach` is how the
+authorization goes). A tab in a browser that is neither is readable (`tab
+list`, `tab info`) and refused for `tab close`/`tab` with `ERR[not-managed]`.
+`--browser NAME` narrows a read to one browser and picks the one a write goes
+to; when two running browsers share the name, ours wins. Two *writable*
+browsers refuse `ambiguous-browser` rather than picking one — `detach` or
+`--browser NAME` resolves it. `list` and `info` carry both flags on every
+browser: `managed` and `attached`.
 
 Contract: one JSON object on stdout; `ERR[code]: message` on stderr; exit 2 on
 a refusal. `--browser NAME` selects the Chromium; otherwise the first on PATH,
@@ -89,9 +96,9 @@ several URLs), open with several URLs, `tab close` by id and by substring,
 an ambiguous spec (refused with **nothing** closed), a two-spec close in one
 call, refusals, `info`, adoption of the running browser, the verified close,
 the idempotent close, a browser with no debugging port (listed, never
-driven), a **foreign drivable** browser (read, refused for write) and
-"nothing left running". With the command missing it reports 20 skips and
-exits 2.
+driven), a **foreign drivable** browser (read → refused → attached → written
+→ detached, with `close` still refusing to stop it) and "nothing left
+running". With the command missing it reports 20 skips and exits 2.
 
 **Not proven yet**: no concurrent-`open` test (there is no lock), no
 multi-browser test (two live instances refuse), no CI.

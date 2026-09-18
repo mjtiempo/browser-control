@@ -19,8 +19,11 @@ from browser_control import __version__
 from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
+    attach,
+    attachments,
     browser_info,
     close_tabs,
+    detach,
     launch,
     list_browsers,
     list_tabs,
@@ -39,6 +42,11 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   close              stop the managed browser this CLI started
   list               every Chromium-family browser running here, ours or not
   info               the browser this CLI would drive, and its endpoint
+  attach [--port N|--pid N|--profile DIR]
+                     allow TAB writes to a browser this CLI did not start
+  attach --list      what is attached, and whether it is still up
+  detach [--port N|--pid N|--profile DIR|--all]
+                     revoke that authorization
   tab [URL...]       open one tab per URL (about:blank when none)
   tab list           every drivable browser's page tabs, by browser
   tab info SPEC      one tab: `id:<prefix>` or a title/url substring
@@ -50,6 +58,8 @@ SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
 flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
                         (info/tab list); default: a live managed browser, else
                         the first Chromium-family one on PATH
+reads: every drivable browser.  writes: a managed browser, or an attached one
+       — `attach` grants TAB writes only, `close` never stops one
 out:   one JSON object on stdout; ERR[code]: message on stderr, exit 2"""
 
 
@@ -92,6 +102,70 @@ def _no_browser_flag(verb: str, browser: str) -> None:
         fail("bad-args",
              f"{verb}: --browser does not apply — this verb reports every "
              "browser on the machine")
+
+
+def _int(value: str, what: str) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        fail("bad-args", f"{what} needs a number, got {value!r}")
+
+
+def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
+    """`--port N | --pid N | --profile DIR`, plus `--list`/`--all` where a
+    verb allows them. Pure argv work: an unknown flag is refused, and the
+    combinations that mean two different things are refused too."""
+    out = {"port": 0, "pid": 0, "profile": "", "list": False,
+           "all": False}
+    index = 0
+    while index < len(rest):
+        arg = str(rest[index])
+        if arg == "--list" and "list" in allow:
+            out["list"] = True
+            index += 1
+            continue
+        if arg == "--all" and "all" in allow:
+            out["all"] = True
+            index += 1
+            continue
+        if arg in ("--port", "--pid", "--profile"):
+            if index + 1 >= len(rest):
+                fail("bad-args", f"{verb}: {arg} needs a value")
+            key, value = arg[2:], str(rest[index + 1])
+            if key in ("port", "pid"):
+                out[key] = _int(value, f"{verb}: {arg}")
+            else:
+                out[key] = value
+            index += 2
+            continue
+        known = ", ".join(["--port N", "--pid N", "--profile DIR"]
+                          + [f"--{name}" for name in allow])
+        fail("bad-args",
+             f"{verb}: unknown argument {arg!r} (flags: {known})")
+    if out["list"] and (out["all"] or out["port"] or out["pid"]
+                        or out["profile"]):
+        fail("bad-args", f"{verb}: --list takes no other argument")
+    if out["all"] and (out["port"] or out["pid"] or out["profile"]):
+        fail("bad-args", f"{verb}: --all takes no other selector")
+    return out
+
+
+def cmd_attach(rest: list[str], browser: str) -> dict:
+    """`attach --port N|--pid N|--profile DIR` / `attach --list`."""
+    _no_browser_flag("attach", browser)
+    selector = _selector(rest, "attach", ("list",))
+    if selector["list"]:
+        return attachments()
+    return attach(port=selector["port"], pid=selector["pid"],
+                  profile=selector["profile"])
+
+
+def cmd_detach(rest: list[str], browser: str) -> dict:
+    """`detach ...` / `detach --all` — revoke a tab-write authorization."""
+    _no_browser_flag("detach", browser)
+    selector = _selector(rest, "detach", ("all",))
+    return detach(port=selector["port"], pid=selector["pid"],
+                  profile=selector["profile"], detach_all=selector["all"])
 
 
 def _specs(rest: list[str], verb: str) -> list[str]:
@@ -207,6 +281,8 @@ HANDLERS: dict[str, Handler] = {
     "close": cmd_close,
     "list": cmd_list,
     "info": cmd_info,
+    "attach": cmd_attach,
+    "detach": cmd_detach,
     "tab": cmd_tab,
     "selftest": cmd_selftest,
 }

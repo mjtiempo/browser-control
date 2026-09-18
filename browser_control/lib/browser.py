@@ -19,6 +19,7 @@ publishes rather than an assumed 9222.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -120,25 +121,9 @@ def live_profiles() -> list[str]:
     return [path for path in profiles() if cdp.reachable(path)]
 
 
-def resolve_profile(name: str = "") -> str:
-    """The profile this call is about.
-
-    The named browser's, else the ONE live managed browser, else the default
-    browser's. Two live browsers refuse: the endpoint belongs to a browser
-    identity, and silently picking one is how a verb drives the browser
-    nobody asked about.
-    """
-    if name:
-        return profile_dir(binary(name))
-    live = live_profiles()
-    if len(live) > 1:
-        fail("ambiguous-browser",
-             f"{len(live)} managed browsers are up "
-             f"({', '.join(os.path.basename(p) for p in live)}) — "
-             "pass --browser NAME")
-    if len(live) == 1:
-        return live[0]
-    return profile_dir(binary())
+def _norm(path: object) -> str:
+    """One identity for a profile path: absolute, `~` expanded."""
+    return os.path.abspath(os.path.expanduser(str(path or "")))
 
 
 def ensure_up(profile: str) -> None:
@@ -146,7 +131,8 @@ def ensure_up(profile: str) -> None:
     if not cdp.reachable(profile):
         fail("cdp-unreachable",
              f"no drivable browser on {profile} — run "
-             "`browser-control-cli open`")
+             "`browser-control-cli open`, or attach a running one with "
+             "`browser-control-cli attach --port N`")
 
 
 def flags(profile: str) -> list[str]:
@@ -358,10 +344,12 @@ def browsers() -> list[dict]:
     One /proc pass over the main processes: each with the profile it runs on
     (`--user-data-dir`, else the default data directory for that executable)
     and whether a DevTools endpoint answers for it — which is what makes it
-    drivable. `managed` says the profile is one this CLI owns, so the answer
-    is about the whole machine rather than our own corner of it.
+    drivable. `managed` says the profile is one this CLI owns and `attached`
+    that it was attached for tab writes, so the answer is about the whole
+    machine rather than our own corner of it.
     """
     rows: list[dict] = []
+    attached = _attached()
     for pid, exe, cmd in _main_processes():
         flag = _cmdline_value(cmd, "--user-data-dir")
         profile = flag or _default_profile(exe)
@@ -378,9 +366,10 @@ def browsers() -> list[dict]:
                      "profile_from": ("flag" if flag else
                                       ("default" if profile else "")),
                      "managed": _is_managed(profile),
+                     "attached": _norm(profile) in attached,
                      "cdp": endpoint})
-    # ours first, then whatever can be driven, then by pid
-    return sorted(rows, key=lambda r: (not r["managed"],
+    # ours first, then the attached ones, then whatever can be driven, by pid
+    return sorted(rows, key=lambda r: (not r["managed"], not r["attached"],
                                        not r["cdp"]["reachable"], r["pid"]))
 
 
@@ -390,6 +379,190 @@ def list_browsers() -> dict:
     return {"ok": True, "count": len(rows),
             "drivable": sum(1 for r in rows if r["cdp"]["reachable"]),
             "browsers": rows}
+
+
+ATTACH_FILE = "attached.json"
+
+
+def _attached() -> dict[str, dict]:
+    """The attach records, keyed by absolute profile path.
+
+    A missing, unreadable or malformed file is {}: an attachment that cannot
+    be read is not an authorization to write anywhere.
+    """
+    try:
+        with open(os.path.join(root(), ATTACH_FILE)) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, list):
+        return {}
+    return {_norm(row["profile"]): row for row in data
+            if isinstance(row, dict) and row.get("profile")}
+
+
+def _write_attached(records: dict[str, dict]) -> None:
+    """Replace the attach file. One scratch file and a rename, so a crash
+    cannot leave a half-written list of authorizations."""
+    path = os.path.join(root(), ATTACH_FILE)
+    temp = f"{path}.new"
+    try:
+        os.makedirs(root(), exist_ok=True)
+        with open(temp, "w") as handle:
+            json.dump(sorted(records.values(),
+                             key=lambda r: str(r.get("profile"))),
+                      handle, indent=1)
+        os.replace(temp, path)
+    except OSError as e:
+        fail("attach-failed", f"cannot write {path}: {e}")
+
+
+def is_attached(profile: str) -> bool:
+    """Is this profile attached for tab writes?"""
+    return _norm(profile) in _attached()
+
+
+def _narrow(rows: list[dict], browser: str) -> list[dict]:
+    """The rows whose browser a name matches: its executable, or the basename
+    of its profile — the name `open --browser NAME` keys a profile by."""
+    if not browser:
+        return rows
+    wanted = os.path.basename(str(browser).strip())
+    return [r for r in rows
+            if wanted in (r["exe"], os.path.basename(str(r["profile"])))]
+
+
+def _writable_profile(browser: str = "") -> str:
+    """The profile a tab write goes to: the named browser's, else the ONE
+    writable browser that is up, else this CLI's own (which `open` starts).
+
+    Two writable browsers refuse — the endpoint belongs to a browser identity,
+    and picking one silently is how a tab lands in the browser nobody asked
+    about. `attach`/`detach` decide which browsers are candidates; `--browser`
+    picks among them.
+    """
+    rows = _narrow([r for r in browsers()
+                    if r["managed"] or r["attached"]], browser)
+    if len(rows) > 1:
+        names = ", ".join(os.path.basename(str(r["profile"]))
+                          + (" (attached)" if r["attached"] else "")
+                          for r in rows)
+        fail("ambiguous-browser",
+             f"{len(rows)} writable browsers are up ({names}) — pass "
+             "--browser NAME, or `detach` one")
+    if rows:
+        return str(rows[0]["profile"])
+    return profile_dir(binary(browser)) if browser else profile_dir(binary())
+
+
+def managed_profile(browser: str = "") -> str:
+    """The profile a LIFECYCLE verb (stop) is about: ours, or the one `open`
+    would start. An attached browser is never a candidate — attaching grants
+    tab writes, not the right to stop somebody else's browser."""
+    rows = _narrow([r for r in browsers()
+                    if r["managed"] and r["cdp"]["reachable"]], browser)
+    if len(rows) > 1:
+        names = ", ".join(os.path.basename(str(r["profile"])) for r in rows)
+        fail("ambiguous-browser",
+             f"{len(rows)} managed browsers are up ({names}) — pass "
+             "--browser NAME")
+    if rows:
+        return str(rows[0]["profile"])
+    return profile_dir(binary(browser)) if browser else profile_dir(binary())
+
+
+def attachments() -> dict:
+    """`attach --list`: what is attached, and whether it is still there."""
+    records = _attached()
+    live = {_norm(r["profile"]): r for r in browsers()}
+    rows: list[dict] = []
+    for key in sorted(records):
+        record = dict(records[key])
+        row = live.get(key)
+        record["running"] = row is not None
+        record["reachable"] = bool(row and row["cdp"]["reachable"])
+        record["managed"] = bool(row and row["managed"])
+        rows.append(record)
+    return {"ok": True, "count": len(rows), "attached": rows}
+
+
+def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
+    """`attach`: allow TAB WRITES to a browser this CLI did not start.
+
+    The browser keeps its own lifecycle: `close` never stops an attached
+    browser (`detach` is how the authorization goes away), and the profile
+    must belong to a running, answering Chromium-family process of this
+    machine — which is where the identity comes from, not from the caller.
+    """
+    given = [name for name, value in (("--port", port), ("--pid", pid),
+                                      ("--profile", profile)) if value]
+    if len(given) != 1:
+        fail("bad-args",
+             "attach: name ONE browser — --port N, --pid N or --profile DIR")
+    rows = browsers()
+    if pid:
+        row = next((r for r in rows if r["pid"] == _to_int(pid)), None)
+    elif profile:
+        want = _norm(profile)
+        row = next((r for r in rows if _norm(r["profile"]) == want), None)
+    else:
+        want_port = _to_int(port)
+        row = next((r for r in rows
+                    if _to_int(r["cdp"]["port"]) == want_port), None)
+    if row is None:
+        fail("no-browser",
+             f"no running Chromium-family browser matches {given[0]}")
+    if not row["cdp"]["reachable"]:
+        fail("cdp-unreachable",
+             f"pid {row['pid']} does not answer CDP on port "
+             f"{row['cdp']['port']} — attach needs a live endpoint")
+    record = {"profile": _norm(row["profile"]), "pid": row["pid"],
+              "port": _to_int(row["cdp"]["port"]), "exe": row["exe"],
+              "managed": row["managed"],
+              "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    records = _attached()
+    already = record["profile"] in records
+    records[record["profile"]] = record
+    _write_attached(records)
+    return {"ok": True, "attached": True, "already": already,
+            "browser": {"pid": record["pid"], "exe": record["exe"],
+                        "profile": record["profile"],
+                        "managed": record["managed"]},
+            "cdp": {"port": record["port"], "reachable": True},
+            "note": ("tab writes only — `close` will not stop it; "
+                     "`detach` revokes this")}
+
+
+def detach(port: int = 0, pid: int = 0, profile: str = "",
+           detach_all: bool = False) -> dict:
+    """`detach`: take the tab-write authorization away again."""
+    if detach_all:
+        if port or pid or profile:
+            fail("bad-args", "detach: --all takes no other selector")
+        keys = sorted(_attached())
+        _write_attached({})
+        return {"ok": True, "detached": keys, "count": 0}
+    given = [name for name, value in (("--port", port), ("--pid", pid),
+                                      ("--profile", profile)) if value]
+    if len(given) != 1:
+        fail("bad-args",
+             "detach: name ONE browser — --port N, --pid N, --profile DIR, "
+             "or --all")
+    records = _attached()
+    if profile:
+        keys = [key for key in records if key == _norm(profile)]
+    elif pid:
+        keys = [key for key, rec in records.items()
+                if _to_int(rec.get("pid")) == _to_int(pid)]
+    else:
+        keys = [key for key, rec in records.items()
+                if _to_int(rec.get("port")) == _to_int(port)]
+    if not keys:
+        fail("not-attached", f"nothing is attached for {given[0]}")
+    for key in keys:
+        records.pop(key, None)
+    _write_attached(records)
+    return {"ok": True, "detached": keys, "count": len(records)}
 
 
 def _drivable(browser: str = "") -> list[dict]:
@@ -404,12 +577,11 @@ def _drivable(browser: str = "") -> list[dict]:
     question.
     """
     rows = [r for r in browsers() if r["cdp"]["reachable"]]
-    if browser:
-        wanted = os.path.basename(str(browser).strip())
-        matches = [r for r in rows
-                   if wanted in (r["exe"],
-                                 os.path.basename(str(r["profile"])))]
-        rows = [r for r in matches if r["managed"]] or matches
+    matches = _narrow(rows, browser)
+    if browser and matches:
+        rows = [r for r in matches if r["managed"] or r["attached"]] or matches
+    else:
+        rows = matches
     return sorted(rows, key=lambda r: (r["exe"], str(r["profile"])))
 
 
@@ -429,13 +601,15 @@ def _tabs_of(row: dict) -> tuple[list[dict], str]:
 def _brief(row: dict) -> dict:
     """One browser row, small enough to ride along in a tab reply."""
     return {"pid": row["pid"], "exe": row["exe"], "profile": row["profile"],
-            "managed": row["managed"], "port": _to_int(row["cdp"]["port"])}
+            "managed": row["managed"], "attached": row["attached"],
+            "port": _to_int(row["cdp"]["port"])}
 
 
 def _row(row: dict) -> dict:
     """One browser row without its endpoint block (reported apart)."""
     return {key: row[key] for key in ("pid", "exe", "path", "profile",
-                                      "profile_from", "managed")}
+                                      "profile_from", "managed",
+                                      "attached")}
 
 
 def _endpoint_details(row: dict) -> dict:
@@ -473,27 +647,36 @@ def browser_info(browser: str = "") -> dict:
     """`info`: the browser this CLI would drive — or the one named — and its
     endpoint.
 
-    `running: false` is an ANSWER, not a refusal: which browser `open` would
-    start, and where its profile lives, is knowable without one running.
+    "Would drive" includes an ATTACHED browser: that is the one a `tab` write
+    goes to. `running: false` is an ANSWER, not a refusal — which browser
+    `open` would start, and where its profile lives, is knowable without one
+    running.
     """
     name = os.path.basename(str(browser).strip())
     rows = browsers()
     if name:
         matches = [r for r in rows if name in (
             r["exe"], os.path.basename(str(r["profile"])))]
-        row = next((r for r in matches if r["managed"]),
-                   matches[0] if matches else None)
+        # ours first, then an attached one: those are the browsers a tab
+        # write could reach, and the one `info` is really about
+        writable = next((r for r in matches
+                         if r["managed"] or r["attached"]), None)
+        row = writable if writable is not None else (
+            matches[0] if matches else None)
         if row is not None:
             return {"ok": True, "running": True, "browser": _row(row),
                     "cdp": _endpoint_details(row)}
         path = binary(browser)          # refuses no-browser when unknown
     else:
-        live = [r for r in rows if r["managed"] and r["cdp"]["reachable"]]
+        live = [r for r in rows
+                if (r["managed"] or r["attached"]) and r["cdp"]["reachable"]]
         if len(live) > 1:
+            names = ", ".join(os.path.basename(str(r["profile"]))
+                              + (" (attached)" if r["attached"] else "")
+                              for r in live)
             fail("ambiguous-browser",
-                 f"{len(live)} managed browsers are up "
-                 f"({', '.join(os.path.basename(str(r['profile'])) for r in live)})"
-                 " — name one with --browser NAME")
+                 f"{len(live)} writable browsers are up ({names}) — name one "
+                 "with --browser NAME")
         if live:
             return {"ok": True, "running": True, "browser": _row(live[0]),
                     "cdp": _endpoint_details(live[0])}
@@ -502,7 +685,8 @@ def browser_info(browser: str = "") -> dict:
     return {"ok": True, "running": False,
             "browser": {"pid": 0, "exe": os.path.basename(path),
                         "path": path, "profile": profile,
-                        "profile_from": "managed", "managed": True},
+                        "profile_from": "managed", "managed": True,
+                        "attached": False},
             "cdp": {"port": 0, "reachable": False}}
 
 
@@ -675,7 +859,7 @@ def stop(browser: str = "") -> dict:
     recorded, else re-found by cmdline and exe — and the reply requires the
     process AND the endpoint to be gone. Nothing is SIGKILLed.
     """
-    profile = resolve_profile(browser)
+    profile = managed_profile(browser)
     pid = _pid_of(profile)
     if not pid:
         if not cdp.reachable(profile):
@@ -747,12 +931,12 @@ def _resolve_across(specs: list[str], browser: str,
             fail("tab-ambiguous",
                  f"{spec!r} matches {len(hits)} tabs: {where}")
         row, tab, index = hits[0]
-        if for_write and not row["managed"]:
+        if for_write and not (row["managed"] or row["attached"]):
             fail("not-managed",
                  f"{spec!r} is in {row['exe']} on {row['profile']}, which "
-                 "this CLI did not start — `tab list` and `tab info` read "
-                 "every drivable browser, but only a managed browser is "
-                 "written to")
+                 "this CLI neither manages nor has attached — `tab list` "
+                 "and `tab info` read every drivable browser, but a write "
+                 "needs `attach --port N` (or a browser this CLI started)")
         if not any(str(t["id"]) == str(tab["id"]) for _r, t, _i in found):
             found.append((row, tab, index))
     return found
@@ -817,7 +1001,7 @@ def new_tab(urls: list[str] | None = None, browser: str = "") -> dict:
     # the URL policy comes FIRST: an address this tool will never open is
     # wrong whether or not a browser is running (the order `launch` uses)
     wanted = [safe_url(url) for url in (urls or [])] or ["about:blank"]
-    profile = resolve_profile(browser)
+    profile = _writable_profile(browser)
     ensure_up(profile)
     opened = _open_tabs(profile, wanted)
     reply: dict = {

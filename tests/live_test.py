@@ -182,7 +182,8 @@ def our_tabs() -> list[dict]:
 def c_selftest() -> str:
     data = ok_json("selftest")
     assert data["ok"] is True, data
-    for verb in ("open", "close", "list", "info", "tab", "selftest"):
+    for verb in ("open", "close", "list", "info", "attach", "detach",
+                 "tab", "selftest"):
         assert verb in data["verbs"], data["verbs"]
     assert data["websockets"] and data["python"], data
     assert Path(data["python"]).exists(), data["python"]
@@ -457,13 +458,13 @@ def c_info_reports_the_endpoint() -> str:
             f'{data["cdp"]["protocol"]}, {data["cdp"]["tabs"]} tabs')
 
 
-def c_tab_write_needs_managed() -> str:
-    """A drivable browser this CLI did not start is READ, never written.
+def c_attach_grants_writes() -> str:
+    """`attach` is what lets `tab` write to a browser this CLI did not start.
 
-    Launched on its own throwaway profile with `--remote-debugging-port=0`, so
-    it is a real CDP endpoint that is not ours: `tab list` shows it, `tab info`
-    reads it, and `tab close` must refuse `not-managed` — with the tab still
-    open afterwards.
+    A real foreign browser on its own profile: it is readable, a write
+    refuses `not-managed`, `attach --port N` turns it writable (a new tab
+    lands there and closes verified), the lifecycle verb still will not stop
+    it, and `detach` puts the refusal back.
     """
     path = browser_lib.binary()
     profile = tempfile.mkdtemp(prefix="browser-control-foreign-")
@@ -488,15 +489,41 @@ def c_tab_write_needs_managed() -> str:
         group = next((g for g in ok_json("tab", "list")["browsers"]
                       if g["pid"] == proc.pid), None)
         assert group is not None, "`tab list` does not show the foreign browser"
-        assert group["managed"] is False, group
+        assert group["managed"] is False and group["attached"] is False, group
         tid = str(group["tabs"][0]["id"])
+        # readable, and refused for a write
         info = ok_json("tab", "info", f"id:{tid[:8]}")
-        assert info["browser"]["managed"] is False, info
-        err = refuses("not-managed", "tab", "close", f"id:{tid[:8]}")
-        assert "did not start" in err, err
+        assert info["browser"]["pid"] == proc.pid, info
+        refuses("not-managed", "tab", "close", f"id:{tid[:8]}")
         assert tid in {t["id"] for t in pages(port)}, \
             "the refusal closed a tab in someone else's browser"
+        # attach: the write lands
+        reply = ok_json("attach", "--port", str(port))
+        assert reply["attached"] is True and reply["already"] is False, reply
+        assert reply["browser"]["pid"] == proc.pid, reply
+        listed = next(b for b in ok_json("list")["browsers"]
+                      if b["pid"] == proc.pid)
+        assert listed["attached"] is True, listed
+        attached = ok_json("attach", "--list")["attached"]
+        assert [row["port"] for row in attached] == [port], attached
+        made = str(ok_json("tab")["id"])
+        assert made in {t["id"] for t in pages(port)}, \
+            "the tab did not land in the attached browser"
+        closed = ok_json("tab", "close", f"id:{made[:8]}")
+        assert [row["id"] for row in closed["closed"]] == [made], closed
+        # the lifecycle verb still refuses to stop a foreign browser
+        stop_reply = ok_json("close")
+        assert stop_reply["stopped"] is False, stop_reply
+        assert Path(f"/proc/{proc.pid}").exists(), \
+            "close stopped a browser this CLI did not start"
+        # detach puts the refusal back
+        gone = ok_json("detach", "--port", str(port))
+        assert gone["detached"], gone
+        refuses("not-managed", "tab", "close", f"id:{tid[:8]}")
+        assert tid in {t["id"] for t in pages(port)}, "the refused close acted"
+        assert ok_json("attach", "--list")["count"] == 0
     finally:
+        run("detach", "--all", timeout=30)          # best effort
         with contextlib.suppress(OSError):
             os.kill(proc.pid, signal.SIGTERM)
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -508,7 +535,7 @@ def c_tab_write_needs_managed() -> str:
                 break
             time.sleep(0.3)
     assert stopped, f"pid {proc.pid} survived SIGTERM"
-    return f"foreign pid {proc.pid} read, its tab refused for close"
+    return f"foreign pid {proc.pid}: read, refused, attached, written, detached"
 
 
 CHECKS = (
@@ -531,8 +558,8 @@ CHECKS = (
     ("close again is a no-op", c_close_is_idempotent),
     ("a browser outside CDP is listed, not driven",
      c_list_shows_a_browser_outside_cdp),
-    ("a foreign CDP browser is read, not written",
-     c_tab_write_needs_managed),
+    ("a foreign CDP browser is read, then attached for writes",
+     c_attach_grants_writes),
     ("no process is left behind", c_no_leftover_process),
 )
 
