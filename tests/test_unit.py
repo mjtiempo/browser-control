@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from browser_control.cli import main as cli_main  # noqa: E402  # pyright: ignore[reportMissingImports]
-from browser_control.lib import browser, cdp  # noqa: E402  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser, cdp, dom  # noqa: E402  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import ControlError  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 PASS: list[str] = []
@@ -514,9 +514,13 @@ def t_one_tab_addressing() -> None:
             tabs[1616] = []
             refusal(lambda: browser._one_tab("", "", for_write=True),  # noqa: SLF001
                     "no-page-tab")
-            # a readable-but-foreign browser: reads see it, writes refuse
+            # a browser this CLI does not drive is not in the NO-SPEC scope:
+            # the user's own browser running beside ours must not make every
+            # unqualified read ambiguous. A spec reaches it; a write refuses.
             tabs[1515] = [page("EF56")]
-            _row, readable = browser._one_tab("", "", for_write=False)  # noqa: SLF001
+            refusal(lambda: browser._one_tab("", "", for_write=False),  # noqa: SLF001
+                    "no-page-tab")
+            _row, readable = browser._one_tab("EF56", "", for_write=False)  # noqa: SLF001
             assert readable["id"] == "EF56", readable
             refusal(lambda: browser._one_tab("EF56", "", for_write=True),  # noqa: SLF001
                     "not-managed")
@@ -524,6 +528,92 @@ def t_one_tab_addressing() -> None:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
             del os.environ["BROWSER_CONTROL_ROOT"]
+
+
+def t_cli_dom_grammar() -> None:
+    """`tab js|find|text|wait` argv — flags stripped, none dropped."""
+    calls: list[tuple] = []
+
+    def fake_js(expression: str, tab: str = "", browser: str = "") -> dict:
+        calls.append(("js", expression, tab, browser))
+        return {"ok": True}
+
+    def fake_find(text: str | None = None, selector: str | None = None,
+                  cap: int = 10, tab: str = "", browser: str = "") -> dict:
+        calls.append(("find", text, selector, cap, tab, browser))
+        return {"ok": True}
+
+    def fake_text(selector: str | None = None, chars: int = 0, tab: str = "",
+                  browser: str = "") -> dict:
+        calls.append(("text", selector, chars, tab, browser))
+        return {"ok": True}
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 15.0,
+                  idle_ms: int = 500, tab: str = "",
+                  browser: str = "") -> dict:
+        calls.append(("wait", mode, selector, expr, timeout, idle_ms, tab,
+                      browser))
+        return {"ok": True}
+
+    originals = (dom.js, dom.find, dom.text, dom.wait)
+    dom.js, dom.find, dom.text, dom.wait = (fake_js, fake_find, fake_text,
+                                            fake_wait)  # type: ignore[assignment]
+    try:
+        for argv in (["tab", "js", "document.title"],
+                     ["tab", "js", "document.title", "--tab", "id:ABC"],
+                     ["tab", "find", "Save"],
+                     ["tab", "find", "--selector", ".x", "--cap", "3"],
+                     ["tab", "text"],
+                     ["tab", "text", "--selector", "#main", "--chars", "50"],
+                     ["tab", "wait", "--for", "element", "--selector", ".x",
+                      "--timeout", "5"],
+                     ["tab", "wait", "--for", "js", "--expr", "true",
+                      "--idle-ms", "100", "--tab", "id:ABC"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("js", "document.title", "", ""),
+            ("js", "document.title", "id:ABC", ""),
+            ("find", "Save", None, dom.FIND_CAP, "", ""),
+            ("find", None, ".x", 3, "", ""),
+            ("text", None, dom.TEXT_CAP, "", ""),
+            ("text", "#main", 50, "", ""),
+            ("wait", "element", ".x", None, 5.0, dom.IDLE_DEFAULT_MS, "",
+             ""),
+            ("wait", "js", None, "true", dom.WAIT_DEFAULT_S, 100,
+             "id:ABC", ""),
+        ], calls
+    finally:
+        dom.js, dom.find, dom.text, dom.wait = originals  # type: ignore[assignment]
+    # every one of these refuses BEFORE a browser is touched (there is none
+    # running in a hermetic check), which is the property being held here
+    for argv in (["tab", "js"], ["tab", "js", "a", "b"],
+                 ["tab", "js", "--tab", "id:1"], ["tab", "find"],
+                 ["tab", "find", "a", "--selector", "b"],
+                 ["tab", "find", "a", "b"], ["tab", "text", "extra"],
+                 ["tab", "text", "--chars", "x"], ["tab", "wait"],
+                 ["tab", "wait", "--for", "nope"],
+                 ["tab", "wait", "--for", "element"],
+                 ["tab", "wait", "--for", "js"],
+                 ["tab", "wait", "--for", "load", "--selector", ".x"],
+                 ["tab", "wait", "--for", "load", "--timeout", "0"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
+def t_dom_shape_filters() -> None:
+    """A page-supplied row is filtered to shape; a bad int is not a crash."""
+    rows = dom._well_formed(                              # noqa: SLF001
+        [{"tag": "a", "box": [1, 2, 3, 4]}, {"tag": "a"}, "nope", None,
+         {"box": [0, 0, 0, 0]}], ("tag", "box"))
+    assert rows == [{"tag": "a", "box": [1, 2, 3, 4]}], rows
+    assert dom._int("12") == 12                              # noqa: SLF001
+    assert dom._int("x", 7) == 7                             # noqa: SLF001
+    assert dom._int(None, 3) == 3                            # noqa: SLF001
+    assert "__SELECTOR__" not in dom.FIND_EXPR.replace("__SELECTOR__", "")  # noqa: SLF001
+    for placeholder in ("__MODE__", "__NEEDLE__", "__SELECTOR__", "__CAP__"):
+        assert placeholder in dom.FIND_EXPR                  # noqa: SLF001
 
 
 def t_cmdline_value() -> None:
@@ -616,6 +706,8 @@ def main() -> int:
         ("cli dispatches with flags stripped", t_cli_dispatch),
         ("tab grammar lands in one service", t_cli_tab_grammar),
         ("nav/history/reload grammar", t_cli_nav_grammar),
+        ("dom verbs' argv", t_cli_dom_grammar),
+        ("dom shape filters", t_dom_shape_filters),
         ("the net-change test", t_same_page),
         ("one page verb, one tab", t_one_tab_addressing),
         ("attach/detach grammar", t_cli_attach_grammar),

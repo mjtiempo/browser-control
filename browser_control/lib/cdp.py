@@ -39,6 +39,10 @@ PORT_FILE = "DevToolsActivePort"
 # The most a CDP HTTP reply may be. `/json` for a browser with hundreds of
 # tabs is tens of KB; a body past this is not a tab list.
 GET_CAP = 8 * 1024 * 1024
+# The most a page's ANSWER may be. An expression can return a whole document;
+# past this the caller should narrow the expression rather than reason about
+# half a value — `tab text` truncates IN the page, so its cap is separate.
+EVAL_RESULT_CAP = 64_000
 
 
 def port_of(profile: str) -> int:
@@ -246,59 +250,122 @@ def call(ws_url: str, method: str, params: dict | None = None,
     return asyncio.run(_call(ws_url, method, params or {}, timeout))
 
 
+def _value_of(result: dict) -> Any:
+    """The value one Runtime.evaluate reply carries, or a refusal.
+
+    A page-level exception is `js-error`: the page ANSWERED, and its answer
+    was a failure — a different fact from a transport failure. A result past
+    `EVAL_RESULT_CAP` refuses rather than handing back half a value.
+    """
+    details = result.get("exceptionDetails")
+    if details:
+        exception = details.get("exception") or {}
+        text = str(exception.get("description") or details.get("text")
+                   or "page JS exception")
+        fail("js-error", f"Runtime.evaluate: {text.splitlines()[0]}")
+    value = (result.get("result") or {}).get("value")
+    try:
+        size = len(json.dumps(value))
+    except (TypeError, ValueError):
+        size = 0
+    if size > EVAL_RESULT_CAP:
+        fail("result-too-large",
+             f"Runtime.evaluate answered {size} chars (cap {EVAL_RESULT_CAP}) "
+             "— narrow the expression, or read the page with `tab text`")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)      # a page that answered JSON
+        except (ValueError, TypeError):
+            return value                  # a plain string
+    return value                          # None for undefined: an answer
+
+
+async def _sample(ws, rid: int, expression: str, budget: float) -> Any:
+    """One evaluate on an ALREADY open connection, or TimeoutError."""
+    await ws.send(json.dumps({"id": rid, "method": "Runtime.evaluate",
+                              "params": {"expression": expression,
+                                         "returnByValue": True}}))
+    deadline = time.time() + budget
+    while True:
+        try:
+            msg = json.loads(await asyncio.wait_for(
+                ws.recv(), timeout=max(0.1, deadline - time.time())))
+        except TimeoutError:
+            raise                       # the caller decides: poll again, or
+        except (ValueError, TypeError) as e:   # refuse `eval-timeout`
+            raise ControlError(
+                "cdp-error",
+                f"Runtime.evaluate: a frame that is not JSON ({e})") from e
+        if msg.get("id") == rid:
+            err = msg.get("error")
+            if err:
+                fail("cdp-error",
+                     f"Runtime.evaluate: {err.get('message')} "
+                     f"(code {err.get('code')})")
+            return _value_of(msg.get("result") or {})
+        if time.time() >= deadline:
+            raise TimeoutError(f"no reply for id {rid} within {budget:g}s")
+
+
 async def _evaluate(ws_url: str, expression: str, timeout: float) -> Any:
     try:
         async with websockets.connect(ws_url, max_size=2 ** 24,
                                       open_timeout=10) as ws:
-            # one send: an expression may WRITE (a nav assignment, a reload),
-            # so there is no retry here — the caller's read-back is the
-            # recovery, exactly as for the method calls
-            await ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
-                                      "params": {"expression": expression,
-                                                 "returnByValue": True}}))
-            deadline = time.time() + timeout
-            while True:
-                msg = json.loads(await asyncio.wait_for(
-                    ws.recv(), timeout=max(0.1, deadline - time.time())))
-                if msg.get("id") == 1:
-                    err = msg.get("error")
-                    if err:
-                        fail("cdp-error",
-                             f"Runtime.evaluate: {err.get('message')} "
-                             f"(code {err.get('code')})")
-                    result = msg.get("result") or {}
-                    details = result.get("exceptionDetails")
-                    if details:
-                        # the PAGE failed, which is its answer, not a
-                        # transport hiccup: refuse it rather than retry
-                        exception = details.get("exception") or {}
-                        text = str(exception.get("description")
-                                   or details.get("text")
-                                   or "page JS exception")
-                        fail("cdp-error",
-                             f"Runtime.evaluate: {text.splitlines()[0]}")
-                    value = (result.get("result") or {}).get("value")
-                    if isinstance(value, str):
-                        try:
-                            return json.loads(value)
-                        except (ValueError, TypeError):
-                            return value     # a plain string result
-                    return value              # None for undefined; the honest
-                if time.time() >= deadline:   # answer to a void expression
-                    fail("cdp-error",
-                         f"Runtime.evaluate: no reply within {timeout:g}s")
+            # one send: an expression may WRITE (a nav assignment, a form
+            # submit), so there is no retry — the caller's read-back is the
+            # recovery
+            try:
+                return await _sample(ws, 1, expression, timeout)
+            except TimeoutError as e:
+                raise ControlError("eval-timeout",
+                                   f"Runtime.evaluate: {e}") from e
     except ControlError:
         raise
     except Exception as e:                                     # noqa: BLE001
         raise ControlError("cdp-error", f"Runtime.evaluate: {e}") from e
+    raise ControlError("cdp-error", "Runtime.evaluate: no answer")
+
+
+async def _evaluate_until(ws_url: str, expression: str, accept: Any,
+                          timeout: float, interval: float) -> tuple[Any, int]:
+    """ONE connection, many samples, until `accept(value)` or the deadline.
+
+    A sample the page does not answer is what a poll loop is FOR, so it is
+    not an error here: the budget belongs to the loop, not to each sample.
+    Only the connection itself can fail, and that is a refusal.
+    """
+    value: Any = None
+    samples = 0
+    try:
+        async with websockets.connect(ws_url, max_size=2 ** 24,
+                                      open_timeout=10) as ws:
+            deadline = time.time() + timeout
+            while True:
+                samples += 1
+                try:
+                    value = await _sample(ws, samples, expression,
+                                          max(0.5, deadline - time.time()))
+                    if accept(value):
+                        return value, samples
+                except TimeoutError:
+                    pass               # this sample went unanswered
+                if time.time() >= deadline:
+                    return value, samples
+                await asyncio.sleep(interval)
+    except ControlError:
+        raise
+    except Exception as e:                                     # noqa: BLE001
+        raise ControlError("cdp-error", f"Runtime.evaluate: {e}") from e
+    raise ControlError("cdp-error", "Runtime.evaluate: no answer")
 
 
 def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
     """Evaluate an expression on ONE tab's own connection, returning its value.
 
     `returnByValue`, so a page that answers JSON is decoded to the value it
-    produced; a page-level JS exception is a refusal, because the caller
-    asked the page a question and the page answered with a failure.
+    produced. Three failures stay apart, because a caller branches on them:
+    the page THREW (`js-error`), the page did not answer within the budget
+    (`eval-timeout`), and the transport itself failed (`cdp-error`).
     """
     if websockets is None:
         fail("no-websockets",
@@ -306,3 +373,19 @@ def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
              "(pip install websockets)")
     return asyncio.run(_evaluate(_checked_ws(ws_url, "tab"), expression,
                                  timeout))
+
+
+def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
+                   interval: float = 0.4) -> tuple[Any, int]:
+    """Sample `expression` on ONE connection until `accept(value)` is true.
+
+    Returns (the last value, how many samples were taken). Built for the verbs
+    that poll: a websocket per sample turns a 30-sample wait into 30
+    connections.
+    """
+    if websockets is None:
+        fail("no-websockets",
+             "the `websockets` package is required to speak CDP "
+             "(pip install websockets)")
+    return asyncio.run(_evaluate_until(_checked_ws(ws_url, "tab"), expression,
+                                       accept, timeout, interval))

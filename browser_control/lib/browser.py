@@ -1044,19 +1044,25 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
     """(browser row, tab row) for the ONE tab a page verb acts on.
 
     With a spec: the same resolution every other verb uses (one match, or a
-    refusal naming the candidates). Without one: the only page tab there is —
-    several tabs refuse `tab-ambiguous` rather than let a navigation land in
-    the tab nobody named.
+    refusal naming the candidates) — which is also how a tab in a browser
+    this CLI only READS is reached.
+
+    Without one: the tab of a browser this CLI drives (managed, or attached).
+    Not "the only tab on the machine": a second drivable browser — the user's
+    own, running beside ours — would otherwise make every unqualified read
+    refuse `tab-ambiguous`. Several tabs in that browser still refuse: a page
+    verb must never pick among tabs nobody named.
     """
     if spec:
         row, tab, _index = _resolve_across([spec], browser, for_write)[0]
         return row, tab
-    rows = _writable(browser) if for_write else _drivable(browser)
+    rows = _writable(browser)
     if not rows:
         fail("cdp-unreachable",
-             "no " + ("writable" if for_write else "drivable") + " browser"
+             "no browser this CLI drives is up"
              + (f" matching {browser!r}" if browser else "")
-             + " — run `browser-control-cli open`, or attach one")
+             + " — run `browser-control-cli open`, attach one, or name a tab "
+             "in another browser with --tab SPEC")
     pairs = [(row, tab) for row in rows for tab in _tabs_of(row)[0]]
     if not pairs:
         fail("no-page-tab",

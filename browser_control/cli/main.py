@@ -8,6 +8,7 @@ caller-producible input can produce a traceback.
 from __future__ import annotations
 
 import json
+import math
 import platform
 import shutil
 import sys
@@ -18,6 +19,7 @@ from collections.abc import Callable
 from browser_control import __version__
 from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     attach,
     attachments,
@@ -57,6 +59,14 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab nav URL [--tab SPEC]       navigate, then read the address back
   tab back|forward [--tab SPEC]  history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
+  tab js EXPR [--tab SPEC]       evaluate an expression (can write; unverified)
+  tab find TEXT|--selector CSS [--cap N] [--tab SPEC]
+                                 a visible element, in PAGE coordinates
+  tab text [--selector CSS] [--chars N] [--tab SPEC]
+                                 the rendered text, truncated in the page
+  tab wait --for load|idle|element|js [--selector CSS] [--expr EXPR]
+           [--timeout S] [--idle-ms MS] [--tab SPEC]
+                                 poll a predicate to a wall-clock deadline
   selftest           prove the install: interpreter, websockets, verbs
 
 SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
@@ -67,7 +77,8 @@ flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
        --tab SPEC       the tab a page verb acts on (nav/back/forward/reload);
                         without it the verb acts on the ONLY page tab there is
 reads: every drivable browser.  writes: a managed browser, or an attached one
-       — `attach` grants TAB writes only, `close` never stops one
+       — `attach` grants TAB writes only, `close` never stops one; `tab js`
+       and `tab wait --for js` count as writes (they run caller code)
 out:   one JSON object on stdout; ERR[code]: message on stderr, exit 2"""
 
 
@@ -263,30 +274,46 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
 Handler = Callable[[list[str], str], dict]
 
 
-def _tab_flag(rest: list[str], verb: str) -> tuple[list[str], str]:
-    """Pull `--tab SPEC` (or `--tab=SPEC`) out of a verb's arguments.
+def _pop(rest: list[str], flag: str, verb: str) -> tuple[list[str], str | None]:
+    """Remove `--flag VALUE` (or `--flag=VALUE`) from argv, once.
 
-    `--tab` names the tab a page verb acts on; without it the verb acts on the
-    only page tab there is, and refuses `tab-ambiguous` when there are more.
+    None means the flag was NOT given, which a verb must be able to tell apart
+    from an empty value.
     """
     out: list[str] = []
-    spec = ""
+    value: str | None = None
     index = 0
     while index < len(rest):
         arg = str(rest[index])
-        if arg == "--tab":
+        if arg == flag:
             if index + 1 >= len(rest):
-                fail("bad-args", f"{verb}: --tab needs a SPEC")
-            spec = str(rest[index + 1])
+                fail("bad-args", f"{verb}: {flag} needs a value")
+            value = str(rest[index + 1])
             index += 2
             continue
-        if arg.startswith("--tab="):
-            spec = arg.split("=", 1)[1]
+        if arg.startswith(flag + "="):
+            value = arg.split("=", 1)[1]
             index += 1
             continue
         out.append(arg)
         index += 1
-    return out, spec
+    return out, value
+
+
+def _tab_flag(rest: list[str], verb: str) -> tuple[list[str], str]:
+    """`--tab SPEC`, or "" — the tab a page verb acts on."""
+    rest, spec = _pop(rest, "--tab", verb)
+    return rest, spec or ""
+
+
+def _float(value: str, what: str) -> float:
+    try:
+        number = float(str(value))
+    except (TypeError, ValueError):
+        fail("bad-args", f"{what} needs a number, got {value!r}")
+    if not math.isfinite(number):
+        fail("bad-args", f"{what} must be a finite number, got {value!r}")
+    return number
 
 
 def cmd_tab_list(rest: list[str], browser: str) -> dict:
@@ -338,6 +365,71 @@ def cmd_tab_reload(rest: list[str], browser: str) -> dict:
     return reload(tab=spec, browser=browser)
 
 
+def cmd_tab_js(rest: list[str], browser: str) -> dict:
+    """`tab js EXPR [--tab SPEC]` — the escape hatch, declared unverified."""
+    rest, spec = _tab_flag(rest, "tab js")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab js: unknown flag {arg!r}")
+    if not rest:
+        fail("bad-args", "tab js: an EXPRESSION is required")
+    if len(rest) > 1:
+        fail("bad-args",
+             f"tab js: one expression at most, got {len(rest)} — the tab is "
+             "--tab SPEC")
+    return dom.js(rest[0], tab=spec, browser=browser)
+
+
+def cmd_tab_find(rest: list[str], browser: str) -> dict:
+    """`tab find TEXT | --selector CSS [--cap N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab find")
+    rest, selector = _pop(rest, "--selector", "tab find")
+    rest, cap = _pop(rest, "--cap", "tab find")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab find: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab find: one TEXT at most, got {len(rest)}")
+    needle = rest[0] if rest else None
+    if (needle is None) == (selector is None):
+        fail("bad-args", "tab find: give TEXT or --selector CSS, not both")
+    return dom.find(needle, selector=selector,
+                    cap=_int(cap, "tab find --cap") if cap is not None
+                    else dom.FIND_CAP,
+                    tab=spec, browser=browser)
+
+
+def cmd_tab_text(rest: list[str], browser: str) -> dict:
+    """`tab text [--selector CSS] [--chars N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab text")
+    rest, selector = _pop(rest, "--selector", "tab text")
+    rest, chars = _pop(rest, "--chars", "tab text")
+    _none(rest, "tab text")
+    return dom.text(selector=selector,
+                    chars=_int(chars, "tab text --chars") if chars is not None
+                    else dom.TEXT_CAP,
+                    tab=spec, browser=browser)
+
+
+def cmd_tab_wait(rest: list[str], browser: str) -> dict:
+    """`tab wait --for load|idle|element|js …` — poll one predicate."""
+    rest, spec = _tab_flag(rest, "tab wait")
+    rest, mode = _pop(rest, "--for", "tab wait")
+    rest, selector = _pop(rest, "--selector", "tab wait")
+    rest, expr = _pop(rest, "--expr", "tab wait")
+    rest, timeout = _pop(rest, "--timeout", "tab wait")
+    rest, idle = _pop(rest, "--idle-ms", "tab wait")
+    _none(rest, "tab wait")
+    if mode is None:
+        fail("bad-args", "tab wait: --for is required (load|idle|element|js)")
+    return dom.wait(mode, selector=selector, expr=expr,
+                    timeout=_float(timeout, "tab wait --timeout")
+                    if timeout is not None else dom.WAIT_DEFAULT_S,
+                    idle_ms=_int(idle, "tab wait --idle-ms")
+                    if idle is not None else dom.IDLE_DEFAULT_MS,
+                    tab=spec, browser=browser)
+
+
 # `tab`'s subcommands: a reserved first word, so a URL can never be mistaken
 # for one (and vice versa).
 TAB_SUBCOMMANDS: dict[str, Handler] = {
@@ -348,6 +440,10 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
     "back": cmd_tab_back,
     "forward": cmd_tab_forward,
     "reload": cmd_tab_reload,
+    "js": cmd_tab_js,
+    "find": cmd_tab_find,
+    "text": cmd_tab_text,
+    "wait": cmd_tab_wait,
 }
 
 HANDLERS: dict[str, Handler] = {

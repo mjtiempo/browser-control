@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 18 hermetic + 25 live checks passing.
+Repo `main`, worktree clean, 20 hermetic + 29 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,12 +15,13 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 408 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv |
-| `browser_control/lib/browser.py` | 1275 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
-| `browser_control/lib/cdp.py` | 308 | endpoint, capped JSON GET, explicit-port reads, method call, `evaluate`, `target_ws` |
+| `browser_control/cli/main.py` | 504 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv |
+| `browser_control/lib/dom.py` | 362 | **the DOM tier**: the shared element prelude, `js`, `wait`, `find`, `text` |
+| `browser_control/lib/browser.py` | 1281 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
+| `browser_control/lib/cdp.py` | 391 | endpoint, capped JSON GET, explicit-port reads, method call, `evaluate`/`evaluate_until`, `target_ws` |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 635 | 18 hermetic checks, no browser needed |
-| `tests/live_test.py` | 787 | 25 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 727 | 20 hermetic checks, no browser needed |
+| `tests/live_test.py` | 895 | 29 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -43,6 +44,10 @@ the other verbs own the browser.
 | `tab nav URL [--tab SPEC]` | navigates one tab | the address **as observed** (`url_read`) + `moved` + `loaded`; `chrome-error://` → `nav-failed`; a tab that never left a page it was not on → `nav-not-verified`; a redirect is a success |
 | `tab back` / `tab forward` | moves the tab's history | the address actually changed (`nav-not-verified` when it did not) |
 | `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
+| `tab js EXPR` | evaluates an expression — the escape hatch, and it can write | **unverified** (`verified: false`), the value capped at 64 k (`result-too-large`), a page exception is `js-error`, a page that stops answering `eval-timeout` |
+| `tab wait --for load\|idle\|element\|js` | polls ONE predicate to a wall-clock deadline | `{ok, for, waited_s, samples}` or `wait-timeout` naming what and how long; one connection for the whole poll |
+| `tab find TEXT \| --selector CSS` | a human target → visible elements, in **page** coordinates | `no-match` (naming the candidate count) · `no-viewport` when the tab has no viewport · each match carries `hit` (a real hit-test), `hit_element`, `clipped`, `visibility` |
+| `tab text [--selector CSS]` | the rendered text | truncated **in the page**, so the reply is bounded and `length` still reports the full size |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
@@ -91,19 +96,22 @@ refusing `cdp-unreachable`.
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
-**Live battery** — `python3 tests/live_test.py` → **25 passed, 0 failed, 0
+**Live battery** — `python3 tests/live_test.py` → **29 passed, 0 failed, 0
 skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
 independent state back — a raw socket connect, a direct `/json` GET, `/proc`
 for the pid — for open, `list`, `tab list`/`tab info`, `tab` (single and
 several URLs), open with several URLs, `tab close` by id and by substring,
 an ambiguous spec (refused with **nothing** closed), a two-spec close in one
 call, `tab nav` (a redirect, a dead endpoint, `--tab` naming the one tab),
-`tab back`/`tab forward`, `tab reload`, refusals, `info`, adoption of the
-running browser, the verified close, the idempotent close, a browser with no
-debugging port (listed, never driven), a **foreign drivable** browser (read →
-refused → attached → written → detached, with `close` still refusing to stop
-it) and "nothing left running". With the command missing it reports 25 skips
-and exits 2.
+`tab back`/`tab forward`, `tab reload`, `tab text` (with a 20-char cap),
+`tab find` (a hidden twin skipped, a shadow-root button found, the iframe's
+button not), `tab js` (value, decoded JSON, `js-error`, `result-too-large`),
+`tab wait` (a button that appears after 2 s, then a timeout), refusals,
+`info`, adoption of the running browser, the verified close, the idempotent
+close, a browser with no debugging port (listed, never driven), a **foreign
+drivable** browser (read → refused → attached → written → detached, with
+`close` still refusing to stop it) and "nothing left running". With the
+command missing it reports 29 skips and exits 2.
 
 **Not proven yet**: no concurrent-`open` test (there is no lock), no
 multi-browser test (two live instances refuse), no CI.
@@ -113,7 +121,7 @@ multi-browser test (two live instances refuse), no CI.
 | Plan said | Slice 1 | Why / when to revisit |
 | --- | --- | --- |
 | `lib/cdp/` package | one `lib/cdp.py` | split when nav/dom land and the file grows |
-| `lib/profile.py`, `lib/tabs.py` | folded into `lib/browser.py` (now 1275 lines) | the split keeps being deferred: nav landed there too, while the page PRIMITIVES it needed (`evaluate`, `target_ws`) went into `lib/cdp.py`. Split when a second verb family arrives (dom/media), and the boundary is already visible: transport in `cdp.py`, resolution/lifecycle/verbs in `browser.py` |
+| `lib/profile.py`, `lib/tabs.py` | folded into `lib/browser.py` (1281 lines) for the tabs, and the DOM tier split out as `lib/dom.py` when it arrived | the boundary is now where it should be: transport in `cdp.py`, resolution/lifecycle/nav in `browser.py`, page READING in `dom.py` |
 | profile **seeding** from the user's own profile | not implemented — the managed profile starts empty | deliberate: no copying a multi-GB profile until the slice needs logins (see next) |
 | port → inode → pid ownership guard | only the websocket-host check; `close` identifies its pid by cmdline + exe | the endpoint is `--remote-debugging-port=0` on our own profile, so there is no fixed port to forward yet |
 | `ensure` (windowless start) | `open` always makes a page | the 4-verb scope does not need a windowless state |
@@ -139,12 +147,12 @@ multi-browser test (two live instances refuse), no CI.
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1, 5.2 and 5.4 have
+Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4 and 5.5 have
 landed** (§1, §2), **5.3 is deferred by decision** — the next actionable step
-is 5.5 (DOM reads: `tab js`, `tab wait`, `tab find`, `tab text`) — and every
-later verb is expected to add its check to `tests/live_test.py`. The CLI
-grammar is settled (§1): page work lives under `tab`, browser work stays
-top-level.
+is 5.6 (input and forms: `tab focus-el`, `tab press`, `tab insert-text`, `tab
+type-keystrokes`, `tab upload`, with the audit log) — and every later verb is
+expected to add its check to `tests/live_test.py`. The CLI grammar is settled
+(§1): page work lives under `tab`, browser work stays top-level.
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -203,12 +211,35 @@ the read-back raced the navigation and a redirect came back as
 changed, or the address did), **then load** — and `reload` uses the same
 document-time oracle, because a fast page is complete again before any read.
 
-### 5.5 DOM reads
-`js EXPR` (declared unverified), `wait --for load|idle|element|js` with a
-finite wall-clock deadline, `find TEXT|--selector CSS` returning **page**
-coordinates (`vbox`, `vx`, `vy`) and shape-validated rows, plus `text`.
-*Done when* `find` finds a labelled element on a real page and `wait` refuses
-`wait-timeout` naming what it waited for.
+### 5.5 DOM reads — done
+`tab js`, `tab wait --for load|idle|element|js`, `tab find TEXT|--selector CSS`,
+`tab text`. The tier is its own module (`lib/dom.py`) over the tab resolution
+in `browser.py`, sharing ONE element prelude, so what `find` matches and what
+`wait --for element` accepts cannot drift apart.
+
+What the evaluation settled, now in the code:
+
+* **A read never activates a tab.** Measured: a hidden tab has a viewport, a
+  layout and a working hit-test, so `find` reports `visibility` + `viewport`
+  and leaves the desktop alone. A tab with a **degenerate viewport** (0×0)
+  refuses `no-viewport` — a box in no viewport is not a target.
+* **No `rendered` flag**: it fused three questions that have direct answers.
+* **`js` is the escape hatch and says so** (`verified: false`), and its result
+  is capped: past 64 k it refuses `result-too-large` rather than handing back
+  half a value.
+* **The matcher is accessibility-first** (label: `aria-label`, placeholder,
+  title, alt, name, value, text) and **shadow-piercing** (the shared `query`
+  walks open shadow roots). iframes stay top-document-only, and the battery
+  proves it by finding the frame's button nowhere.
+* **The no-`--tab` scope is the browser this CLI DRIVES**, not every drivable
+  browser — the user's own Chrome running beside ours would otherwise make
+  every unqualified read `tab-ambiguous`. A spec still reaches any drivable
+  browser; a write to one that is neither managed nor attached refuses
+  `not-managed` (`tab js` counts as a write, because it runs caller code).
+* **`wait` keeps ONE connection** (`cdp.evaluate_until`) instead of a
+  websocket per sample, and keeps "the page threw" (`js-error`), "the page
+  did not answer" (`eval-timeout`) and "the transport died" (`cdp-error`)
+  apart.
 
 ### 5.6 Input and forms
 `focus-el`, `press`, `insert-text`, `type-keystrokes`, `upload`. Focus proven
@@ -240,22 +271,37 @@ passes its own live check through the contract.
 Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
 `cdp-not-local`; a `--profile`/instance selector; richer `stop` identity.
 
+### 5.11 `open --windowless` (decided, not built)
+A windowless start (no page tab) as an OPTION, never the default: a scripted
+caller that wants CDP up and no window on screen asks for it. It is
+`launch(..., windowless=True)` — the flags already carry `--no-startup-window`
+the last time it was needed — plus the CLI flag and a battery check that no
+page tab exists afterwards.
+
 ## 6. Decisions needed
 
 1. ~~**Seeding policy**~~ — deferred with the feature (5.3); the managed
    browser stays login-less until then.
-2. **`open` semantics** — always make a page (current), or also support
-   `ensure` (windowless, no page) for scripted use?
+2. ~~**`open` semantics**~~ — answered: a **windowless** start is available
+   but NOT the default (`open` keeps making a page). Not built yet — see 5.11.
 3. ~~**Install story**~~ — answered: `pyproject.toml` installs a console
    script, `browser-control-cli`. The checkout script stays for running
    without an install; note that the `~/.local/bin` symlink will shadow an
    installed wheel, so drop it if you pip-install.
-4. **Command name** — the plan says `bctl`; the delivered command is
-   `browser-control-cli`. Keep one, or ship both (long name for discovery,
-   short alias for typing)? *(The verb grammar itself is settled: `tab` owns
-   page work, the rest stay top-level.)*
-5. **Output** — JSON-only (current) or JSON by default plus a human format?
-6. **Plugin discovery** — entry points (packaging) or a scanned directory?
+4. ~~**Command name**~~ — answered: keep `browser-control-cli` as the only
+   name (no `bctl` alias).
+5. ~~**Output**~~ — answered: JSON only.
+6. ~~**Plugin discovery**~~ — answered: entry points. The plugin tier itself
+   (5.9) is deferred.
+7. ~~**`js` reply cap**~~ — answered: REFUSE past the cap
+   (`result-too-large`); do not truncate.
+8. ~~**`find` scope**~~ — answered: top document + open shadow roots
+   (iframes out of scope, stated and tested).
+9. **Policy gate** for code-executing verbs (`tab js`, `tab wait --for js`,
+   `tab text` on a logged-in page) — still open, and it belongs to the agent
+   frontend rather than to this CLI.
+
+Nothing here blocks 5.6.
 
 ## 7. How to run
 

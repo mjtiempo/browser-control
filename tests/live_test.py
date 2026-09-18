@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 from importlib import import_module
 from pathlib import Path
@@ -56,6 +57,31 @@ results: list[tuple[str, str, str]] = []
 # What the checks discovered, and what the cleanup needs.
 STATE: dict[str, Any] = {}
 SERVER: http.server.ThreadingHTTPServer | None = None
+# The DOM fixture the browser reaches over loopback: a labelled button, a
+# display:none twin of it, a text input, a role=button, a SHADOW root with its
+# own button, an iframe, a long paragraph, and a button that appears after
+# `late` milliseconds (so `wait` has something to actually poll for).
+DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
+<h1>Dom Fixture Heading</h1>
+<button aria-label="Save the thing">save</button>
+<a href="/one.html">a link</a>
+<input type="text" placeholder="search here">
+<div role="button" tabindex="0">role button</div>
+<button id="hidden-one" style="display:none">Save the thing</button>
+<div id="host"></div>
+<iframe src="/dom-frame" width="200" height="100"></iframe>
+<p id="long-text">__FILLER__</p>
+<script>
+  const root = document.getElementById('host').attachShadow({mode: 'open'});
+  root.innerHTML =
+    '<button id="in-shadow" aria-label="Shadow Action">shadow</button>';
+  const delay = Number(__LATE__);
+  setTimeout(() => { const el = document.createElement('button');
+    el.id = 'late'; el.setAttribute('aria-label', 'Late Button');
+    document.body.appendChild(el); }, delay);
+</script>"""
+DOM_FRAME = ("<!doctype html><title>frame</title>"
+             "<button aria-label=\"Frame Button\">in frame</button>")
 
 
 def env() -> dict[str, str]:
@@ -150,6 +176,13 @@ def start_server() -> None:
     global SERVER
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        def _send(self, body: bytes) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self) -> None:
             if self.path.startswith("/go"):
                 # a redirect, so the battery can prove that "it MOVED" is the
@@ -158,14 +191,21 @@ def start_server() -> None:
                 self.send_header("Location", "/eight-b")
                 self.end_headers()
                 return
+            if self.path.startswith("/dom-frame"):
+                self._send(DOM_FRAME.encode())
+                return
+            if self.path.startswith("/dom"):
+                query = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(self.path).query)
+                late = str((query.get("late") or ["0"])[0])
+                if not late.isdigit():
+                    late = "0"
+                self._send(DOM_FIXTURE.replace("__FILLER__", "filler text. " * 200)
+                           .replace("__LATE__", late).encode())
+                return
             name = self.path.strip("/") or "root"
-            body = (f"<!doctype html><title>{name}</title>"
-                    f"<h1>{name}</h1>").encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(f"<!doctype html><title>{name}</title>"
+                       f"<h1>{name}</h1>".encode())
 
         def log_message(self, format: str, *args: object) -> None:
             pass
@@ -385,6 +425,67 @@ def c_nav_names_the_tab() -> str:
     finally:
         ok_json("tab", "close", f"id:{other[:8]}")
     return "two tabs refuse without --tab; --tab moves exactly the one named"
+
+
+def c_dom_text_reads_the_page() -> str:
+    """`tab text` is the rendered text, and the cap is applied IN the page."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    full = ok_json("tab", "text")
+    assert "Dom Fixture Heading" in full["text"], full["text"][:80]
+    assert full["truncated"] is False, full
+    assert full["length"] == len(full["text"]) > 0, full
+    assert full["visibility"] in ("visible", "hidden"), full
+    assert full["viewport"][0] > 0 and full["viewport"][1] > 0, full
+    cut = ok_json("tab", "text", "--chars", "20")
+    assert cut["truncated"] is True and len(cut["text"]) == 20, cut
+    assert cut["length"] > 20, cut
+    return f'{full["length"]} chars; a 20-char read still reports the full length'
+
+
+def c_dom_find_resolves_targets() -> str:
+    """`tab find` matches labels, pierces shadow roots, skips what is hidden."""
+    found = ok_json("tab", "find", "Save the thing")
+    assert found["total"] == 2, found          # the visible button + its twin
+    assert len(found["matches"]) == 1, found   # display:none is not a target
+    match = found["matches"][0]
+    assert match["hit"] is True, match
+    assert match["box"][2] > 0 and match["box"][3] > 0, match
+    assert match["center"][0] >= 0 and match["center"][1] >= 0, match
+    shadow = ok_json("tab", "find", "--selector", "#in-shadow")
+    assert shadow["matches"][0]["text"].startswith("Shadow Action"), shadow
+    refuses("no-match", "tab", "find", "--selector", "#hidden-one")
+    refuses("no-match", "tab", "find", "Frame Button")   # iframe content
+    return "1 of 2 candidates visible; shadow found; hidden and framed skipped"
+
+
+def c_dom_js_is_declared_unverified() -> str:
+    """`tab js` returns the page's value — capped, and not verified."""
+    plain = ok_json("tab", "js", "document.title")
+    assert plain["value"] == "dom fixture", plain
+    assert plain["verified"] is False, plain
+    decoded = ok_json("tab", "js", "JSON.stringify({a: 1, b: [2, 3]})")
+    assert decoded["value"] == {"a": 1, "b": [2, 3]}, decoded
+    err = refuses("js-error", "tab", "js", "throw new Error('boom')")
+    assert "boom" in err, err
+    refuses("result-too-large", "tab", "js", "'x'.repeat(100000)")
+    return "a value, a decoded JSON value, js-error, result-too-large"
+
+
+def c_dom_wait_polls() -> str:
+    """`tab wait` polls one predicate to a deadline, then refuses."""
+    ok_json("tab", "nav", f"{base_url()}/dom?late=2000")
+    late = ok_json("tab", "wait", "--for", "element", "--selector", "#late",
+                   "--timeout", "10")
+    assert late["waited_s"] >= 1.0, late
+    assert late["samples"] >= 2, late
+    ok_json("tab", "wait", "--for", "load")
+    ok_json("tab", "wait", "--for", "js", "--expr",
+            "document.title.length > 0")
+    err = refuses("wait-timeout", "tab", "wait", "--for", "element",
+                  "--selector", "#never", "--timeout", "1")
+    assert "1s" in err, err
+    return (f'the late element took {late["waited_s"]}s over '
+            f'{late["samples"]} samples')
 
 
 def c_ambiguous_spec_refuses() -> str:
@@ -620,6 +721,9 @@ def c_attach_grants_writes() -> str:
         refuses("not-managed", "tab", "close", f"id:{tid[:8]}")
         assert tid in {t["id"] for t in pages(port)}, \
             "the refusal closed a tab in someone else's browser"
+        # `tab js` runs caller code, so it is a WRITE: refused too
+        refuses("not-managed", "tab", "js", "document.title",
+                "--tab", f"id:{tid[:8]}")
         # attach: the write lands
         reply = ok_json("attach", "--port", str(port))
         assert reply["attached"] is True and reply["already"] is False, reply
@@ -678,6 +782,10 @@ CHECKS = (
     ("tab back/forward move the address", c_history_moves_the_address),
     ("tab reload makes a new document", c_reload_makes_a_new_document),
     ("tab nav names the tab", c_nav_names_the_tab),
+    ("tab text reads the page", c_dom_text_reads_the_page),
+    ("tab find resolves targets", c_dom_find_resolves_targets),
+    ("tab js is declared unverified", c_dom_js_is_declared_unverified),
+    ("tab wait polls", c_dom_wait_polls),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),

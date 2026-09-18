@@ -158,7 +158,10 @@ Page-level, under `tab`:
 `tab media state|play|pause` · `tab ad-state` · `tab skip-ad`.
 
 A SPEC is a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; one
-match is required, several refuse with the candidates named. `open` and `tab`
+match is required, several refuse with the candidates named. A page verb with
+no `--tab` acts on the only page tab of a browser this CLI DRIVES (managed or
+attached) — never on a tab nobody named, and never made ambiguous by whatever
+else is running. `open` and `tab`
 take any number of URLs (a fresh `open` loads the first as its startup page
 and the rest as tabs); `list` reports every browser running on the machine,
 drivable or not, and `tab list` the tabs of every drivable one, grouped by
@@ -175,8 +178,9 @@ or a bare word that is not a URL → `bad-args` (never dropped).
 
 Delivered so far: `open`, `close`, `list`, `info`, `attach`, `attach --list`,
 `detach`, `tab [URL…]`, `tab list`, `tab info`, `tab close`, `tab nav`,
-`tab back`, `tab forward`, `tab reload`, `selftest` — the rest of the list is
-the target surface; [`progress.md`](progress.md) is the state of the work.
+`tab back`, `tab forward`, `tab reload`, `tab js`, `tab wait`, `tab find`,
+`tab text`, `selftest` — the rest of the list is the target surface;
+[`progress.md`](progress.md) is the state of the work.
 
 ## 4. Verification appetite
 
