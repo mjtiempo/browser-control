@@ -152,7 +152,8 @@ browser of its own) — and later `ensure [URL] [--relaunch] [--no-seed]` ·
 
 Page-level, under `tab`:
 
-`tab [URL…]` · `tab list` · `tab info SPEC` · `tab close SPEC…` ·
+`tab [URL…]` · `tab list` · `tab info SPEC` ·
+`tab close SPEC… | --title VALUE | --url URL` ·
 `tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
 `tab reload` · `tab js EXPR` · `tab wait --for …` ·
 `tab find TEXT|--selector CSS` · `tab text` · `tab click TEXT|--selector CSS` ·
@@ -255,6 +256,7 @@ unclear oracle into a claim of absence.**
 | `tab reload` | mutation | `performance.timeOrigin` changed: a NEW document | L3 | `reload-not-verified` |
 | `tab [URL…]` | mutation | the tab row exists, the id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
 | `tab close SPEC…` | mutation | every requested id ABSENT from the re-read list | L3 | `close-tab-not-verified` (report survivors) |
+| `tab close --title/--url` | mutation | the same read-back for EVERY exact match, with near-misses left alone | L3 | `no-page-tab` (naming the value), `not-managed` (all matches foreign), `close-tab-not-verified`; foreign matches are REPORTED in `skipped`, never closed silently |
 | `tab activate` | mutation | the page's own `document.visibilityState` before and after `Page.bringToFront` | L2 | `activate-not-verified` (the window may be hidden entirely) |
 | `tab click` | mutation | hit-test before, then url/title/focus/scroll before-and-after | L4 | `occluded`, `no-viewport-target`, `ambiguous-element` |
 | `tab hover` | mutation | the engine's `:hover` state at the point, and that the point still hit-tests into the element | L4 | `hover-not-verified`, `occluded`, `no-viewport-target` |

@@ -41,7 +41,7 @@ the other verbs own the browser.
 | `tab [URL...]` | one tab per URL (`about:blank` when none), every id named | each id from `Target.createTarget`, re-read from the tab list |
 | `tab list [--browser NAME]` | the page tabs of every **drivable** browser, grouped and sorted by browser | the same tab list the verbs use, read per browser |
 | `tab info SPEC` | one tab: which browser owns it, its `{id,title,url,index}` now | the spec resolves to exactly one tab or refuses |
-| `tab close SPEC...` | closes every tab the specs name, **all specs resolved before anything is closed** | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors |
+| `tab close SPEC...` / `--title V` / `--url V` | closes every tab the specs name — or every tab whose title/URL matches **exactly** (case-insensitive; the two flags take no SPEC) — with **all of it resolved before anything is closed** | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors; a match in a browser this CLI does not drive is reported in `skipped`, never closed |
 | `tab nav URL [--tab SPEC]` | navigates one tab | the address **as observed** (`url_read`) + `moved` + `loaded`; `chrome-error://` → `nav-failed`; a tab that never left a page it was not on → `nav-not-verified`; a redirect is a success |
 | `tab back` / `tab forward` | moves the tab's history | the address actually changed (`nav-not-verified` when it did not) |
 | `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
@@ -188,7 +188,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 and 5.13 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12, 5.13 and 5.14 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -435,6 +435,28 @@ and the dialog naming + `tab nav` recovery). Hermetic: the six verbs' argv,
 every page expression's `JSON.stringify((() => {…})())` wrap and placeholder
 filling (a missing bracket is invisible to Python and shipped once as
 `js-error: SyntaxError`), the PNG helpers, and the dialog-mode check.
+
+### 5.14 `tab close --title/--url` — done (bulk, exact)
+A bulk close for the case that motivated it: four tabs called `a`, or seven on
+the same host. `--title VALUE` / `--url VALUE` close every tab whose title
+(resp. URL) matches **exactly**, case-insensitively — the whole value, so
+`--title twin` leaves a tab called `twinx` alone (checked in the battery).
+The two flags take no SPEC and a SPEC takes no filter: one way to name tabs per
+call, never both (`bad-args`), never neither.
+
+Two properties worth spelling out:
+
+* **Resolve everything first**, then close — the existing rule, so a typo or a
+  bad argument cannot leave a half-applied close.
+* **A match this CLI does not drive is reported, not closed** (`skipped`), and
+  when *every* match is foreign the verb refuses `not-managed` and names it. A
+  bulk filter over the whole machine must not silently skip the user's own
+  browser, and must not fail because it happens to match there.
+
+Hermetic: argv for both flags (and `--title` with no value), plus the
+service's own pure refusals (none, both, empty, SPEC+filter). Battery: two
+tabs titled `twin` close as a set, a `twinx` near-miss survives and then closes
+by URL, and an unmatched value refuses naming it.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,

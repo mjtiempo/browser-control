@@ -907,6 +907,35 @@ def c_tab_dialog() -> str:
             "parked renderer")
 
 
+def c_tab_close_bulk() -> str:
+    """`tab close --title/--url` closes every EXACT match, and only those."""
+    base = base_url()
+    ok_json("tab", "nav", f"{base}/keep")
+    twins = [str(ok_json("tab", f"{base}/twin")["id"]) for _ in range(2)]
+    odd = str(ok_json("tab", f"{base}/twinx")["id"])
+    reply = ok_json("tab", "close", "--title", "twin")
+    closed = {str(row["id"]) for row in reply["closed"]}
+    assert closed == set(twins), (closed, twins)
+    assert reply["filter"] == {"title": "twin", "exact": True}, reply
+    assert [row["title"] for row in reply["closed"]] == ["twin", "twin"], \
+        reply["closed"]
+    refuses("no-page-tab", "tab", "info", f"id:{twins[0][:8]}")
+    # exact, so the tab called "twinx" is still there and closes by its URL
+    assert odd in {t["id"] for t in pages(STATE["port"])}, \
+        "a near-miss title was closed"
+    by_url = ok_json("tab", "close", "--url", f"{base}/twinx")
+    assert [row["id"] for row in by_url["closed"]] == [odd], by_url
+    # nothing matches: a refusal that names what it looked for
+    err = refuses("no-page-tab", "tab", "close", "--title", "no-such-title")
+    assert "no-such-title" in err, err
+    # the two ways to name tabs never mix, and argv decides before a browser
+    refuses("bad-args", "tab", "close", "--title", "a", "id:AB")
+    refuses("bad-args", "tab", "close", "--title", "a", "--url",
+            f"{base}/twin")
+    return ("closed exactly the two titled `twin`; a near-miss and a mixed "
+            "selector refuse")
+
+
 def c_ambiguous_spec_refuses() -> str:
     first = str(ok_json("tab", f"{base_url()}/four-a")["id"])
     second = str(ok_json("tab", f"{base_url()}/four-b")["id"])
@@ -1201,6 +1230,7 @@ CHECKS = (
     ("open with several URLs", c_open_several),
     ("tab close by id prefix", c_close_tab_by_id_prefix),
     ("tab close by substring", c_close_tab_by_substring),
+    ("tab close --title/--url closes every exact match", c_tab_close_bulk),
     ("tab nav reads the address back", c_nav_reads_the_address_back),
     ("tab nav refuses a dead end", c_nav_refuses_a_dead_end),
     ("tab back/forward move the address", c_history_moves_the_address),

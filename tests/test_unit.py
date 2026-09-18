@@ -398,8 +398,10 @@ def t_cli_tab_grammar() -> None:
         calls.append(("tab info", spec, browser))
         return {"ok": True, "tab": {"id": spec}}
 
-    def fake_close_tabs(specs: list[str], browser: str = "") -> dict:
-        calls.append(("tab close", tuple(specs), browser))
+    def fake_close_tabs(specs: list[str], browser: str = "",
+                        title: str | None = None,
+                        url: str | None = None) -> dict:
+        calls.append(("tab close", tuple(specs), browser, title, url))
         return {"ok": True, "closed": []}
 
     originals = (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
@@ -422,7 +424,7 @@ def t_cli_tab_grammar() -> None:
             ("tab list", "chrome"),
             ("tab info", "id:ABC", ""),
             ("tab info", "a.example", "chromium"),
-            ("tab close", ("a", "b"), ""),
+            ("tab close", ("a", "b"), "", None, None),
         ], calls
     finally:
         (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
@@ -858,6 +860,46 @@ def t_cli_click_scroll_grammar() -> None:
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
 
 
+def t_cli_close_bulk() -> None:
+    """`tab close --title/--url`: argv passes through; the checks are pure."""
+    calls: list[tuple] = []
+
+    def fake_close(specs: list[str], browser: str = "",
+                   title: str | None = None, url: str | None = None) -> dict:
+        calls.append((tuple(specs), browser, title, url))
+        return {"ok": True}
+
+    original = cli_main.close_tabs
+    cli_main.close_tabs = fake_close                   # type: ignore[assignment]
+    try:
+        for argv in (["tab", "close", "--title", "a"],
+                     ["tab", "close", "--url", "http://a/"],
+                     ["tab", "close", "--title=a", "--browser", "chrome"],
+                     ["tab", "close", "id:AB", "id:CD"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ((), "", "a", None),
+            ((), "", None, "http://a/"),
+            ((), "chrome", "a", None),
+            (("id:AB", "id:CD"), "", None, None),
+        ], calls
+    finally:
+        cli_main.close_tabs = original                 # type: ignore[assignment]
+    # a flag with no value is refused in argv
+    rc, _out, err = run_cli(["tab", "close", "--title"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    # and these are refused by the SERVICE, before any browser is touched:
+    # one way to name tabs per call, never both, never none, never empty
+    refusal(lambda: browser.close_tabs([]), "bad-args")
+    refusal(lambda: browser.close_tabs([], title=""), "bad-args")
+    refusal(lambda: browser.close_tabs([], url=""), "bad-args")
+    refusal(lambda: browser.close_tabs([], title="a", url="b"), "bad-args")
+    refusal(lambda: browser.close_tabs(["id:AB"], title="a"), "bad-args")
+    refusal(lambda: browser.close_tabs(["id:AB"], url="http://a/"),
+            "bad-args")
+
+
 def t_keys_and_verdicts() -> None:
     """The key table is well formed and the text verdict is tri-state."""
     for name, triple in dom.KEYS.items():                     # noqa: SLF001
@@ -1099,7 +1141,6 @@ def t_cli_argv_is_strict() -> None:
                      ["close", "--browser", "x", "now"],
                      ["tab", "-x"],
                      ["tab", "list", "extra"],
-                     ["tab", "close"],
                      ["tab", "info"],
                      ["tab", "info", "a", "b"],
                      ["info", "extra"],
@@ -1218,6 +1259,7 @@ def main() -> int:
         ("nav/history/reload grammar", t_cli_nav_grammar),
         ("dom verbs' argv", t_cli_dom_grammar),
         ("click/scroll argv", t_cli_click_scroll_grammar),
+        ("tab close --title/--url argv", t_cli_close_bulk),
         ("activate/hover/check/select/dialog/screenshot argv",
          t_cli_new_verbs_grammar),
         ("page expressions parse; shot and dialog rules",

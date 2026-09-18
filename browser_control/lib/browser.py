@@ -1016,19 +1016,90 @@ def tab_info(spec: str, browser: str = "") -> dict:
             "browser": _brief(row)}
 
 
-def close_tabs(specs: list[str], browser: str = "") -> dict:
-    """`tab close`: close every tab the specs name, and prove the set is gone.
+def _exact_matches(field: str, value: str,
+                   browser: str) -> tuple[list[tuple[dict, dict, int]],
+                                         list[dict]]:
+    """(tabs this CLI may close, tabs it may not) that EXACTLY match.
 
-    All specs resolve first (across the drivable browsers), so nothing is
-    closed when one of them is ambiguous, missing, or in a browser this CLI
-    did not start. The close then goes per browser, and every requested id is
-    read back: a survivor is a refusal that names it.
+    Exact means the whole title (or URL), case-insensitively: `--title a` is
+    the tab called "a", not every tab with an "a" somewhere in it. A match in
+    a browser this CLI neither manages nor has attached is NOT closed and NOT
+    refused away — it is reported, because a bulk filter over the whole
+    machine that hits the user's own browsing must say so rather than fail or
+    pretend it did not see it.
     """
-    if not specs:
+    rows = _drivable(browser)
+    if not rows:
+        fail("cdp-unreachable",
+             "no drivable browser"
+             + (f" matching {browser!r}" if browser else "")
+             + " — run `browser-control-cli open`")
+    wanted = str(value).lower()
+    ours: list[tuple[dict, dict, int]] = []
+    foreign: list[dict] = []
+    for row in rows:
+        for index, tab in enumerate(_tabs_of(row)[0]):
+            if str(tab.get(field) or "").lower() != wanted:
+                continue
+            if row["managed"] or row["attached"]:
+                ours.append((row, tab, index))
+            else:
+                foreign.append({"id": tab["id"], "title": tab["title"],
+                                "url": tab["url"], "pid": row["pid"],
+                                "exe": row["exe"], "profile": row["profile"]})
+    return ours, foreign
+
+
+def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
+               url: str | None = None) -> dict:
+    """`tab close`: close every tab the specs — or the exact title/URL — name.
+
+    Two ways to name tabs, never both at once:
+
+    * **SPECs** — the resolver every other verb uses (`id:<prefix>` or a
+      title/url substring), where several matches refuse with the candidates;
+    * **`--title VALUE` / `--url VALUE`** — an EXACT (case-insensitive) match
+      for a bulk close: every tab called "a", or every tab sitting on
+      `http://a/`. Those two flags take no SPEC.
+
+    Everything to close resolves FIRST, so a bad argument or a foreign browser
+    cannot leave a half-applied close. The close then goes per browser and every
+    requested id is read back: a survivor is a refusal that names it.
+    """
+    for flag, value in (("--title", title), ("--url", url)):
+        if value is not None and not str(value):
+            fail("bad-args",
+                 f"tab close: {flag} needs a value — an exact title or URL")
+    if title is not None and url is not None:
         fail("bad-args",
-             "tab close: at least one TAB spec is required (id:<prefix> or a "
-             "title/url substring)")
-    found = _resolve_across(list(specs), browser, for_write=True)
+             "tab close: name tabs by --title or by --url, not both")
+    if specs and (title is not None or url is not None):
+        fail("bad-args",
+             "tab close: name tabs by SPEC or by --title/--url, not both")
+    if not specs and title is None and url is None:
+        fail("bad-args",
+             "tab close: at least one TAB spec, or --title VALUE / --url URL "
+             "(an exact match), is required")
+    skipped: list[dict] = []
+    filter_used: dict = {}
+    if title is not None or url is not None:
+        field = "title" if title is not None else "url"
+        value = str(title if title is not None else url)
+        found, skipped = _exact_matches(field, value, browser)
+        filter_used = {field: value}
+        if not found:
+            if skipped:
+                fail("not-managed",
+                     f"{len(skipped)} tab(s) match {field} {value!r}, and every "
+                     f"one of them is in a browser this CLI did not start "
+                     f"({skipped[0]['exe']} on {skipped[0]['profile']}) — a "
+                     "write needs `attach --port N`, or `--browser NAME` to "
+                     "narrow it")
+            fail("no-page-tab",
+                 f"no tab in a browser this CLI drives has {field} exactly "
+                 f"{value!r} — `tab list` shows what is open")
+    else:
+        found = _resolve_across(list(specs), browser, for_write=True)
     by_profile: dict[str, list[str]] = {}
     for row, tab, _index in found:
         by_profile.setdefault(str(row["profile"]), []).append(str(tab["id"]))
@@ -1043,12 +1114,17 @@ def close_tabs(specs: list[str], browser: str = "") -> dict:
         fail("close-tab-not-verified",
              f"{len(survivors)} of {len(found)} tabs are still open: "
              + ", ".join(str(i)[:10] for i in survivors[:4]))
-    return {"ok": True,
-            "closed": [{"id": tab["id"], "title": tab["title"],
-                        "url": tab["url"], "pid": row["pid"],
-                        "managed": row["managed"]}
-                       for row, tab, _index in found],
-            "count": _tab_count()}
+    reply = {"ok": True,
+             "closed": [{"id": tab["id"], "title": tab["title"],
+                         "url": tab["url"], "pid": row["pid"],
+                         "managed": row["managed"]}
+                        for row, tab, _index in found],
+             "count": _tab_count()}
+    if filter_used:
+        reply["filter"] = {**filter_used, "exact": True}
+    if skipped:
+        reply["skipped"] = skipped
+    return reply
 
 
 def new_tab(urls: list[str] | None = None, browser: str = "") -> dict:

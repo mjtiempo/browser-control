@@ -57,7 +57,8 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab [URL...]       open one tab per URL (about:blank when none)
   tab list           every drivable browser's page tabs, by browser
   tab info SPEC      one tab: `id:<prefix>` or a title/url substring
-  tab close SPEC...  close every tab the specs name, verified as a set
+  tab close SPEC...  close every tab the specs name, verified as a set;
+                     --title V or --url V close every EXACT match instead
   tab nav URL [--tab SPEC]       navigate, then read the address back
   tab back|forward [--tab SPEC]  history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
@@ -219,22 +220,6 @@ def cmd_detach(rest: list[str], browser: str) -> dict:
                   profile=selector["profile"], detach_all=selector["all"])
 
 
-def _specs(rest: list[str], verb: str) -> list[str]:
-    """Every TAB spec this verb was given, in order — at least one.
-
-    A flag is refused rather than ignored (`--browser` is taken by `main`),
-    and a caller that names three tabs gets three closed.
-    """
-    for arg in rest:
-        if str(arg).startswith("-"):
-            fail("bad-args", f"{verb}: unknown flag {arg!r}")
-    if not rest:
-        fail("bad-args",
-             f"{verb}: at least one TAB spec is required (id:<prefix> or a "
-             "title/url substring)")
-    return list(rest)
-
-
 def cmd_open(rest: list[str], browser: str) -> dict:
     return launch(_urls(rest, "open"), browser=browser)
 
@@ -365,7 +350,18 @@ def cmd_tab_info(rest: list[str], browser: str) -> dict:
 
 
 def cmd_tab_close(rest: list[str], browser: str) -> dict:
-    return close_tabs(_specs(rest, "tab close"), browser=browser)
+    """`tab close SPEC... | --title VALUE | --url URL`.
+
+    `--title`/`--url` close EVERY tab that matches exactly (case-insensitive):
+    every tab called "a", or every tab on `http://a/`. They take no SPEC, and
+    a SPEC takes no filter — one way to name tabs per call, never both.
+    """
+    rest, title = _pop(rest, "--title", "tab close")
+    rest, url = _pop(rest, "--url", "tab close")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab close: unknown flag {arg!r}")
+    return close_tabs(rest, browser=browser, title=title, url=url)
 
 
 def cmd_tab_nav(rest: list[str], browser: str) -> dict:
