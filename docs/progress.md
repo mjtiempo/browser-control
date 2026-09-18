@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 15 hermetic + 20 live checks passing.
+Repo `main`, worktree clean, 18 hermetic + 25 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,12 +15,12 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 334 | `HANDLERS` table, `tab` subcommands, `--browser`, `attach`/`detach` argv |
-| `browser_control/lib/browser.py` | 1015 | managed profile, launch, verified stop, discovery, attach records, tab ops |
-| `browser_control/lib/cdp.py` | 229 | endpoint (`DevToolsActivePort`), capped JSON GET, explicit-port reads, one websocket call |
+| `browser_control/cli/main.py` | 408 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv |
+| `browser_control/lib/browser.py` | 1275 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
+| `browser_control/lib/cdp.py` | 308 | endpoint, capped JSON GET, explicit-port reads, method call, `evaluate`, `target_ws` |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 512 | 15 hermetic checks, no browser needed |
-| `tests/live_test.py` | 653 | 20 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 635 | 18 hermetic checks, no browser needed |
+| `tests/live_test.py` | 787 | 25 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -40,6 +40,9 @@ the other verbs own the browser.
 | `tab list [--browser NAME]` | the page tabs of every **drivable** browser, grouped and sorted by browser | the same tab list the verbs use, read per browser |
 | `tab info SPEC` | one tab: which browser owns it, its `{id,title,url,index}` now | the spec resolves to exactly one tab or refuses |
 | `tab close SPEC...` | closes every tab the specs name, **all specs resolved before anything is closed** | every requested id must be **absent** afterwards, else `close-tab-not-verified` names the survivors |
+| `tab nav URL [--tab SPEC]` | navigates one tab | the address **as observed** (`url_read`) + `moved` + `loaded`; `chrome-error://` → `nav-failed`; a tab that never left a page it was not on → `nav-not-verified`; a redirect is a success |
+| `tab back` / `tab forward` | moves the tab's history | the address actually changed (`nav-not-verified` when it did not) |
+| `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
@@ -88,17 +91,19 @@ refusing `cdp-unreachable`.
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
-**Live battery** — `python3 tests/live_test.py` → **20 passed, 0 failed, 0
+**Live battery** — `python3 tests/live_test.py` → **25 passed, 0 failed, 0
 skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
 independent state back — a raw socket connect, a direct `/json` GET, `/proc`
 for the pid — for open, `list`, `tab list`/`tab info`, `tab` (single and
 several URLs), open with several URLs, `tab close` by id and by substring,
 an ambiguous spec (refused with **nothing** closed), a two-spec close in one
-call, refusals, `info`, adoption of the running browser, the verified close,
-the idempotent close, a browser with no debugging port (listed, never
-driven), a **foreign drivable** browser (read → refused → attached → written
-→ detached, with `close` still refusing to stop it) and "nothing left
-running". With the command missing it reports 20 skips and exits 2.
+call, `tab nav` (a redirect, a dead endpoint, `--tab` naming the one tab),
+`tab back`/`tab forward`, `tab reload`, refusals, `info`, adoption of the
+running browser, the verified close, the idempotent close, a browser with no
+debugging port (listed, never driven), a **foreign drivable** browser (read →
+refused → attached → written → detached, with `close` still refusing to stop
+it) and "nothing left running". With the command missing it reports 25 skips
+and exits 2.
 
 **Not proven yet**: no concurrent-`open` test (there is no lock), no
 multi-browser test (two live instances refuse), no CI.
@@ -108,7 +113,7 @@ multi-browser test (two live instances refuse), no CI.
 | Plan said | Slice 1 | Why / when to revisit |
 | --- | --- | --- |
 | `lib/cdp/` package | one `lib/cdp.py` | split when nav/dom land and the file grows |
-| `lib/profile.py`, `lib/tabs.py` | folded into `lib/browser.py` | 5 verbs do not need three modules; split at ~`nav` |
+| `lib/profile.py`, `lib/tabs.py` | folded into `lib/browser.py` (now 1275 lines) | the split keeps being deferred: nav landed there too, while the page PRIMITIVES it needed (`evaluate`, `target_ws`) went into `lib/cdp.py`. Split when a second verb family arrives (dom/media), and the boundary is already visible: transport in `cdp.py`, resolution/lifecycle/verbs in `browser.py` |
 | profile **seeding** from the user's own profile | not implemented — the managed profile starts empty | deliberate: no copying a multi-GB profile until the slice needs logins (see next) |
 | port → inode → pid ownership guard | only the websocket-host check; `close` identifies its pid by cmdline + exe | the endpoint is `--remote-debugging-port=0` on our own profile, so there is no fixed port to forward yet |
 | `ensure` (windowless start) | `open` always makes a page | the 4-verb scope does not need a windowless state |
@@ -134,12 +139,12 @@ multi-browser test (two live instances refuse), no CI.
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1 and 5.2 have landed**
-(§1, §2) and **5.3 is deferred by decision** — the next actionable step is
-5.4 (`nav`), and every later verb is expected to add its check to
-`tests/live_test.py`. The CLI grammar is settled (§1): page work lives under
-`tab`, browser work stays top-level, so `nav` lands as `tab nav URL` rather
-than a new top-level name.
+Ordered by "unblocks the most with the least". **5.1, 5.2 and 5.4 have
+landed** (§1, §2), **5.3 is deferred by decision** — the next actionable step
+is 5.5 (DOM reads: `tab js`, `tab wait`, `tab find`, `tab text`) — and every
+later verb is expected to add its check to `tests/live_test.py`. The CLI
+grammar is settled (§1): page work lives under `tab`, browser work stays
+top-level.
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -149,15 +154,29 @@ the one thing that makes an install unusable. Covered hermetically (that
 refusal included) and by the battery's first check.
 
 ### 5.2 The live battery — done
-`tests/live_test.py` (626 lines, 20 checks): a temp `BROWSER_CONTROL_ROOT`, a
-local page server so tabs have distinct URLs without the network, a
-skip-if-prereq that exits 2, and mandatory cleanup — close what you opened,
-kill what you started (and wait for it), remove the temp root (the skip path
-leaked one until it was fixed, and the removal has to outlive a dying
-browser). Every check reads independent state (raw socket, direct `/json`,
-`/proc`) instead of trusting the reply, and two of them launch browsers this
-CLI does **not** manage — one with no debugging port, one drivable — to prove
-the read/write boundary.
+`tests/live_test.py` (787 lines, 25 checks): a temp `BROWSER_CONTROL_ROOT`, a
+local page server (with a redirect route) so tabs have distinct URLs without
+the network, a skip-if-prereq that exits 2, and mandatory cleanup — close what
+you opened, kill what you started (and wait for it), remove the temp root.
+Every check reads independent state (raw socket, direct `/json`, `/proc`)
+instead of trusting the reply, and two of them launch browsers this CLI does
+**not** manage — one with no debugging port, one drivable — to prove the
+read/write boundary.
+
+Three lessons the battery taught by leaking or flaking, all now fixed:
+
+1. **The module must be INERT when imported.** The temp root was created at
+   import time, so any collector that imported the file (pytest, an analyzer)
+   left an orphan root — the "leftovers" this file kept reporting were its own
+   import side effect, and a concurrent run under that load is the likeliest
+   cause of the one intermittent failure seen. The root is made in `main()`.
+2. **A killed run leaves a root**: `sweep_stale_roots()` removes a sibling
+   root that no running process mentions and that is old enough not to be a
+   run starting up — and SAYS so, because a leftover means a run did not
+   finish.
+3. **Timings that assume an idle machine flake**: the cold-start waits for the
+   battery's own foreign browsers are 30–40s now, and the "dead endpoint" the
+   `nav-failed` check uses is verified closed rather than assumed free.
 
 ### 5.3 Profile seeding — deferred
 Deliberately not being built yet, so the managed browser starts with none of
@@ -169,14 +188,20 @@ Chrome singleton files dropped, honest `copied: reflink|copy|empty`, and
 instance this CLI started). The policy question (auto-seed on first `open`
 vs explicit only) is deferred with it.
 
-### 5.4 `tab nav` + history
-`tab nav URL [--tab SPEC]`, `tab back`, `tab forward`, `tab reload`.
-Assignment, then read back the
-observed URL and `readyState`; `chrome-error://` → `nav-failed`; the
-"net change" test, not string equality, so a normalization-only difference is
-not a false `nav-not-verified`. One URL validator shared with `open`/`tab`.
-*Done when* a dead domain refuses `nav-failed`, a redirect reports `url_read`,
-and navigating to the page you are on is not an error.
+### 5.4 `tab nav` + history — done
+`tab nav URL [--tab SPEC]`, `tab back`, `tab forward`, `tab reload`. The
+assignment returns before the document moves, so the reply carries the address
+**as observed** (`url_read`), `moved` and `loaded`; Chromium's own error page is
+`nav-failed`; a redirect is a success (the test is that it MOVED, not that it
+arrived at the literal string); and `--tab` names the tab, with the only-tab
+rule refusing `tab-ambiguous` when several are open.
+
+The bug the first live run found, worth remembering: waiting for
+`readyState == complete` returns IMMEDIATELY for the document being left, so
+the read-back raced the navigation and a redirect came back as
+`nav-not-verified`. The order is now **move first** (`performance.timeOrigin`
+changed, or the address did), **then load** — and `reload` uses the same
+document-time oracle, because a fast page is complete again before any read.
 
 ### 5.5 DOM reads
 `js EXPR` (declared unverified), `wait --for load|idle|element|js` with a

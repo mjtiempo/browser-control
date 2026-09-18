@@ -7,11 +7,16 @@ every verb reads its own effect back before it reports:
 * `launch`    — start (or adopt) the browser and prove a page tab exists
 * `stop`      — signal only the pid running on OUR profile, then prove the
                 process AND the endpoint are gone
-* `tabs`      — the page tabs, id-sorted
 * `new_tab`   — `Target.createTarget`, then the id is re-read from `/json`
-* `close_tab` — `Target.closeTarget`, then the id must be ABSENT, or the
-                refusal is `close-tab-not-verified`
+* `close_tabs`— `Target.closeTarget` per tab, then every id must be ABSENT
+* `nav`       — the assignment returns before the document moves, so the reply
+                is the address AS OBSERVED and the load state; a tab that
+                never left, and the browser's own error page, are refusals
+* `history`   — back/forward, verified by the address actually changing
+* `reload`    — verified by `performance.timeOrigin`: a NEW document
 
+A write goes to a browser this CLI manages, or to one ATTACHED to it.
+`attach` grants tab writes only — `close` never stops an attached browser.
 The browser is never the user's: it runs on a managed profile of its own,
 launched with `--remote-debugging-port=0` so the endpoint is the one it
 publishes rather than an assumed 9222.
@@ -27,6 +32,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 # The project-level pyright run resolves these imports; the line-level ignore
 # is for pi-lens's fallback index, which does not see the sibling modules.
@@ -432,6 +438,13 @@ def _narrow(rows: list[dict], browser: str) -> list[dict]:
             if wanted in (r["exe"], os.path.basename(str(r["profile"])))]
 
 
+def _writable(browser: str = "") -> list[dict]:
+    """The running browsers a WRITE may target: ours, plus the attached ones."""
+    return _narrow([r for r in browsers()
+                    if (r["managed"] or r["attached"])
+                    and r["cdp"]["reachable"]], browser)
+
+
 def _writable_profile(browser: str = "") -> str:
     """The profile a tab write goes to: the named browser's, else the ONE
     writable browser that is up, else this CLI's own (which `open` starts).
@@ -441,8 +454,7 @@ def _writable_profile(browser: str = "") -> str:
     about. `attach`/`detach` decide which browsers are candidates; `--browser`
     picks among them.
     """
-    rows = _narrow([r for r in browsers()
-                    if r["managed"] or r["attached"]], browser)
+    rows = _writable(browser)
     if len(rows) > 1:
         names = ", ".join(os.path.basename(str(r["profile"]))
                           + (" (attached)" if r["attached"] else "")
@@ -1013,3 +1025,251 @@ def new_tab(urls: list[str] | None = None, browser: str = "") -> dict:
         reply.update({"tab": f"id:{opened[0]['id']}", "id": opened[0]["id"],
                       "url": opened[0]["url"], "title": opened[0]["title"]})
     return reply
+
+
+# ---------------------------------------------------------------- the page
+# A page verb acts on ONE tab: `--tab SPEC`, else the only page tab there is.
+# It drives the tab over the tab's OWN websocket (`cdp.target_ws`), so the
+# tab it acts on cannot change between the resolution and the assignment.
+NAV_TIMEOUT_S = 25.0        # a cold page; long enough, short enough to report
+NAV_MOVE_S = 10.0           # how long the tab gets to LEAVE the old document
+HISTORY_TIMEOUT_S = 10.0
+RELOAD_TIMEOUT_S = 20.0
+# One expression for "the document is there and parsed", read by both the
+# single read and the poll.
+READY_EXPR = "document.readyState + (document.body ? '+body' : '')"
+
+
+def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
+    """(browser row, tab row) for the ONE tab a page verb acts on.
+
+    With a spec: the same resolution every other verb uses (one match, or a
+    refusal naming the candidates). Without one: the only page tab there is —
+    several tabs refuse `tab-ambiguous` rather than let a navigation land in
+    the tab nobody named.
+    """
+    if spec:
+        row, tab, _index = _resolve_across([spec], browser, for_write)[0]
+        return row, tab
+    rows = _writable(browser) if for_write else _drivable(browser)
+    if not rows:
+        fail("cdp-unreachable",
+             "no " + ("writable" if for_write else "drivable") + " browser"
+             + (f" matching {browser!r}" if browser else "")
+             + " — run `browser-control-cli open`, or attach one")
+    pairs = [(row, tab) for row in rows for tab in _tabs_of(row)[0]]
+    if not pairs:
+        fail("no-page-tab",
+             "no page tabs to act on — open one with "
+             "`browser-control-cli tab URL`")
+    if len(pairs) > 1:
+        where = ", ".join(f'{str(t["title"])[:20] or str(t["url"])[:30]} '
+                          f'({r["exe"]})' for r, t in pairs[:5])
+        fail("tab-ambiguous",
+             f"{len(pairs)} page tabs are open — name one with --tab SPEC "
+             f"(id:<prefix> or a title/url substring): {where}")
+    return pairs[0]
+
+
+def _same_page(left: object, right: object) -> bool:
+    """Do two URLs name the same page?
+
+    The browser normalises what it was given (`https://a.com` becomes
+    `https://a.com/`), so a trailing slash alone is not a different page —
+    while a different query or fragment is.
+    """
+    return str(left or "").rstrip("/") == str(right or "").rstrip("/")
+
+
+def _eval(profile: str, target_id: str, expression: str,
+          timeout: float = 15.0) -> Any:
+    """Evaluate one expression on that tab's own connection."""
+    ws = cdp.target_ws(cdp.port_of(profile), target_id)
+    return cdp.evaluate(ws, expression, timeout=timeout)
+
+
+def _href(profile: str, target_id: str) -> str:
+    """The tab's address, or "" when it cannot be read (mid-navigation)."""
+    try:
+        return str(_eval(profile, target_id, "location.href", timeout=5) or "")
+    except ControlError:
+        return ""
+
+
+def _wait_document(profile: str, target_id: str,
+                   timeout: float = NAV_TIMEOUT_S) -> bool:
+    """Poll until the document is complete AND parsed, or the deadline.
+
+    Every sample is bounded by what is left of the budget: a page that stops
+    answering must not spend a fresh 15s on each attempt.
+    """
+    deadline = time.time() + timeout
+    while True:
+        with contextlib.suppress(ControlError):
+            if _eval(profile, target_id, READY_EXPR,
+                     timeout=max(0.5, deadline - time.time())) == "complete+body":
+                return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.3)
+
+
+def _ready(profile: str, target_id: str) -> bool:
+    """Is the current document complete and parsed, right now?"""
+    try:
+        return _eval(profile, target_id, READY_EXPR,
+                     timeout=5) == "complete+body"
+    except ControlError:
+        return False
+
+
+def _wait_move(profile: str, target_id: str, before_url: str,
+               before_origin: float | None,
+               timeout: float = NAV_MOVE_S) -> bool:
+    """Did the tab LEAVE the document it was on?
+
+    This is the first question, and `readyState` cannot answer it: the page
+    being left is ALREADY complete, so waiting for "complete" returns before
+    the navigation starts and the read-back then sees the old URL (that is how
+    a redirect came back as `nav-not-verified`). A real navigation creates a
+    new document (`performance.timeOrigin`), a fragment navigation changes the
+    address — either one is the move.
+    """
+    deadline = time.time() + timeout
+    while True:
+        origin = _time_origin(profile, target_id)
+        if origin is not None and before_origin is not None \
+                and origin != before_origin:
+            return True
+        now = _href(profile, target_id)
+        if now and not _same_page(now, before_url):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+def _wait_url_change(profile: str, target_id: str, before: str,
+                     timeout: float = HISTORY_TIMEOUT_S) -> bool:
+    """Did the tab's address leave `before` within the deadline?"""
+    deadline = time.time() + timeout
+    while True:
+        now = _href(profile, target_id)
+        if now and not _same_page(now, before):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+def _time_origin(profile: str, target_id: str) -> float | None:
+    """The document's `performance.timeOrigin`, or None when unreadable.
+
+    It changes exactly when a NEW document is created, which is the only
+    honest way to tell a fast reload from a read of the old page.
+    """
+    try:
+        return float(_eval(profile, target_id, "performance.timeOrigin",
+                           timeout=5))
+    except (ControlError, TypeError, ValueError):
+        return None
+
+
+def _wait_new_document(profile: str, target_id: str, before: float,
+                       timeout: float = RELOAD_TIMEOUT_S) -> bool:
+    """Is there a document whose timeOrigin differs from `before`?"""
+    deadline = time.time() + timeout
+    while True:
+        now = _time_origin(profile, target_id)
+        if now is not None and now != before:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+def nav(url: str, tab: str = "", browser: str = "") -> dict:
+    """`tab nav`: navigate ONE tab, and read back where it landed.
+
+    The assignment returns before the document moves, so the reply carries the
+    address as OBSERVED (`url_read`) and whether the document finished
+    loading. Chromium's own error page refuses `nav-failed`; a tab that never
+    left the page it was on refuses `nav-not-verified`. A redirect is a
+    success: the test is that it MOVED, not that it arrived at the literal
+    string it was handed.
+    """
+    target = safe_url(url)
+    row, tab_row = _one_tab(tab, browser, for_write=True)
+    profile, target_id = str(row["profile"]), str(tab_row["id"])
+    before = _href(profile, target_id)
+    before_origin = _time_origin(profile, target_id)
+    _eval(profile, target_id,
+          f"location.href = {json.dumps(target)}; 'navigating'", timeout=10)
+    # FIRST the move, then the load: the document being left is already
+    # complete, so "complete" alone would answer before the navigation starts
+    moved = _wait_move(profile, target_id, before, before_origin)
+    loaded = _wait_document(profile, target_id) if moved else _ready(profile,
+                                                                     target_id)
+    url_read = _href(profile, target_id)
+    if url_read.startswith("chrome-error://"):
+        fail("nav-failed",
+             f"the browser could not load {target!r} — the tab is on its own "
+             "error page (a name that does not resolve, a refused connection "
+             "or a certificate problem), not the requested document")
+    if not moved and not _same_page(target, before):
+        fail("nav-not-verified",
+             f"the tab is still at {before!r} after navigating to {target!r} "
+             "— a beforeunload prompt, or an assignment the page ignored")
+    return {"ok": True, "tab": f"id:{target_id}", "url": target,
+            "url_read": url_read, "loaded": loaded, "moved": moved,
+            "browser": _brief(row)}
+
+
+def history(direction: str, tab: str = "", browser: str = "") -> dict:
+    """`tab back` / `tab forward`: move the tab's history, then read it back.
+
+    `history.back()` with nothing to go back to is not an error the page
+    reports, so the reply is the OBSERVED change: a tab still at the same
+    address after the wait refuses `nav-not-verified`.
+    """
+    if direction not in ("back", "forward"):
+        fail("bad-args", f"history: {direction!r} is not back or forward")
+    row, tab_row = _one_tab(tab, browser, for_write=True)
+    profile, target_id = str(row["profile"]), str(tab_row["id"])
+    before = _href(profile, target_id)
+    _eval(profile, target_id, f"history.{direction}(); 'moving'", timeout=10)
+    if not _wait_url_change(profile, target_id, before):
+        fail("nav-not-verified",
+             f"the tab is still at {before!r} after {direction} — its history "
+             f"may have no {direction} entry")
+    url_read = _href(profile, target_id)
+    if url_read.startswith("chrome-error://"):
+        fail("nav-failed",
+             f"the {direction} entry did not load — the tab is on the "
+             "browser's own error page")
+    return {"ok": True, "direction": direction, "tab": f"id:{target_id}",
+            "url_before": before, "url_read": url_read,
+            "browser": _brief(row)}
+
+
+def reload(tab: str = "", browser: str = "") -> dict:      # noqa: A001
+    """`tab reload`: reload ONE tab and prove a NEW document is there.
+
+    `location.reload()` returns immediately and a fast page can be complete
+    again before a read, so the oracle is `performance.timeOrigin` — it
+    changes exactly when a document is created.
+    """
+    row, tab_row = _one_tab(tab, browser, for_write=True)
+    profile, target_id = str(row["profile"]), str(tab_row["id"])
+    before = _time_origin(profile, target_id)
+    if before is None:
+        fail("reload-not-verified",
+             f"tab {target_id[:10]}… did not report a document time — there "
+             "is nothing to compare a reload against")
+    _eval(profile, target_id, "location.reload(); 'reloading'", timeout=10)
+    if not _wait_new_document(profile, target_id, before):
+        fail("reload-not-verified",
+             f"no new document within {RELOAD_TIMEOUT_S:g}s — the page may "
+             "block the reload, or it is still loading")
+    return {"ok": True, "tab": f"id:{target_id}", "reloaded": True,
+            "url_read": _href(profile, target_id), "browser": _brief(row)}

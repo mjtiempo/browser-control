@@ -406,6 +406,126 @@ def t_attach_bookkeeping() -> None:
             del os.environ["BROWSER_CONTROL_ROOT"]
 
 
+def t_cli_nav_grammar() -> None:
+    """`tab nav|back|forward|reload` argv, `--tab` included, none dropped."""
+    calls: list[tuple] = []
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        calls.append(("nav", url, tab, browser))
+        return {"ok": True}
+
+    def fake_history(direction: str, tab: str = "",
+                     browser: str = "") -> dict:
+        calls.append(("history", direction, tab, browser))
+        return {"ok": True}
+
+    def fake_reload(tab: str = "", browser: str = "") -> dict:
+        calls.append(("reload", tab, browser))
+        return {"ok": True}
+
+    originals = (cli_main.nav, cli_main.history, cli_main.reload)
+    cli_main.nav, cli_main.history, cli_main.reload = (
+        fake_nav, fake_history, fake_reload)         # type: ignore[assignment]
+    try:
+        for argv in (["tab", "nav", "https://a.example"],
+                     ["tab", "nav", "https://a.example", "--tab", "id:ABC"],
+                     ["tab", "nav", "https://a.example", "--tab=id:ABC"],
+                     ["tab", "nav", "https://a.example",
+                      "--browser", "chromium"],
+                     ["tab", "back"], ["tab", "back", "--tab", "x"],
+                     ["tab", "forward"], ["tab", "reload"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("nav", "https://a.example", "", ""),
+            ("nav", "https://a.example", "id:ABC", ""),
+            ("nav", "https://a.example", "id:ABC", ""),
+            ("nav", "https://a.example", "", "chromium"),
+            ("history", "back", "", ""),
+            ("history", "back", "x", ""),
+            ("history", "forward", "", ""),
+            ("reload", "", ""),
+        ], calls
+        for argv in (["tab", "nav"], ["tab", "nav", "a", "b"],
+                     ["tab", "nav", "--tab"], ["tab", "nav", "-x"],
+                     ["tab", "back", "extra"], ["tab", "reload", "extra"],
+                     ["tab", "forward", "--bogus"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    finally:
+        (cli_main.nav, cli_main.history,
+         cli_main.reload) = originals                # type: ignore[assignment]
+
+
+def t_same_page() -> None:
+    """The net-change test: a trailing slash is not a different page."""
+    same = browser._same_page                                    # noqa: SLF001
+    assert same("https://a.example", "https://a.example/") is True
+    assert same("https://a.example/x", "https://a.example/x/") is True
+    assert same("https://a.example/x?a=1", "https://a.example/x?a=1")
+    assert same("https://a.example/x?a=1", "https://a.example/x?a=2") is False
+    assert same("https://a.example/x#one", "https://a.example/x#two") is False
+    assert same("https://a.example/", "https://b.example/") is False
+    assert same("", "https://a.example/") is False
+    assert same("about:blank", "about:blank") is True
+
+
+def t_one_tab_addressing() -> None:
+    """A page verb acts on the only tab, refuses several, and never writes
+    into a browser that is neither ours nor attached."""
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["BROWSER_CONTROL_ROOT"] = tmp
+        ours = os.path.join(tmp, "ours")
+        foreign = os.path.join(tmp, "foreign")
+        real_browsers = browser.browsers
+        real_rows = browser.cdp.page_rows_at
+        tabs: dict[int, list[dict]] = {}
+
+        def rows() -> list[dict]:
+            return [
+                {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
+                 "profile": ours, "profile_from": "flag", "managed": True,
+                 "attached": False,
+                 "cdp": {"port": 1616, "reachable": True}},
+                {"pid": 2, "exe": "chrome", "path": "/usr/bin/chrome",
+                 "profile": foreign, "profile_from": "flag",
+                 "managed": False, "attached": False,
+                 "cdp": {"port": 1515, "reachable": True}},
+            ]
+
+        def page_rows_at(port: int) -> list[dict]:
+            return tabs.get(port, [])
+
+        def page(ident: str) -> dict:
+            return {"type": "page", "id": ident, "title": ident,
+                    "url": f"https://{ident}/"}
+
+        browser.browsers = rows                      # type: ignore[assignment]
+        browser.cdp.page_rows_at = page_rows_at      # type: ignore[assignment]
+        try:
+            tabs[1616] = [page("AB12")]
+            row, one = browser._one_tab("", "", for_write=True)  # noqa: SLF001
+            assert row["pid"] == 1 and one["id"] == "AB12", (row, one)
+            tabs[1616] = [page("AB12"), page("CD34")]
+            refusal(lambda: browser._one_tab("", "", for_write=True),  # noqa: SLF001
+                    "tab-ambiguous")
+            _row, named = browser._one_tab("CD34", "", for_write=True)  # noqa: SLF001
+            assert named["id"] == "CD34", named
+            tabs[1616] = []
+            refusal(lambda: browser._one_tab("", "", for_write=True),  # noqa: SLF001
+                    "no-page-tab")
+            # a readable-but-foreign browser: reads see it, writes refuse
+            tabs[1515] = [page("EF56")]
+            _row, readable = browser._one_tab("", "", for_write=False)  # noqa: SLF001
+            assert readable["id"] == "EF56", readable
+            refusal(lambda: browser._one_tab("EF56", "", for_write=True),  # noqa: SLF001
+                    "not-managed")
+        finally:
+            browser.browsers = real_browsers          # type: ignore[assignment]
+            browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
+            del os.environ["BROWSER_CONTROL_ROOT"]
+
+
 def t_cmdline_value() -> None:
     """Chrome writes `--flag=value` and `--flag value`; both are read."""
     value = browser._cmdline_value                            # noqa: SLF001
@@ -495,6 +615,9 @@ def main() -> int:
         ("page rows from a fake endpoint", t_page_rows_from_a_fake_endpoint),
         ("cli dispatches with flags stripped", t_cli_dispatch),
         ("tab grammar lands in one service", t_cli_tab_grammar),
+        ("nav/history/reload grammar", t_cli_nav_grammar),
+        ("the net-change test", t_same_page),
+        ("one page verb, one tab", t_one_tab_addressing),
         ("attach/detach grammar", t_cli_attach_grammar),
         ("attach opens the write gate", t_attach_bookkeeping),
         ("cli lists browsers and their info", t_cli_lists),

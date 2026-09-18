@@ -24,10 +24,13 @@ from browser_control.lib.browser import (  # pyright: ignore[reportMissingImport
     browser_info,
     close_tabs,
     detach,
+    history,
     launch,
     list_browsers,
     list_tabs,
+    nav,
     new_tab,
+    reload,
     stop,
     tab_info,
 )
@@ -51,6 +54,9 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab list           every drivable browser's page tabs, by browser
   tab info SPEC      one tab: `id:<prefix>` or a title/url substring
   tab close SPEC...  close every tab the specs name, verified as a set
+  tab nav URL [--tab SPEC]       navigate, then read the address back
+  tab back|forward [--tab SPEC]  history, verified by the address changing
+  tab reload [--tab SPEC]        a NEW document, verified
   selftest           prove the install: interpreter, websockets, verbs
 
 SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
@@ -58,6 +64,8 @@ SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
 flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
                         (info/tab list); default: a live managed browser, else
                         the first Chromium-family one on PATH
+       --tab SPEC       the tab a page verb acts on (nav/back/forward/reload);
+                        without it the verb acts on the ONLY page tab there is
 reads: every drivable browser.  writes: a managed browser, or an attached one
        — `attach` grants TAB writes only, `close` never stops one
 out:   one JSON object on stdout; ERR[code]: message on stderr, exit 2"""
@@ -255,6 +263,32 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
 Handler = Callable[[list[str], str], dict]
 
 
+def _tab_flag(rest: list[str], verb: str) -> tuple[list[str], str]:
+    """Pull `--tab SPEC` (or `--tab=SPEC`) out of a verb's arguments.
+
+    `--tab` names the tab a page verb acts on; without it the verb acts on the
+    only page tab there is, and refuses `tab-ambiguous` when there are more.
+    """
+    out: list[str] = []
+    spec = ""
+    index = 0
+    while index < len(rest):
+        arg = str(rest[index])
+        if arg == "--tab":
+            if index + 1 >= len(rest):
+                fail("bad-args", f"{verb}: --tab needs a SPEC")
+            spec = str(rest[index + 1])
+            index += 2
+            continue
+        if arg.startswith("--tab="):
+            spec = arg.split("=", 1)[1]
+            index += 1
+            continue
+        out.append(arg)
+        index += 1
+    return out, spec
+
+
 def cmd_tab_list(rest: list[str], browser: str) -> dict:
     _none(rest, "tab list")
     return list_tabs(browser=browser)
@@ -268,12 +302,52 @@ def cmd_tab_close(rest: list[str], browser: str) -> dict:
     return close_tabs(_specs(rest, "tab close"), browser=browser)
 
 
+def cmd_tab_nav(rest: list[str], browser: str) -> dict:
+    """`tab nav URL [--tab SPEC]` — navigate, then read the address back."""
+    rest, spec = _tab_flag(rest, "tab nav")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab nav: unknown flag {arg!r}")
+    if not rest:
+        fail("bad-args",
+             "tab nav: a URL is required (http(s) or about:blank)")
+    if len(rest) > 1:
+        fail("bad-args",
+             f"tab nav: one URL at most, got {len(rest)} — the tab is "
+             "--tab SPEC")
+    return nav(rest[0], tab=spec, browser=browser)
+
+
+def cmd_tab_back(rest: list[str], browser: str) -> dict:
+    """`tab back [--tab SPEC]` — the history move, verified by the address."""
+    rest, spec = _tab_flag(rest, "tab back")
+    _none(rest, "tab back")
+    return history("back", tab=spec, browser=browser)
+
+
+def cmd_tab_forward(rest: list[str], browser: str) -> dict:
+    rest, spec = _tab_flag(rest, "tab forward")
+    _none(rest, "tab forward")
+    return history("forward", tab=spec, browser=browser)
+
+
+def cmd_tab_reload(rest: list[str], browser: str) -> dict:
+    """`tab reload [--tab SPEC]` — a NEW document, verified."""
+    rest, spec = _tab_flag(rest, "tab reload")
+    _none(rest, "tab reload")
+    return reload(tab=spec, browser=browser)
+
+
 # `tab`'s subcommands: a reserved first word, so a URL can never be mistaken
 # for one (and vice versa).
 TAB_SUBCOMMANDS: dict[str, Handler] = {
     "list": cmd_tab_list,
     "info": cmd_tab_info,
     "close": cmd_tab_close,
+    "nav": cmd_tab_nav,
+    "back": cmd_tab_back,
+    "forward": cmd_tab_forward,
+    "reload": cmd_tab_reload,
 }
 
 HANDLERS: dict[str, Handler] = {

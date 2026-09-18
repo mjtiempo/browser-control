@@ -44,8 +44,11 @@ browser_lib: Any = import_module("browser_control.lib.browser")
 cdp: Any = import_module("browser_control.lib.cdp")
 
 CLI = os.environ.get("BROWSER_CONTROL_CLI") or str(REPO / "browser-control-cli")
-ROOT = tempfile.mkdtemp(prefix="browser-control-live-")
-ENV = {**os.environ, "BROWSER_CONTROL_ROOT": ROOT}
+# Created in `main()`, NOT here: this file is a module like any other, and a
+# collector that imports it (pytest, an analyzer) must not create temp roots,
+# start browsers or sweep anything. It did — that is where the orphan roots
+# these tests kept finding came from.
+ROOT = ""
 TIMEOUT_S = 90
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -53,6 +56,11 @@ results: list[tuple[str, str, str]] = []
 # What the checks discovered, and what the cleanup needs.
 STATE: dict[str, Any] = {}
 SERVER: http.server.ThreadingHTTPServer | None = None
+
+
+def env() -> dict[str, str]:
+    """The environment every CLI call gets: the throwaway root, and ours."""
+    return {**os.environ, "BROWSER_CONTROL_ROOT": ROOT}
 
 
 # ------------------------------------------------------------------- harness
@@ -75,7 +83,7 @@ def run(*argv: str, timeout: int = TIMEOUT_S) -> tuple[int, str, str]:
     other venv both work.
     """
     proc = subprocess.run([CLI, *argv], capture_output=True, text=True,
-                          timeout=timeout, env=ENV)
+                          timeout=timeout, env=env())
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
@@ -143,6 +151,13 @@ def start_server() -> None:
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if self.path.startswith("/go"):
+                # a redirect, so the battery can prove that "it MOVED" is the
+                # test and not "it arrived at the string it was handed"
+                self.send_response(302)
+                self.send_header("Location", "/eight-b")
+                self.end_headers()
+                return
             name = self.path.strip("/") or "root"
             body = (f"<!doctype html><title>{name}</title>"
                     f"<h1>{name}</h1>").encode()
@@ -165,6 +180,53 @@ def base_url() -> str:
 
 
 # ------------------------------------------------------------------- checks
+def dead_port() -> int:
+    """A loopback port nothing answers on — CHECKED, not assumed.
+
+    A port that is bound-but-unused would let the browser load a page instead
+    of failing, so the check would be measuring the wrong thing.
+    """
+    for _ in range(5):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+        with socket.socket() as check:
+            check.settimeout(1.0)
+            if check.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    raise AssertionError("no closed loopback port could be found")
+
+
+def sweep_stale_roots() -> list[str]:
+    """Remove the temp roots of runs that were KILLED before their cleanup.
+
+    A root whose path appears in no running process is abandoned — the Chrome
+    a run starts carries the path in its cmdline — but only when it is old
+    enough that it cannot be a run starting up right now (that run's browser
+    would not exist yet, and sweeping it would be the bug). The point is not
+    tidiness: a leftover here means a run did not finish, and saying so is
+    more useful than silently collecting them.
+    """
+    removed: list[str] = []
+    base = tempfile.gettempdir()
+    for name in sorted(os.listdir(base)):
+        path = os.path.join(base, name)
+        if not name.startswith("browser-control-live-") or path == ROOT \
+                or not os.path.isdir(path):
+            continue
+        try:
+            if time.time() - os.path.getmtime(path) < 120:
+                continue                 # maybe a run starting up right now
+        except OSError:
+            continue
+        if procs_on(path):
+            continue                     # a live browser still runs on it
+        shutil.rmtree(path, ignore_errors=True)
+        if not Path(path).exists():
+            removed.append(name)
+    return removed
+
+
 def our_tabs() -> list[dict]:
     """Our managed browser's tabs, narrowed by its own profile name.
 
@@ -262,6 +324,67 @@ def c_close_tab_by_substring() -> str:
     assert [row["id"] for row in reply["closed"]] == [tid], reply
     assert tid not in {t["id"] for t in pages(STATE["port"])}, reply
     return "a title/url substring resolves to exactly one tab"
+
+
+def c_nav_reads_the_address_back() -> str:
+    """`tab nav` follows a redirect, and re-navigating the same page is fine."""
+    base = base_url()
+    reply = ok_json("tab", "nav", f"{base}/eight-a")
+    assert reply["url_read"].endswith("/eight-a"), reply
+    assert reply["moved"] is True and reply["loaded"] is True, reply
+    assert reply["tab"] == f"id:{STATE['tab']}", reply
+    redirected = ok_json("tab", "nav", f"{base}/go")
+    assert redirected["url_read"].endswith("/eight-b"), redirected
+    assert redirected["moved"] is True, redirected
+    again = ok_json("tab", "nav", f"{base}/eight-b")
+    assert again["url_read"].endswith("/eight-b"), again
+    return "a redirect is a move; re-navigating the same page is no error"
+
+
+def c_nav_refuses_a_dead_end() -> str:
+    """A connection the browser cannot make is `nav-failed`, not a success."""
+    dead = dead_port()
+    err = refuses("nav-failed", "tab", "nav", f"http://127.0.0.1:{dead}/")
+    assert "error page" in err, err
+    return f"a refused connection is nav-failed, not a loaded page ({dead})"
+
+
+def c_history_moves_the_address() -> str:
+    """back and forward are verified by the address changing."""
+    base = base_url()
+    ok_json("tab", "nav", f"{base}/nine-a")
+    ok_json("tab", "nav", f"{base}/nine-b")
+    back = ok_json("tab", "back")
+    assert back["url_read"].endswith("/nine-a"), back
+    forward = ok_json("tab", "forward")
+    assert forward["url_read"].endswith("/nine-b"), forward
+    return "back and forward read the address back, in both directions"
+
+
+def c_reload_makes_a_new_document() -> str:
+    """`tab reload` is verified by `performance.timeOrigin`, not by a guess."""
+    reply = ok_json("tab", "reload")
+    assert reply["reloaded"] is True, reply
+    assert reply["url_read"].endswith("/nine-b"), reply
+    return "reload is verified by the document time changing"
+
+
+def c_nav_names_the_tab() -> str:
+    """Two tabs refuse without `--tab`; `--tab` moves exactly the one named."""
+    base = base_url()
+    other = str(ok_json("tab", "about:blank")["id"])
+    try:
+        err = refuses("tab-ambiguous", "tab", "nav", f"{base}/ten")
+        assert "name one with --tab" in err, err
+        named = ok_json("tab", "nav", f"{base}/ten",
+                        "--tab", f"id:{STATE['tab'][:8]}")
+        assert named["tab"] == f"id:{STATE['tab']}", named
+        urls = {t["id"]: t["url"] for t in pages(STATE["port"])}
+        assert str(urls.get(STATE["tab"])).endswith("/ten"), urls
+        assert urls.get(other) == "about:blank", urls
+    finally:
+        ok_json("tab", "close", f"id:{other[:8]}")
+    return "two tabs refuse without --tab; --tab moves exactly the one named"
 
 
 def c_ambiguous_spec_refuses() -> str:
@@ -413,7 +536,7 @@ def c_list_shows_a_browser_outside_cdp() -> str:
         stderr=subprocess.DEVNULL)
     stopped = False
     try:
-        deadline = time.time() + 15
+        deadline = time.time() + 30
         row = None
         while time.time() < deadline:
             row = next((b for b in ok_json("list")["browsers"]
@@ -475,7 +598,7 @@ def c_attach_grants_writes() -> str:
         stderr=subprocess.DEVNULL)
     stopped = False
     try:
-        port, deadline = 0, time.time() + 20
+        port, deadline = 0, time.time() + 40
         while time.time() < deadline:
             try:
                 with open(Path(profile, "DevToolsActivePort")) as handle:
@@ -550,6 +673,11 @@ CHECKS = (
     ("open with several URLs", c_open_several),
     ("tab close by id prefix", c_close_tab_by_id_prefix),
     ("tab close by substring", c_close_tab_by_substring),
+    ("tab nav reads the address back", c_nav_reads_the_address_back),
+    ("tab nav refuses a dead end", c_nav_refuses_a_dead_end),
+    ("tab back/forward move the address", c_history_moves_the_address),
+    ("tab reload makes a new document", c_reload_makes_a_new_document),
+    ("tab nav names the tab", c_nav_names_the_tab),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),
@@ -625,6 +753,8 @@ def cleanup() -> None:
 
 
 def main() -> int:
+    global ROOT
+    ROOT = tempfile.mkdtemp(prefix="browser-control-live-")
     reason = prereq()
     try:
         if reason:
@@ -633,7 +763,11 @@ def main() -> int:
                 print(f"SKIP  {name}  {reason}")
         else:
             start_server()
+            swept = sweep_stale_roots()
             print(f"root {ROOT}\npage {base_url()}\ncli  {CLI}\n")
+            if swept:
+                print(f"(swept {len(swept)} temp root(s) a killed run left: "
+                      f"{', '.join(swept)})\n")
             for name, fn in CHECKS:
                 check(name, fn)
     finally:

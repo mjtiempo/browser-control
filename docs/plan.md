@@ -173,9 +173,10 @@ Shape: one `cmd_*` per verb in a `HANDLERS` table (`tab`'s subcommands in
 `ERR[code]: message` on stderr, exit 2. An unknown flag, an extra positional,
 or a bare word that is not a URL → `bad-args` (never dropped).
 
-Delivered so far: `open`, `close`, `list`, `info`, `tab [URL…]`, `tab list`,
-`tab info`, `tab close`, `selftest` — the rest of the list is the target
-surface; [`progress.md`](progress.md) is the state of the work.
+Delivered so far: `open`, `close`, `list`, `info`, `attach`, `attach --list`,
+`detach`, `tab [URL…]`, `tab list`, `tab info`, `tab close`, `tab nav`,
+`tab back`, `tab forward`, `tab reload`, `selftest` — the rest of the list is
+the target surface; [`progress.md`](progress.md) is the state of the work.
 
 ## 4. Verification appetite
 

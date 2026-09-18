@@ -149,6 +149,23 @@ def _pages(rows: Any) -> list[dict]:
     return sorted(pages, key=lambda r: str(r["id"]))
 
 
+def target_ws(port: int, target_id: str) -> str:
+    """The websocket of ONE page target on `port`, host-checked.
+
+    Read from `/json` — whose rows carry it — so the connection is that tab's
+    own, not a re-resolution of a spec that may have moved since.
+    """
+    row = next((r for r in _pages(_get_port(port, "/json"))
+                if str(r.get("id")) == str(target_id)), None)
+    if row is None:
+        fail("no-page-tab", f"tab {str(target_id)[:10]}… left the tab list")
+    ws = str(row.get("webSocketDebuggerUrl") or "")
+    if not ws:
+        fail("no-page-tab",
+             f"tab {str(target_id)[:10]}… has no websocket endpoint")
+    return _checked_ws(ws, "tab")
+
+
 def rows_to_tabs(rows: list[dict]) -> list[dict]:
     """One page row, as every verb reports it."""
     return [{"id": str(r.get("id") or ""),
@@ -156,7 +173,7 @@ def rows_to_tabs(rows: list[dict]) -> list[dict]:
              "url": str(r.get("url") or "")} for r in rows]
 
 
-def _checked_ws(url: str) -> str:
+def _checked_ws(url: str, where: str = "endpoint") -> str:
     """The websocket URL, with its HOST checked.
 
     CDP is loopback by design; a `webSocketDebuggerUrl` naming a foreign host
@@ -166,8 +183,8 @@ def _checked_ws(url: str) -> str:
     host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
     if host not in ("127.0.0.1", "localhost", "::1"):
         fail("cdp-not-local",
-             f"the endpoint names a websocket on {host!r} — refusing to send "
-             "page traffic off the loopback CDP endpoint")
+             f"{where}: the endpoint names a websocket on {host!r} — refusing "
+             "to send page traffic off the loopback CDP endpoint")
     return str(url)
 
 
@@ -227,3 +244,65 @@ def call(ws_url: str, method: str, params: dict | None = None,
              "the `websockets` package is required to speak CDP "
              "(pip install websockets)")
     return asyncio.run(_call(ws_url, method, params or {}, timeout))
+
+
+async def _evaluate(ws_url: str, expression: str, timeout: float) -> Any:
+    try:
+        async with websockets.connect(ws_url, max_size=2 ** 24,
+                                      open_timeout=10) as ws:
+            # one send: an expression may WRITE (a nav assignment, a reload),
+            # so there is no retry here — the caller's read-back is the
+            # recovery, exactly as for the method calls
+            await ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                                      "params": {"expression": expression,
+                                                 "returnByValue": True}}))
+            deadline = time.time() + timeout
+            while True:
+                msg = json.loads(await asyncio.wait_for(
+                    ws.recv(), timeout=max(0.1, deadline - time.time())))
+                if msg.get("id") == 1:
+                    err = msg.get("error")
+                    if err:
+                        fail("cdp-error",
+                             f"Runtime.evaluate: {err.get('message')} "
+                             f"(code {err.get('code')})")
+                    result = msg.get("result") or {}
+                    details = result.get("exceptionDetails")
+                    if details:
+                        # the PAGE failed, which is its answer, not a
+                        # transport hiccup: refuse it rather than retry
+                        exception = details.get("exception") or {}
+                        text = str(exception.get("description")
+                                   or details.get("text")
+                                   or "page JS exception")
+                        fail("cdp-error",
+                             f"Runtime.evaluate: {text.splitlines()[0]}")
+                    value = (result.get("result") or {}).get("value")
+                    if isinstance(value, str):
+                        try:
+                            return json.loads(value)
+                        except (ValueError, TypeError):
+                            return value     # a plain string result
+                    return value              # None for undefined; the honest
+                if time.time() >= deadline:   # answer to a void expression
+                    fail("cdp-error",
+                         f"Runtime.evaluate: no reply within {timeout:g}s")
+    except ControlError:
+        raise
+    except Exception as e:                                     # noqa: BLE001
+        raise ControlError("cdp-error", f"Runtime.evaluate: {e}") from e
+
+
+def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
+    """Evaluate an expression on ONE tab's own connection, returning its value.
+
+    `returnByValue`, so a page that answers JSON is decoded to the value it
+    produced; a page-level JS exception is a refusal, because the caller
+    asked the page a question and the page answered with a failure.
+    """
+    if websockets is None:
+        fail("no-websockets",
+             "the `websockets` package is required to speak CDP "
+             "(pip install websockets)")
+    return asyncio.run(_evaluate(_checked_ws(ws_url, "tab"), expression,
+                                 timeout))
