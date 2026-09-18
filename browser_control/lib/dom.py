@@ -1,33 +1,44 @@
-"""dom — what a page READS like: `tab js`, `tab wait`, `tab find`, `tab text`.
+"""dom — what a page READS and ACTS like: js, wait, find, text, click, scroll.
 
 The tier above `lib.browser`: every verb resolves ONE tab through the same
-rule as the other verbs (`browser._one_tab`), evaluates one expression over
-that tab's own connection (`browser._eval` → `cdp.evaluate`), and shape-checks
-what came back. The DOM and `JSON.stringify` are the page's to override, so
-everything crossing `Runtime.evaluate` is DATA — a malformed row is dropped,
-never raised out of a verb.
+rule as the other verbs (`browser._one_tab`), and then talks to that tab —
+through `cdp.Session`, ONE connection for the whole verb, because these verbs
+are sequences (a click is a move, a press, a release and a read; scrolling to
+an edge is a wheel and a read per step).
 
-What the verbs are, and what they are not:
+The DOM and `JSON.stringify` are the page's to override, so everything
+crossing `Runtime.evaluate` is DATA — a malformed row is dropped, never raised
+out of a verb.
 
-* `js`   — the escape hatch: whatever the page answers, capped, DECLARED
-            unverified (the caller owns the meaning). It can write.
-* `wait` — a poll for one predicate with one wall-clock budget. It proves the
-            predicate passed, never that anything followed from it.
-* `find` — a human target resolved to visible elements and their boxes in
-            PAGE coordinates, each with a hit-test saying whether a click at
-            the centre would reach it.
-* `text` — the rendered text, truncated IN THE PAGE, so the reply is bounded
-            no matter how large the document is.
+What the verbs are:
 
-Two contracts worth stating because they were measured, not assumed:
+* `js`     — the escape hatch: whatever the page answers, capped, DECLARED
+              unverified (the caller owns the meaning). It can write.
+* `wait`   — a poll for one predicate with one wall-clock budget. It proves the
+              predicate passed, never that anything followed from it.
+* `find`   — a human target resolved to elements and their geometry, in PAGE
+              and viewport coordinates, each with `in_viewport` and a real
+              hit-test (`hit`).
+* `text`   — the rendered text, truncated IN THE PAGE.
+* `click`  — REAL input (`Input.dispatchMouseEvent`) at an element's viewport
+              centre: the same press a finger makes, so handlers that ignore
+              `element.click()` (untrusted) take it.
+* `scroll` — REAL wheel input (`Input.dispatchMouseEvent` `mouseWheel`), which
+              reaches nested scrollers and fires lazy loading, or
+              `DOM.scrollIntoViewIfNeeded` — a CDP method, not a line of
+              JavaScript — to bring one element into view.
+
+Contracts worth stating because they were measured, not assumed:
 
 * **A read never activates a tab.** A background tab has a viewport, a layout
   and a working hit-test (measured 2026-09-18), so geometry is available
-  without moving the user's desktop. `find` reports `visibility` and
-  `viewport` and leaves the tab alone.
-* **A tab with no viewport refuses `no-viewport`.** A 0x0 viewport (a
-  windowless or never-shown browser) makes every box meaningless, so it is a
-  refusal, not a `rendered: false` flag to interpret.
+  without moving the user's desktop. A tab with no viewport refuses
+  `no-viewport`.
+* **A wheel's effect is ASYNCHRONOUS** (measured: `scrollY` 0 → 600 between
+  0.0 s and 0.2 s after the event), so scrolling verifies by polling, the way
+  `nav` waits for the move before the load.
+* **CDP input is trusted, `element.click()` is not** (measured side by side):
+  that is why this tier clicks with `Input.*` and never with JavaScript.
 """
 from __future__ import annotations
 
@@ -35,25 +46,28 @@ import json
 import time
 from typing import Any
 
-# The three private helpers below are this layer's contract with lib.browser:
-# the tab resolution, one evaluation on that tab, and the browser block every
+# The private helpers below are this layer's contract with lib.browser: the
+# tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
 from browser_control.lib import browser as tabs  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import fail  # pyright: ignore[reportMissingImports]
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
-FIND_CAP = 10               # matches `find` returns
+FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
 WAIT_POLL_S = 0.4           # how often a `wait` samples
 WAIT_DEFAULT_S = 15.0
 IDLE_DEFAULT_MS = 500
 EVAL_TIMEOUT_S = 15.0
+SCROLL_EDGE_STEP = 2500     # one wheel notch when scrolling to an edge
+SCROLL_EDGE_STEPS = 12      # and how many of them an edge is worth
+SCROLL_MOVE_S = 4.0         # how long one wheel is given to move something
 
-# One prelude for every verb that looks for an element: the element set, the
-# label, the role, the box, the hit-test, and a SHADOW-PIERCING query. Sharing
-# it is what keeps `find` and `wait --for element` from drifting apart, and it
-# is why `find` sees into open shadow roots while a plain
-# `document.querySelector` does not.
+# One prelude for every verb that looks at the page: the element set, the
+# label, the role, the geometry, the hit-test, a SHADOW-PIERCING query, and a
+# one-line description of an element. Sharing it is what keeps `find`, `click`,
+# `wait --for element` and `scroll TEXT` from disagreeing about what an
+# element IS.
 PRELUDE = r"""
   const INTERACTIVE = 'a,button,input,textarea,select,summary,label,' +
     '[role],[contenteditable="true"],[tabindex],h1,h2,h3,h4,h5,h6';
@@ -80,6 +94,10 @@ PRELUDE = r"""
     ].filter((v) => typeof v === 'string' && v.trim() !== '')
      .join(' ').replace(/\s+/g, ' ').trim();
   const role = (el) => attr(el, 'role') || el.tagName.toLowerCase();
+  const describe = (el) => el
+    ? role(el) + (attr(el, 'id') ? '#' + attr(el, 'id') : '')
+      + (label(el) ? ' ' + label(el).slice(0, 40) : '')
+    : null;
   const rendered = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return null;
@@ -88,16 +106,15 @@ PRELUDE = r"""
         s.opacity === '0') return null;
     return r;
   };
-  const box = (el, vw, vh) => {
+  const geometry = (el, vw, vh) => {
     const r = rendered(el);
     if (!r) return null;
     const left = Math.max(r.left, 0), top = Math.max(r.top, 0);
     const right = Math.min(r.right, vw), bottom = Math.min(r.bottom, vh);
-    if (right - left <= 1 || bottom - top <= 1) return null;
-    return {x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height,
-            cx: r.left + r.width / 2, cy: r.top + r.height / 2,
-            clipped: left !== r.left || top !== r.top || right !== r.right ||
-                     bottom !== r.bottom};
+    const inViewport = right - left > 1 && bottom - top > 1;
+    return {r: r, inViewport: inViewport,
+            clipped: inViewport && (left !== r.left || top !== r.top ||
+                                    right !== r.right || bottom !== r.bottom)};
   };
   const hitAt = (el, cx, cy, vw, vh) => {
     const x = Math.min(Math.max(cx, 1), Math.max(1, vw - 1));
@@ -106,9 +123,7 @@ PRELUDE = r"""
     const ok = !!hit && (hit === el || el.contains(hit) ||
       !!(hit.shadowRoot && hit.shadowRoot.contains(el)));
     return {ok: ok, at: [Math.round(x), Math.round(y)],
-            what: hit ? role(hit) +
-                        (label(hit) ? ':' + label(hit).slice(0, 40) : '')
-                      : null};
+            what: hit ? describe(hit) : null};
   };
 """
 
@@ -116,10 +131,12 @@ FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const vw = window.innerWidth, vh = window.innerHeight;
   const base = {url: location.href, title: document.title,
                 ready: document.readyState,
-                visibility: document.visibilityState, viewport: [vw, vh]};
+                visibility: document.visibilityState, viewport: [vw, vh],
+                active: describe(document.activeElement),
+                scroll: [Math.round(scrollX), Math.round(scrollY)]};
   if (vw <= 0 || vh <= 0) {
-    return Object.assign(base, {matches: [], total: 0, truncated: false,
-                                degenerate: true});
+    return Object.assign(base, {matches: [], total: 0, offscreen: 0,
+                                truncated: false, degenerate: true});
   }
   const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
         cap = __CAP__;
@@ -127,21 +144,32 @@ FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
     : query(INTERACTIVE).filter(
         (el) => label(el).toLowerCase().indexOf(needle) >= 0);
   const out = [];
+  let offscreen = 0;
   for (const el of all) {
-    const b = box(el, vw, vh);
-    if (!b) continue;
-    const hit = hitAt(el, b.cx, b.cy, vw, vh);
+    const g = geometry(el, vw, vh);
+    if (!g) continue;                       // not rendered: not a target
+    if (!g.inViewport) offscreen++;
+    if (out.length >= cap) continue;
+    const r = g.r;
+    const hit = g.inViewport ? hitAt(el, r.left + r.width / 2,
+                                     r.top + r.height / 2, vw, vh)
+                             : {ok: false, at: null, what: null};
     out.push({tag: el.tagName.toLowerCase(), role: role(el),
               name: attr(el, 'aria-label') || attr(el, 'name') || null,
               type: attr(el, 'type'), href: el.href || null,
-              text: label(el).slice(0, 120), clipped: b.clipped,
-              box: [Math.round(b.x), Math.round(b.y), Math.round(b.w),
-                    Math.round(b.h)],
-              center: [Math.round(b.x + b.w / 2), Math.round(b.y + b.h / 2)],
+              text: label(el).slice(0, 120),
+              in_viewport: g.inViewport, clipped: g.clipped,
+              box: [Math.round(r.left + scrollX), Math.round(r.top + scrollY),
+                    Math.round(r.width), Math.round(r.height)],
+              center: [Math.round(r.left + scrollX + r.width / 2),
+                       Math.round(r.top + scrollY + r.height / 2)],
+              viewport: [Math.round(r.left), Math.round(r.top),
+                         Math.round(r.width), Math.round(r.height)],
+              point: [Math.round(r.left + r.width / 2),
+                      Math.round(r.top + r.height / 2)],
               hit: hit.ok, hit_element: hit.what, hit_at: hit.at});
-    if (out.length >= cap) break;
   }
-  return Object.assign(base, {matches: out, total: all.length,
+  return Object.assign(base, {matches: out, total: all.length, offscreen: offscreen,
                               truncated: all.length > out.length,
                               degenerate: false});
 })())""")
@@ -161,6 +189,45 @@ TEXT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const full = textOf(el);
   return Object.assign(base, {found: true, text: full.slice(0, cap),
                               length: full.length, truncated: full.length > cap});
+})())""")
+
+# The element a reveal acts on, as a REMOTE OBJECT (no returnByValue), so it
+# can be turned into a nodeId and handed to `DOM.scrollIntoViewIfNeeded` —
+# a CDP method, not a line of JavaScript.
+REVEAL_EXPR = ("(() => {" + PRELUDE + r"""
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
+        index = __INDEX__;
+  const all = mode === 'selector' ? query(selector)
+    : query(INTERACTIVE).filter(
+        (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  const live = all.filter((el) => rendered(el) !== null);
+  return live[index] || null;
+})()""")
+
+# The document's scroll position, and the nearest scroller under a point —
+# the thing a wheel THERE would move (a nested container, not the page).
+SCROLL_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const el = document.elementFromPoint(__X__, __Y__);
+  let nested = null;
+  for (let n = el; n; n = n.parentElement) {
+    // the document scroller is reported as `document`, not as a nested one:
+    // html/body carry the page's own scrollTop
+    if (n !== document.documentElement && n !== document.body &&
+        (n.scrollTop || n.scrollLeft)) {
+      nested = [describe(n), Math.round(n.scrollTop)];
+      break;
+    }
+  }
+  const doc = document.documentElement;
+  return {x: Math.round(scrollX), y: Math.round(scrollY),
+          max: Math.round(Math.max(0, doc.scrollHeight - innerHeight)),
+          nested: nested};
+})())""")
+
+STATE_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
+  return {url: location.href, title: document.title,
+          active: describe(document.activeElement),
+          x: Math.round(scrollX), y: Math.round(scrollY)};
 })())""")
 
 WAIT_EXPRS = {
@@ -189,8 +256,7 @@ def _well_formed(rows: Any, required: tuple) -> list[dict]:
 
     Everything on this list crossed `Runtime.evaluate`, and the page — not this
     tool — answered it: a row that is not the object the verb indexes is
-    dropped, not fatal. An empty result then refuses through the verb's own
-    no-match path."""
+    dropped, not fatal."""
     return [row for row in rows
             if isinstance(row, dict) and all(key in row for key in required)]
 
@@ -211,11 +277,76 @@ def _resolve(tab: str, browser: str, for_write: bool) -> tuple[dict, dict]:
     return tabs._one_tab(tab, browser, for_write)  # noqa: SLF001
 
 
-def _eval(row: dict, tab_row: dict, expression: str,
-          timeout: float = EVAL_TIMEOUT_S) -> Any:
-    """One evaluation on that tab's own connection."""
-    return tabs._eval(str(row["profile"]), str(tab_row["id"]),  # noqa: SLF001
-                      expression, timeout=timeout)
+def _session(row: dict, tab_row: dict) -> cdp.Session:
+    """ONE connection for the whole verb (see `cdp.Session`)."""
+    return cdp.Session(cdp.target_ws(cdp.port_of(str(row["profile"])),
+                                     str(tab_row["id"])))
+
+
+def _query_args(text: str | None, selector: str | None,
+                verb: str) -> tuple[str, str]:
+    """(needle, css) for a verb that takes TEXT or `--selector CSS`."""
+    needle = str(text or "").strip()
+    css = str(selector or "").strip()
+    if bool(needle) == bool(css):
+        fail("bad-args", f"{verb}: give TEXT or --selector CSS, not both")
+    return needle, css
+
+
+def _matches_in(session: cdp.Session, needle: str, css: str, cap: int) -> dict:
+    """The page's answer to the shared matcher (see `FIND_EXPR`)."""
+    expression = (FIND_EXPR
+                  .replace("__MODE__", json.dumps("selector" if css else "text"))
+                  .replace("__NEEDLE__", json.dumps(needle.lower()))
+                  .replace("__SELECTOR__", json.dumps(css))
+                  .replace("__CAP__", str(cap)))
+    data = session.evaluate(expression)
+    if not isinstance(data, dict):
+        fail("cdp-error", "the page did not answer with an object")
+    return data
+
+
+def _pick(data: dict, needle: str, css: str, index: int | None) -> dict:
+    """The ONE element a click or a reveal acts on.
+
+    Several matches is not a choice this tool makes for the caller: it refuses
+    and names them with the index to pass.
+    """
+    rows = _well_formed(data.get("matches") or [], ("tag", "box", "point"))
+    if not rows:
+        offscreen = _int(data.get("offscreen"))
+        hint = (f" — {offscreen} candidate(s) are rendered but NOT in the "
+                "viewport: `tab scroll TEXT` brings one into view"
+                if offscreen else "")
+        fail("no-match",
+             f"no rendered element matches {needle or css!r} on "
+             f"{str(data.get('title'))!r}{hint}")
+    if index is None:
+        if len(rows) > 1:
+            where = "; ".join(f"[{i}] {_describe(row)}"
+                              for i, row in enumerate(rows[:5]))
+            fail("ambiguous-element",
+                 f"{len(rows)} elements match {needle or css!r} — pick one "
+                 f"with --index N: {where}")
+        index = 0
+    if not 0 <= index < len(rows):
+        fail("bad-args",
+             f"--index {index} is out of range: {len(rows)} element(s) match")
+    return rows[index]
+
+
+def _describe(row: dict) -> str:
+    """One match, in a few words, for a refusal message."""
+    return (f"{row.get('tag')} "
+            f"{str(row.get('name') or row.get('text') or '')[:40]}").strip()
+
+
+def _element(row: dict) -> dict:
+    """The element fields a reply carries (the geometry, not the page's)."""
+    return {key: row.get(key) for key in
+            ("tag", "role", "name", "type", "href", "text", "in_viewport",
+             "clipped", "box", "center", "viewport", "point", "hit",
+             "hit_element")}
 
 
 def _reply(row: dict, tab_row: dict, data: dict) -> dict:
@@ -231,14 +362,14 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
 
     This is the escape hatch, and it can WRITE (it is resolved like one, so it
     needs a browser this CLI manages or has attached). The reply says
-    `verified: false` rather than pretending the value means something: `tab
-    text`, `tab find` and `tab info` are the verbs that reason about a page.
+    `verified: false` rather than pretending the value means something.
     """
     expr = str(expression or "").strip()
     if not expr:
         fail("bad-args", "tab js: an EXPRESSION is required")
     row, tab_row = _resolve(tab, browser, for_write=True)
-    value = _eval(row, tab_row, expr)
+    with _session(row, tab_row) as session:
+        value = session.evaluate(expr)
     return {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
             "verified": False, "note": "evaluated, not interpreted",
             "browser": tabs._brief(row)}  # noqa: SLF001
@@ -297,42 +428,291 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
 
 def find(text: str | None = None, selector: str | None = None,
          cap: int = FIND_CAP, tab: str = "", browser: str = "") -> dict:
-    """`tab find`: resolve a human target to visible elements, in PAGE coords.
+    """`tab find`: resolve a human target to elements, with their geometry.
 
-    Only interactive or labelled elements match; each match says whether a
-    click at its centre would reach it (`hit`), whether it is partially
-    scrolled out (`clipped`), and where it is in the page's own coordinates.
-    No screen point: this tool owns no window.
+    Only interactive or labelled elements match; each match carries its box in
+    PAGE coordinates and in the viewport's, whether it is `in_viewport`, and
+    whether a click at its centre would reach it (`hit` — a real
+    `elementFromPoint`). An element below the fold is RETURNED with
+    `in_viewport: false`, not hidden behind `no-match`: the caller can see that
+    it exists and scroll to it.
     """
-    needle = str(text or "").strip()
-    css = str(selector or "").strip()
-    if bool(needle) == bool(css):
-        fail("bad-args", "tab find: give TEXT or --selector CSS, not both")
+    needle, css = _query_args(text, selector, "tab find")
     limit = max(1, _int(cap, FIND_CAP))
     row, tab_row = _resolve(tab, browser, for_write=False)
-    expression = (FIND_EXPR
-                  .replace("__MODE__", json.dumps("selector" if css else "text"))
-                  .replace("__NEEDLE__", json.dumps(needle.lower()))
-                  .replace("__SELECTOR__", json.dumps(css))
-                  .replace("__CAP__", str(limit)))
-    data = _eval(row, tab_row, expression)
-    if not isinstance(data, dict):
-        fail("cdp-error", "tab find: the page did not answer with an object")
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, needle, css, limit)
     viewport = _viewport(data, str(tab_row["id"]))
     matches = [dict(m, box=[_int(v) for v in m["box"]],
-                    center=[_int(v) for v in (m.get("center") or [])])
-               for m in _well_formed(data.get("matches") or [], ("tag", "box"))]
+                    center=[_int(v) for v in (m.get("center") or [])],
+                    viewport=[_int(v) for v in (m.get("viewport") or [])],
+                    point=[_int(v) for v in (m.get("point") or [])])
+               for m in _well_formed(data.get("matches") or [],
+                                     ("tag", "box"))]
     if not matches:
+        offscreen = _int(data.get("offscreen"))
         fail("no-match",
-             f"no visible element matches {needle or css!r} on "
+             f"no rendered element matches {needle or css!r} on "
              f"{str(data.get('title'))!r} (readyState {data.get('ready')!r}, "
-             f"{_int(data.get('total'))} candidate(s))")
+             f"{_int(data.get('total'))} candidate(s)"
+             + (f", {offscreen} offscreen" if offscreen else "") + ")")
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "query": needle or css, "viewport": viewport,
                   "total": _int(data.get("total")),
+                  "offscreen": _int(data.get("offscreen")),
                   "truncated": bool(data.get("truncated")),
                   "matches": matches})
     return reply
+
+
+def click(text: str | None = None, selector: str | None = None,
+          index: int | None = None, tab: str = "", browser: str = "") -> dict:
+    """`tab click`: press the element a spec resolves to, with REAL input.
+
+    `Input.dispatchMouseEvent` — a move, a press, a release at the element's
+    viewport centre — is the input a mouse produces, so a handler that ignores
+    `element.click()` takes it. The point must hit-test to the element first
+    (`occluded` names what is actually there), and the reply carries what
+    changed afterwards: `changed: false` is a fact about a click that had no
+    visible effect, not a failure, because the input DID land.
+    """
+    needle, css = _query_args(text, selector, "tab click")
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, needle, css, FIND_CAP)
+        element = _pick(data, needle, css, index)
+        if not element.get("in_viewport"):
+            fail("no-viewport-target",
+                 f"{_describe(element)} is at page {element.get('box')}, "
+                 "outside the viewport — scroll it into view first: "
+                 f"`tab scroll {needle or '--selector ' + css!r}`")
+        if not element.get("hit"):
+            fail("occluded",
+                 f"{_describe(element)} is at viewport {element.get('point')} "
+                 f"but that point reaches "
+                 f"{element.get('hit_element') or 'nothing'} instead — "
+                 "something is on top of it")
+        x, y = [_int(v) for v in (element.get("point") or [])][:2]
+        for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
+                              ("mouseReleased", 0)):
+            session.call("Input.dispatchMouseEvent",
+                         {"type": kind, "x": x, "y": y, "button": "left",
+                          "buttons": buttons, "clickCount": 1})
+        after = session.evaluate(STATE_EXPR)
+    after = after if isinstance(after, dict) else {}
+    before = {"url": data.get("url"), "title": data.get("title"),
+              "active": data.get("active"), "scroll": data.get("scroll")}
+    changed = (after.get("url") != before["url"]
+               or after.get("title") != before["title"]
+               or after.get("active") != before["active"]
+               or [after.get("x"), after.get("y")] != before["scroll"])
+    return {"ok": True, "clicked": True, "element": _element(element),
+            "point": [x, y], "changed": changed,
+            "before": before,
+            "after": {"url": after.get("url"), "title": after.get("title"),
+                      "active": after.get("active"),
+                      "scroll": [after.get("x"), after.get("y")]},
+            "note": ("real input (CDP), so handlers that ignore "
+                     "element.click() take it; `changed` is whether anything "
+                     "observable moved"),
+            "tab": f"id:{tab_row['id']}", "browser": tabs._brief(row)}  # noqa: SLF001
+
+
+def scroll(by: int | None = None, edge: str | None = None,
+           text: str | None = None, selector: str | None = None,
+           index: int | None = None, at: str | None = None,
+           tab: str = "", browser: str = "") -> dict:
+    """`tab scroll`: move the page with REAL wheel input, or reveal one element.
+
+    Three modes, one of them per call:
+
+    * `--by N` — one wheel event of N pixels at `--at X,Y` (the viewport centre
+      by default). A wheel moves what is UNDER the point, nested scrollers
+      included; the reply says which scroller moved.
+    * `--edge top|bottom` — wheel in steps until the document stops moving, and
+      refuse unless the edge was actually reached.
+    * `TEXT` / `--selector CSS` — `DOM.scrollIntoViewIfNeeded`, a CDP method,
+      then prove the element is in the viewport.
+
+    A wheel's scroll lands ASYNCHRONOUSLY (measured), so every mode verifies by
+    polling to a deadline rather than reading once.
+    """
+    modes = [name for name, value in
+             (("--by", by), ("--edge", edge),
+              ("element", text or selector)) if value is not None]
+    if len(modes) != 1:
+        fail("bad-args",
+             "tab scroll: name ONE of --by PIXELS, --edge top|bottom, or an "
+             "element (TEXT / --selector CSS)")
+    if at is not None and modes[0] != "--by":
+        fail("bad-args", "tab scroll: --at goes with --by")
+    # the arguments are checked BEFORE a browser is asked about anything
+    if modes[0] == "--by" and not _int(by):
+        fail("bad-args", "tab scroll: --by needs a non-zero PIXELS")
+    if edge is not None and str(edge) not in ("top", "bottom"):
+        fail("bad-args", f"tab scroll: --edge is top|bottom, got {edge!r}")
+    if at is not None:
+        _at_point(at)                      # syntax now; the RANGE needs the
+    row, tab_row = _resolve(tab, browser, for_write=True)   # real viewport
+    target_id = str(tab_row["id"])
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, "", "", 1)      # page facts, no matching
+        viewport = _viewport(data, target_id)
+        x, y = _point(at, viewport)
+        if modes[0] == "element":
+            return _reveal(session, row, tab_row, text, selector, index, data)
+        return _wheel(session, row, tab_row, by=by, edge=edge, x=x, y=y,
+                      data=data)
+
+
+def _at_point(at: str) -> tuple[int, int]:
+    """`--at X,Y` as two numbers — the SYNTAX, which needs no browser."""
+    parts = str(at).replace(" ", "").split(",")
+    if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
+        fail("bad-args", f"tab scroll: --at needs X,Y numbers, got {at!r}")
+    return _int(parts[0], -1), _int(parts[1], -1)
+
+
+def _point(at: str | None, viewport: list[int]) -> tuple[int, int]:
+    """The wheel's point: `--at X,Y` inside the viewport, else its middle."""
+    if not at:
+        return viewport[0] // 2, viewport[1] // 2
+    x, y = _at_point(at)
+    if not (0 <= x < viewport[0] and 0 <= y < viewport[1]):
+        fail("bad-args",
+             f"tab scroll: --at {at!r} is outside the viewport {viewport}")
+    return x, y
+
+
+def _probe(session: cdp.Session, x: int, y: int) -> dict:
+    """The document's scroll position and the scroller under (x, y)."""
+    data = session.evaluate(
+        SCROLL_PROBE.replace("__X__", str(x)).replace("__Y__", str(y)))
+    return data if isinstance(data, dict) else {}
+
+
+def _settle(session: cdp.Session, x: int, y: int, before: dict,
+            timeout: float = SCROLL_MOVE_S) -> dict:
+    """Poll until the document OR the scroller under the point moved."""
+    deadline = time.time() + timeout
+    now = before
+    while time.time() < deadline:
+        now = _probe(session, x, y)
+        if (now.get("y"), now.get("x"), now.get("nested")) != \
+                (before.get("y"), before.get("x"), before.get("nested")):
+            return now
+        time.sleep(0.15)
+    return now
+
+
+def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
+           edge: str | None, x: int, y: int, data: dict) -> dict:
+    """The wheel modes: one delta, or repeated steps to an edge.
+
+    `scroll` has already validated the arguments; what is left here is the
+    input and the read-back.
+    """
+    before = _probe(session, x, y)
+    steps = 0
+    if edge is None:
+        delta = _int(by)
+        session.call("Input.dispatchMouseEvent",
+                     {"type": "mouseWheel", "x": x, "y": y, "deltaX": 0,
+                      "deltaY": delta, "button": "none", "buttons": 0})
+        after = _settle(session, x, y, before)
+        steps = 1
+        moved = (_int(after.get("y")) != _int(before.get("y"))
+                 or after.get("nested") != before.get("nested"))
+        if not moved:
+            # a delta was asked for and nothing took it: already at that end
+            # of the document is the one reason that is not a failure
+            at_edge = ((_int(before.get("y")) == 0 and delta < 0)
+                       or (abs(_int(before.get("y"))
+                               - _int(before.get("max"))) <= 2 and delta > 0))
+            if not at_edge:
+                fail("scroll-not-verified",
+                     f"nothing moved: the document is still at y="
+                     f"{_int(after.get('y'))} (max {_int(after.get('max'))}) "
+                     f"and no scroller under ({x}, {y}) moved — the wheel may "
+                     "have landed on something that does not scroll (aim it "
+                     "with --at X,Y)")
+    else:
+        direction = -1 if str(edge) == "top" else 1
+        after = before
+        for step in range(SCROLL_EDGE_STEPS):
+            session.call("Input.dispatchMouseEvent",
+                         {"type": "mouseWheel", "x": x, "y": y, "deltaX": 0,
+                          "deltaY": direction * SCROLL_EDGE_STEP,
+                          "button": "none", "buttons": 0})
+            steps = step + 1
+            moved = _settle(session, x, y, after)
+            if (moved.get("y"), moved.get("nested")) == (after.get("y"),
+                                                         after.get("nested")):
+                after = moved
+                break                     # nothing moved: an edge, or a wall
+            after = moved
+        want = 0 if direction < 0 else _int(after.get("max"))
+        if abs(_int(after.get("y")) - want) > 2:
+            fail("scroll-not-verified",
+                 f"the document stopped at y={_int(after.get('y'))} of "
+                 f"max {_int(after.get('max'))} after {steps} wheel step(s) — "
+                 "the bottom/top was not reached (a sticky scroller, or a "
+                 "point that is over something that does not scroll)")
+    moved_document = _int(after.get("y")) != _int(before.get("y"))
+    moved_nested = after.get("nested") != before.get("nested")
+    return {"ok": True, "moved": moved_document or moved_nested,
+            "document": {"before": _int(before.get("y")),
+                         "after": _int(after.get("y")),
+                         "max": _int(after.get("max"))},
+            "nested": {"before": before.get("nested"),
+                       "after": after.get("nested")},
+            "point": [x, y], "steps": steps,
+            "tab": f"id:{tab_row['id']}", "browser": tabs._brief(row)}  # noqa: SLF001
+
+
+def _reveal(session: cdp.Session, row: dict, tab_row: dict,
+            text: str | None, selector: str | None, index: int | None,
+            data: dict) -> dict:
+    """`DOM.scrollIntoViewIfNeeded` for one element, then prove it is visible."""
+    needle, css = _query_args(text, selector, "tab scroll")
+    handle = session.handle(REVEAL_EXPR
+                            .replace("__MODE__",
+                                     json.dumps("selector" if css else "text"))
+                            .replace("__NEEDLE__", json.dumps(needle.lower()))
+                            .replace("__SELECTOR__", json.dumps(css))
+                            .replace("__INDEX__", str(_int(index))))
+    if not handle:
+        fail("no-match",
+             f"no rendered element matches {needle or css!r}"
+             + (f" (--index {index} is past the end)" if index else ""))
+    session.call("DOM.getDocument", {"depth": 0})
+    node = session.call("DOM.requestNode", {"objectId": handle})
+    node_id = _int(node.get("nodeId"))
+    if not node_id:
+        fail("cdp-error",
+             "DOM.requestNode found no node for the element the matcher "
+             "resolved — it may have left the document")
+    session.call("DOM.scrollIntoViewIfNeeded", {"nodeId": node_id})
+    # prove it: the SAME matcher now finds it inside the viewport
+    deadline = time.time() + SCROLL_MOVE_S
+    found: dict = {}
+    while time.time() < deadline:
+        found = _matches_in(session, needle, css, FIND_CAP)
+        rows = _well_formed(found.get("matches") or [], ("tag", "box"))
+        now = [row for row in rows if row.get("in_viewport")]
+        if now:
+            break
+        time.sleep(0.15)
+    rows = _well_formed(found.get("matches") or [], ("tag", "box"))
+    inside = [row for row in rows if row.get("in_viewport")]
+    if not inside:
+        fail("scroll-not-verified",
+             f"{needle or css!r} is still outside the viewport after "
+             "DOM.scrollIntoViewIfNeeded — the element may be inside a "
+             "container that cannot scroll it into view")
+    return {"ok": True, "revealed": True, "element": _element(inside[0]),
+            "scroll": found.get("scroll"), "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}  # noqa: SLF001
 
 
 def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
@@ -346,9 +726,10 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
     css = str(selector or "").strip()
     limit = max(1, min(TEXT_CAP, _int(chars, TEXT_CAP)))
     row, tab_row = _resolve(tab, browser, for_write=False)
-    expression = (TEXT_EXPR.replace("__SELECTOR__", json.dumps(css))
-                            .replace("__CAP__", str(limit)))
-    data = _eval(row, tab_row, expression)
+    with _session(row, tab_row) as session:
+        data = session.evaluate(TEXT_EXPR.replace("__SELECTOR__",
+                                                  json.dumps(css))
+                                .replace("__CAP__", str(limit)))
     if not isinstance(data, dict):
         fail("cdp-error", "tab text: the page did not answer with an object")
     if not data.get("found"):

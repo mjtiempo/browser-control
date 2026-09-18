@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 20 hermetic + 29 live checks passing.
+Repo `main`, worktree clean, 21 hermetic + 32 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,13 +15,13 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 504 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv |
-| `browser_control/lib/dom.py` | 362 | **the DOM tier**: the shared element prelude, `js`, `wait`, `find`, `text` |
+| `browser_control/cli/main.py` | 553 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv |
+| `browser_control/lib/dom.py` | 743 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `scroll` |
 | `browser_control/lib/browser.py` | 1281 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
-| `browser_control/lib/cdp.py` | 391 | endpoint, capped JSON GET, explicit-port reads, method call, `evaluate`/`evaluate_until`, `target_ws` |
+| `browser_control/lib/cdp.py` | 513 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 727 | 20 hermetic checks, no browser needed |
-| `tests/live_test.py` | 895 | 29 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 787 | 21 hermetic checks, no browser needed |
+| `tests/live_test.py` | 969 | 32 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -46,8 +46,10 @@ the other verbs own the browser.
 | `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
 | `tab js EXPR` | evaluates an expression — the escape hatch, and it can write | **unverified** (`verified: false`), the value capped at 64 k (`result-too-large`), a page exception is `js-error`, a page that stops answering `eval-timeout` |
 | `tab wait --for load\|idle\|element\|js` | polls ONE predicate to a wall-clock deadline | `{ok, for, waited_s, samples}` or `wait-timeout` naming what and how long; one connection for the whole poll |
-| `tab find TEXT \| --selector CSS` | a human target → visible elements, in **page** coordinates | `no-match` (naming the candidate count) · `no-viewport` when the tab has no viewport · each match carries `hit` (a real hit-test), `hit_element`, `clipped`, `visibility` |
+| `tab find TEXT \| --selector CSS` | a human target → visible elements, in **page** coordinates | `no-match` (naming the candidate count) · `no-viewport` when the tab has no viewport · each match carries `point` and `viewport` (viewport coordinates), `in_viewport`, `hit` (a real hit-test), `hit_element`, `clipped` |
 | `tab text [--selector CSS]` | the rendered text | truncated **in the page**, so the reply is bounded and `length` still reports the full size |
+| `tab click TEXT \| --selector CSS [--index N]` | **real input** (`Input.dispatchMouseEvent` move+press+release) at the element's viewport centre | `occluded` when the point reaches something else · `no-viewport-target` when it is off-screen (with the remedy) · `ambiguous-element` for several matches · the reply carries `changed` (url/title/focus/scroll before and after) |
+| `tab scroll --by N \| --edge top\|bottom \| TEXT` | **real wheel input** (`mouseWheel`) or `DOM.scrollIntoViewIfNeeded` for one element | `scroll-not-verified` when a requested edge was not reached, or a wheel moved nothing and the document was not already at that end; the reply names which scroller moved (`document` / `nested`) |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
@@ -96,7 +98,7 @@ refusing `cdp-unreachable`.
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
-**Live battery** — `python3 tests/live_test.py` → **29 passed, 0 failed, 0
+**Live battery** — `python3 tests/live_test.py` → **32 passed, 0 failed, 0
 skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
 independent state back — a raw socket connect, a direct `/json` GET, `/proc`
 for the pid — for open, `list`, `tab list`/`tab info`, `tab` (single and
@@ -241,6 +243,38 @@ What the evaluation settled, now in the code:
   did not answer" (`eval-timeout`) and "the transport died" (`cdp-error`)
   apart.
 
+### 5.12 `tab click` + `tab scroll` — done (CDP-native first)
+The action half of the DOM tier, taken with the principle "whatever CDP can do
+natively, do that":
+
+* **`tab click TEXT|--selector CSS [--index N]`** — `Input.dispatchMouseEvent`
+  (move, press, release) at the element's VIEWPORT centre. Measured side by
+  side: a CDP press is `isTrusted: true`, `element.click()` is
+  `isTrusted: false` — the whole reason this is a verb and not a `js` one-liner.
+  The point must hit-test to the element first (`occluded` names what is
+  actually there), an off-screen target refuses `no-viewport-target` with the
+  remedy, and the reply carries `before`/`after` (url, title, focus, scroll)
+  with `changed: false` as an honest FACT rather than a failure.
+* **`tab scroll --by N [--at X,Y]`** — a real `mouseWheel`, which moves what is
+  under the point: the reply distinguishes the DOCUMENT's position from the
+  nearest nested scroller's (`nested`), because those are different facts and a
+  wheel at the wrong point moves the wrong one.
+* **`tab scroll --edge top|bottom`** — repeated wheels until the document stops
+  moving, verified against the real maximum; a wheel that moves nothing at the
+  edge is `moved: false`, not a refusal.
+* **`tab scroll TEXT|--selector CSS [--index N]`** —
+  `DOM.scrollIntoViewIfNeeded` (a CDP method, via `Runtime.evaluate` →
+  `DOM.requestNode` → the method), then the matcher proves the element now has
+  an in-viewport box.
+
+Two measurements shaped the implementation: a wheel's effect is
+ASYNCHRONOUS (scrollY 0 → 600 between 0.0 s and 0.2 s), so every mode polls to
+a deadline instead of reading once; and `find` now returns elements BELOW the
+fold with `in_viewport: false` (plus an `offscreen` count) instead of hiding
+them behind `no-match`, so "not there" and "not in view" are different answers.
+`cdp.Session` keeps ONE connection per verb — a click is three dispatches and
+two reads, a scroll-to-edge is a wheel and a read per step.
+
 ### 5.6 Input and forms
 `focus-el`, `press`, `insert-text`, `type-keystrokes`, `upload`. Focus proven
 through `document.activeElement`; password detection (fail-closed) and the
@@ -300,6 +334,12 @@ page tab exists afterwards.
 9. **Policy gate** for code-executing verbs (`tab js`, `tab wait --for js`,
    `tab text` on a logged-in page) — still open, and it belongs to the agent
    frontend rather than to this CLI.
+10. ~~**Native first**~~ — answered as a standing principle: **whatever CDP can
+    do natively, do that** rather than reaching for page JavaScript. Hence
+    `Input.dispatchMouseEvent` for clicks and wheels (trusted input, measured
+    against `element.click()`'s `isTrusted: false`), and
+    `DOM.scrollIntoViewIfNeeded` for revealing an element. `js` stays the last
+    resort, and every new verb is checked against this rule first.
 
 Nothing here blocks 5.6.
 

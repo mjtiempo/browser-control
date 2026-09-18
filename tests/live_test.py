@@ -62,8 +62,18 @@ SERVER: http.server.ThreadingHTTPServer | None = None
 # own button, an iframe, a long paragraph, and a button that appears after
 # `late` milliseconds (so `wait` has something to actually poll for).
 DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
+<style>
+ #covered { position: absolute; left: 20px; top: 120px; }
+ #cover { position: absolute; left: 0; top: 112px; width: 400px; height: 60px;
+          background: rgba(255,0,0,.12); }
+ #nested { width: 300px; height: 100px; overflow: auto; border: 1px solid #999; }
+ #inner { height: 900px; }
+ #tall { height: 2500px; }
+</style>
 <h1>Dom Fixture Heading</h1>
 <button aria-label="Save the thing">save</button>
+<button id="covered" aria-label="Covered Button">covered</button>
+<div id="cover"></div>
 <a href="/one.html">a link</a>
 <input type="text" placeholder="search here">
 <div role="button" tabindex="0">role button</div>
@@ -71,10 +81,19 @@ DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
 <div id="host"></div>
 <iframe src="/dom-frame" width="200" height="100"></iframe>
 <p id="long-text">__FILLER__</p>
+<div id="nested"><div id="inner">nested content</div></div>
+<div id="tall"></div>
+<button id="below" aria-label="Below Button">below</button>
+<input id="field" type="text">
 <script>
   const root = document.getElementById('host').attachShadow({mode: 'open'});
   root.innerHTML =
     '<button id="in-shadow" aria-label="Shadow Action">shadow</button>';
+  document.querySelector('button[aria-label="Save the thing"]')
+    .addEventListener('click', () => {
+      document.title = 'clicked';
+      document.getElementById('field').focus();
+    });
   const delay = Number(__LATE__);
   setTimeout(() => { const el = document.createElement('button');
     el.id = 'late'; el.setAttribute('aria-label', 'Late Button');
@@ -488,6 +507,57 @@ def c_dom_wait_polls() -> str:
             f'{late["samples"]} samples')
 
 
+def c_dom_click_is_real_input() -> str:
+    """`tab click` presses with CDP input, and refuses what it cannot reach."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    ok_json("tab", "scroll", "--edge", "top")
+    # the refusals come FIRST: the successful click below focuses a field at
+    # the bottom of the page, and the browser scrolls it into view — which is
+    # why the reply carries the scroll position, and why this order matters
+    err = refuses("occluded", "tab", "click", "Covered Button")
+    assert "cover" in err, err
+    err = refuses("no-viewport-target", "tab", "click", "Below Button")
+    assert "scroll" in err, err
+    reply = ok_json("tab", "click", "Save the thing")
+    assert reply["clicked"] is True, reply
+    assert reply["element"]["hit"] is True, reply
+    assert reply["changed"] is True, reply
+    assert reply["after"]["title"] == "clicked", reply
+    return "occluded and off-screen refused; a trusted press landed"
+
+
+def c_dom_scroll_moves_the_document_and_nested() -> str:
+    """Wheels are real input: they reach nested scrollers and the document."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    bottom = ok_json("tab", "scroll", "--edge", "bottom")
+    assert bottom["moved"] is True, bottom
+    assert abs(bottom["document"]["after"]
+               - bottom["document"]["max"]) <= 2, bottom
+    top = ok_json("tab", "scroll", "--edge", "top")
+    assert top["document"]["after"] == 0, top
+    by = ok_json("tab", "scroll", "--by", "600")
+    assert by["document"]["after"] >= 500, by
+    ok_json("tab", "scroll", "--edge", "top")
+    point = ok_json("tab", "find", "--selector", "#nested")["matches"][0]["point"]
+    nested = ok_json("tab", "scroll", "--by", "240", "--at",
+                     f"{point[0]},{point[1]}")
+    assert nested["nested"]["after"][1] == 240, nested
+    assert nested["document"]["after"] == 0, nested     # the page did not move
+    return "a wheel scrolled the document, and one scrolled a nested div"
+
+
+def c_dom_reveal_then_click() -> str:
+    """`tab scroll TEXT` reveals via a CDP method, then the element is clickable."""
+    ok_json("tab", "scroll", "--edge", "top")
+    revealed = ok_json("tab", "scroll", "Below Button")
+    assert revealed["revealed"] is True, revealed
+    assert revealed["element"]["in_viewport"] is True, revealed
+    clicked = ok_json("tab", "click", "Below Button")
+    assert clicked["clicked"] is True, clicked
+    assert clicked["element"]["hit"] is True, clicked
+    return "an off-screen button was revealed by CDP and then clicked"
+
+
 def c_ambiguous_spec_refuses() -> str:
     first = str(ok_json("tab", f"{base_url()}/four-a")["id"])
     second = str(ok_json("tab", f"{base_url()}/four-b")["id"])
@@ -786,6 +856,10 @@ CHECKS = (
     ("tab find resolves targets", c_dom_find_resolves_targets),
     ("tab js is declared unverified", c_dom_js_is_declared_unverified),
     ("tab wait polls", c_dom_wait_polls),
+    ("tab click is real input", c_dom_click_is_real_input),
+    ("tab scroll wheels the page and nested scrollers",
+     c_dom_scroll_moves_the_document_and_nested),
+    ("tab scroll reveals, then click lands", c_dom_reveal_then_click),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),

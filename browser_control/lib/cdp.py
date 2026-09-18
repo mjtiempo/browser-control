@@ -13,6 +13,7 @@ and `tabs` still work without it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -389,3 +390,124 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
              "(pip install websockets)")
     return asyncio.run(_evaluate_until(_checked_ws(ws_url, "tab"), expression,
                                        accept, timeout, interval))
+
+
+class Session:
+    """ONE websocket for a SEQUENCE of calls: a click is a move, a press, a
+    release and a read-back; scrolling to an edge is a wheel and a read per
+    step; revealing an element is `DOM.getDocument`, `requestNode`,
+    `scrollIntoViewIfNeeded` and a check.
+
+    A connection per call turns those into a dozen sockets, and the calls
+    cannot be fired blind because each step depends on the last read. Nothing
+    here retries: a session carries mutations, and the caller's read-back is
+    the recovery.
+    """
+
+    def __init__(self, ws_url: str, timeout: float = 15.0) -> None:
+        if websockets is None:
+            fail("no-websockets",
+                 "the `websockets` package is required to speak CDP "
+                 "(pip install websockets)")
+        self._ws_url = _checked_ws(ws_url, "tab")
+        self._timeout = timeout
+        self._loop: Any = None
+        self._ws: Any = None
+        self._rid = 0
+
+    def _connect(self) -> Any:
+        if self._ws is None:
+            self._loop = asyncio.new_event_loop()
+            try:
+                self._ws = self._loop.run_until_complete(
+                    websockets.connect(self._ws_url, max_size=2 ** 24,
+                                       open_timeout=10))
+            except Exception as e:                             # noqa: BLE001
+                self.close()
+                raise ControlError("cdp-error",
+                                   f"cannot open the tab's connection: "
+                                   f"{e}") from e
+        return self._ws
+
+    async def _call(self, method: str, params: dict, budget: float) -> dict:
+        ws = self._ws
+        self._rid += 1
+        rid = self._rid
+        await ws.send(json.dumps({"id": rid, "method": method,
+                                  "params": params}))
+        deadline = time.time() + budget
+        while True:
+            try:
+                msg = json.loads(await asyncio.wait_for(
+                    ws.recv(), timeout=max(0.1, deadline - time.time())))
+            except TimeoutError as e:
+                raise ControlError("eval-timeout" if method.startswith(
+                    "Runtime.evaluate") else "cdp-error",
+                    f"{method}: {e}") from e
+            except (ValueError, TypeError) as e:
+                raise ControlError("cdp-error",
+                                   f"{method}: a frame that is not JSON "
+                                   f"({e})") from e
+            if msg.get("id") == rid:
+                err = msg.get("error")
+                if err:
+                    raise ControlError(
+                        "cdp-error", f"{method}: {err.get('message')} "
+                        f"(code {err.get('code')})")
+                return msg.get("result") or {}
+            if time.time() >= deadline:
+                raise ControlError("cdp-error",
+                                   f"{method}: no reply for id {rid} within "
+                                   f"{budget:g}s")
+
+    def call(self, method: str, params: dict | None = None,
+             timeout: float = 0.0) -> dict:
+        """One method call on the open connection: the protocol's `result`."""
+        self._connect()
+        try:
+            return self._loop.run_until_complete(
+                self._call(method, params or {}, timeout or self._timeout))
+        except ControlError:
+            raise
+        except Exception as e:                                 # noqa: BLE001
+            raise ControlError("cdp-error", f"{method}: {e}") from e
+
+    def evaluate(self, expression: str, timeout: float = 0.0) -> Any:
+        """One Runtime.evaluate on the open connection, value semantics."""
+        return _value_of(self.call(
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True}, timeout))
+
+    def handle(self, expression: str, timeout: float = 0.0) -> str:
+        """The objectId of a NON-serialized expression, for `DOM.requestNode`.
+
+        A remote object lives as long as the session: this is how an element
+        found by the matcher becomes a `nodeId` that a DOM method can act on
+        without a line of scrolling JavaScript.
+        """
+        result = self.call("Runtime.evaluate",
+                           {"expression": expression, "returnByValue": False},
+                           timeout)
+        details = result.get("exceptionDetails")
+        if details:
+            exception = details.get("exception") or {}
+            text = str(exception.get("description") or details.get("text")
+                       or "page JS exception")
+            fail("js-error", f"Runtime.evaluate: {text.splitlines()[0]}")
+        return str((result.get("result") or {}).get("objectId") or "")
+
+    def close(self) -> None:
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                self._loop.run_until_complete(self._ws.close())
+            self._ws = None
+        if self._loop is not None:
+            self._loop.close()
+            self._loop = None
+
+    def __enter__(self) -> Session:
+        return self
+
+    def __exit__(self, exc_type: Any = None, exc: Any = None,
+                 traceback: Any = None) -> None:
+        self.close()

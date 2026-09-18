@@ -136,7 +136,9 @@ redaction, fail-open), `config.py` (env + config file), `__init__.py` exposing
 ## 3. `cli/` verbs (v1)
 
 The surface is a noun and its verb: `tab` owns everything about a page tab,
-the other verbs own the browser.
+the other verbs own the browser. **CDP-native first**: an action uses the
+protocol's own mechanism (`Input.*` for input, `DOM.*` for a node, `Target.*`
+for tabs) rather than page JavaScript, and `tab js` is the last resort.
 
 Browser-level:
 
@@ -153,7 +155,9 @@ Page-level, under `tab`:
 `tab [URL…]` · `tab list` · `tab info SPEC` · `tab close SPEC…` ·
 `tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
 `tab reload` · `tab js EXPR` · `tab wait --for …` ·
-`tab find TEXT|--selector CSS` · `tab text` · `tab focus-el` · `tab press KEY` ·
+`tab find TEXT|--selector CSS` · `tab text` · `tab click TEXT|--selector CSS` ·
+`tab scroll --by N|--edge top\|bottom|TEXT` ·
+`tab focus-el` · `tab press KEY` ·
 `tab insert-text TEXT` · `tab type-keystrokes TEXT` · `tab upload FILE` ·
 `tab media state|play|pause` · `tab ad-state` · `tab skip-ad`.
 
@@ -179,8 +183,8 @@ or a bare word that is not a URL → `bad-args` (never dropped).
 Delivered so far: `open`, `close`, `list`, `info`, `attach`, `attach --list`,
 `detach`, `tab [URL…]`, `tab list`, `tab info`, `tab close`, `tab nav`,
 `tab back`, `tab forward`, `tab reload`, `tab js`, `tab wait`, `tab find`,
-`tab text`, `selftest` — the rest of the list is the target surface;
-[`progress.md`](progress.md) is the state of the work.
+`tab text`, `tab click`, `tab scroll`, `selftest` — the rest of the list is
+the target surface; [`progress.md`](progress.md) is the state of the work.
 
 ## 4. Verification appetite
 

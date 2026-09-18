@@ -67,6 +67,14 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab wait --for load|idle|element|js [--selector CSS] [--expr EXPR]
            [--timeout S] [--idle-ms MS] [--tab SPEC]
                                  poll a predicate to a wall-clock deadline
+  tab click TEXT|--selector CSS [--index N] [--tab SPEC]
+                                 real input (CDP) at the element's centre
+  tab scroll --by N [--at X,Y] [--tab SPEC]
+                                 one wheel event; nested scrollers included
+  tab scroll --edge top|bottom [--tab SPEC]
+                                 wheel until the edge is reached, verified
+  tab scroll TEXT|--selector CSS [--index N] [--tab SPEC]
+                                 bring one element into view (a CDP method)
   selftest           prove the install: interpreter, websockets, verbs
 
 SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
@@ -430,6 +438,45 @@ def cmd_tab_wait(rest: list[str], browser: str) -> dict:
                     tab=spec, browser=browser)
 
 
+def cmd_tab_click(rest: list[str], browser: str) -> dict:
+    """`tab click TEXT | --selector CSS [--index N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab click")
+    rest, selector = _pop(rest, "--selector", "tab click")
+    rest, index = _pop(rest, "--index", "tab click")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab click: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab click: one TEXT at most, got {len(rest)}")
+    needle = rest[0] if rest else None
+    if (needle is None) == (selector is None):
+        fail("bad-args", "tab click: give TEXT or --selector CSS, not both")
+    return dom.click(needle, selector=selector,
+                     index=_int(index, "tab click --index")
+                     if index is not None else None,
+                     tab=spec, browser=browser)
+
+
+def cmd_tab_scroll(rest: list[str], browser: str) -> dict:
+    """`tab scroll --by N | --edge top|bottom | TEXT|--selector CSS`."""
+    rest, spec = _tab_flag(rest, "tab scroll")
+    rest, by = _pop(rest, "--by", "tab scroll")
+    rest, edge = _pop(rest, "--edge", "tab scroll")
+    rest, selector = _pop(rest, "--selector", "tab scroll")
+    rest, index = _pop(rest, "--index", "tab scroll")
+    rest, at = _pop(rest, "--at", "tab scroll")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab scroll: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab scroll: one TEXT at most, got {len(rest)}")
+    return dom.scroll(
+        by=_int(by, "tab scroll --by") if by is not None else None,
+        edge=edge, text=rest[0] if rest else None, selector=selector,
+        index=_int(index, "tab scroll --index") if index is not None else None,
+        at=at, tab=spec, browser=browser)
+
+
 # `tab`'s subcommands: a reserved first word, so a URL can never be mistaken
 # for one (and vice versa).
 TAB_SUBCOMMANDS: dict[str, Handler] = {
@@ -444,6 +491,8 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
     "find": cmd_tab_find,
     "text": cmd_tab_text,
     "wait": cmd_tab_wait,
+    "click": cmd_tab_click,
+    "scroll": cmd_tab_scroll,
 }
 
 HANDLERS: dict[str, Handler] = {

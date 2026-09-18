@@ -616,6 +616,65 @@ def t_dom_shape_filters() -> None:
         assert placeholder in dom.FIND_EXPR                  # noqa: SLF001
 
 
+def t_cli_click_scroll_grammar() -> None:
+    """`tab click|scroll` argv — flags stripped, none dropped."""
+    calls: list[tuple] = []
+
+    def fake_click(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, tab: str = "",
+                   browser: str = "") -> dict:
+        calls.append(("click", text, selector, index, tab, browser))
+        return {"ok": True}
+
+    def fake_scroll(by: int | None = None, edge: str | None = None,
+                    text: str | None = None, selector: str | None = None,
+                    index: int | None = None, at: str | None = None,
+                    tab: str = "", browser: str = "") -> dict:
+        calls.append(("scroll", by, edge, text, selector, index, at, tab,
+                      browser))
+        return {"ok": True}
+
+    originals = (dom.click, dom.scroll)
+    dom.click, dom.scroll = fake_click, fake_scroll   # type: ignore[assignment]
+    try:
+        for argv in (["tab", "click", "Save"],
+                     ["tab", "click", "Save", "--index", "2",
+                      "--tab", "id:AB"],
+                     ["tab", "click", "--selector", ".x"],
+                     ["tab", "scroll", "--by", "600"],
+                     ["tab", "scroll", "--by", "600", "--at", "10,20"],
+                     ["tab", "scroll", "--edge", "bottom"],
+                     ["tab", "scroll", "Below"],
+                     ["tab", "scroll", "--selector", "#x", "--index", "1"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("click", "Save", None, None, "", ""),
+            ("click", "Save", None, 2, "id:AB", ""),
+            ("click", None, ".x", None, "", ""),
+            ("scroll", 600, None, None, None, None, None, "", ""),
+            ("scroll", 600, None, None, None, None, "10,20", "", ""),
+            ("scroll", None, "bottom", None, None, None, None, "", ""),
+            ("scroll", None, None, "Below", None, None, None, "", ""),
+            ("scroll", None, None, None, "#x", 1, None, "", ""),
+        ], calls
+    finally:
+        dom.click, dom.scroll = originals             # type: ignore[assignment]
+    # and these refuse BEFORE a browser is touched (none runs hermetically)
+    for argv in (["tab", "click"], ["tab", "click", "a", "--selector", "b"],
+                 ["tab", "click", "a", "b"], ["tab", "click", "a", "-x"],
+                 ["tab", "click", "--index", "x", "Save"],
+                 ["tab", "scroll"], ["tab", "scroll", "--by", "0"],
+                 ["tab", "scroll", "--by", "x"],
+                 ["tab", "scroll", "--edge", "sideways"],
+                 ["tab", "scroll", "--edge", "top", "--at", "1,2"],
+                 ["tab", "scroll", "--at", "1,2"],
+                 ["tab", "scroll", "--by", "600", "--at", "bad"],
+                 ["tab", "scroll", "--by", "600", "--at", "x,y"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
 def t_cmdline_value() -> None:
     """Chrome writes `--flag=value` and `--flag value`; both are read."""
     value = browser._cmdline_value                            # noqa: SLF001
@@ -707,6 +766,7 @@ def main() -> int:
         ("tab grammar lands in one service", t_cli_tab_grammar),
         ("nav/history/reload grammar", t_cli_nav_grammar),
         ("dom verbs' argv", t_cli_dom_grammar),
+        ("click/scroll argv", t_cli_click_scroll_grammar),
         ("dom shape filters", t_dom_shape_filters),
         ("the net-change test", t_same_page),
         ("one page verb, one tab", t_one_tab_addressing),
