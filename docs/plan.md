@@ -135,9 +135,10 @@ redaction, fail-open), `config.py` (env + config file), `__init__.py` exposing
 
 ## 3. `cli/` verbs (v1)
 
-`status` · `ensure [URL] [--relaunch] [--no-seed]` · `open [URL]` · `stop` ·
+`status` · `ensure [URL] [--relaunch] [--no-seed]` · `open URL…` · `stop` ·
 `restart` · `profile-status` · `profile-sync [--source DIR] [--browser NAME]
-[--force]` · `tabs` · `new-tab [URL]` · `close-tab [--tab S]…` ·
+[--force]` · `tabs` · `list` · `list-tabs` · `new-tab URL…` ·
+`close-tab SPEC` ·
 `activate-tab [--tab S]` · `nav URL [--tab S]` · `back` · `forward` ·
 `reload` · `js EXPR [--tab S]` · `wait --for …` · `find TEXT|--selector CSS` ·
 `text` · `focus-el` · `press KEY` · `insert-text TEXT` ·
@@ -145,9 +146,18 @@ redaction, fail-open), `config.py` (env + config file), `__init__.py` exposing
 `ad-state` · `skip-ad` · `search QUERY [--engine E] [--limit N]` ·
 `cdp METHOD [PARAMS_JSON] [--target ID|--browser]` · `selftest` · `help`.
 
+`open` and `new-tab` take any number of URLs (a fresh `open` loads the first
+as its startup page and the rest as tabs); `list` reports every browser
+running on the machine, drivable or not, and `list-tabs` reports the tabs of
+every drivable one, grouped by browser.
+
 Shape: one `cmd_*` per verb in a `HANDLERS` table; `main` parses `--tab`,
 dispatches, logs, prints `ERR[code]: message` on stderr, exit 2. Unknown flag
 or extra positional → `bad-args` (never dropped).
+
+Delivered so far: `open`, `close`, `tabs`, `list`, `list-tabs`, `new-tab`,
+`close-tab`, `selftest` — the rest of the list is the target surface;
+[`progress.md`](progress.md) is the state of the work.
 
 ## 4. Verification appetite
 

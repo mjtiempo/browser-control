@@ -72,13 +72,8 @@ def _get_bytes(url: str) -> bytes:
     return body
 
 
-def get_json(profile: str, path: str) -> Any:
-    """GET one CDP JSON endpoint on the profile's own loopback port."""
-    port = port_of(profile)
-    if not port:
-        fail("cdp-unreachable",
-             f"no DevTools port in {profile}: the browser is not running "
-             "(or was started without --remote-debugging-port=0)")
+def _get_port(port: int, path: str) -> Any:
+    """GET one CDP JSON endpoint on an explicit loopback port."""
     body = _get_bytes(f"http://127.0.0.1:{port}{path}")
     try:
         return json.loads(body.decode("utf-8", "replace"))
@@ -86,22 +81,52 @@ def get_json(profile: str, path: str) -> Any:
         fail("cdp-error", f"{path}: the endpoint answered no JSON: {e}")
 
 
-def reachable(profile: str) -> bool:
-    """Is a browser answering CDP on this profile right now?"""
+def get_json(profile: str, path: str) -> Any:
+    """GET one CDP JSON endpoint on the profile's own loopback port."""
+    port = port_of(profile)
+    if not port:
+        fail("cdp-unreachable",
+             f"no DevTools port in {profile}: the browser is not running "
+             "(or was started without --remote-debugging-port=0)")
+    return _get_port(port, path)
+
+
+def answers(port: int) -> bool:
+    """Is a CDP endpoint answering on this loopback port right now?
+
+    For a caller that has a PORT rather than a managed profile: a browser
+    started by hand with `--remote-debugging-port=N`, or one whose profile is
+    not ours to read a port file from.
+    """
+    if not port:
+        return False
     try:
-        get_json(profile, "/json/version")
-        return True
+        return isinstance(_get_port(port, "/json/version"), dict)
     except ControlError:
         return False
 
 
+def reachable(profile: str) -> bool:
+    """Is a browser answering CDP on this profile right now?"""
+    return answers(port_of(profile))
+
+
 def page_rows(profile: str) -> list[dict]:
-    """The `/json` rows that are PAGE targets.
+    """The page targets of the browser on this profile."""
+    return _pages(get_json(profile, "/json"))
+
+
+def page_rows_at(port: int) -> list[dict]:
+    """The page targets of the browser answering on this loopback port."""
+    return _pages(_get_port(port, "/json"))
+
+
+def _pages(rows: Any) -> list[dict]:
+    """A `/json` reply -> its PAGE targets, id-sorted.
 
     Sorted by target id locally: CDP does not document `/json` order, so "the
     tabs" would otherwise follow an external array's order.
     """
-    rows = get_json(profile, "/json")
     if not isinstance(rows, list):
         fail("cdp-error", "/json answered a shape this tool cannot read")
     pages = [r for r in rows

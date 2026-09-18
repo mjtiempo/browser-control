@@ -47,6 +47,22 @@ BROWSER_EXES = ("chrome", "chromium", "chromium-browser", "google-chrome",
                 "google-chrome-stable", "brave", "brave-browser", "msedge",
                 "microsoft-edge", "vivaldi", "vivaldi-bin",
                 "chrome-headless-shell", "headless_shell")
+# What a browser uses when it was launched WITHOUT `--user-data-dir`. Only
+# used to say which profile a running browser is on, so a missing entry or a
+# stale path costs an empty string, never a wrong claim.
+DEFAULT_PROFILES = {
+    "chrome": "~/.config/google-chrome",
+    "google-chrome": "~/.config/google-chrome",
+    "google-chrome-stable": "~/.config/google-chrome",
+    "chromium": "~/.config/chromium",
+    "chromium-browser": "~/.config/chromium",
+    "brave": "~/.config/BraveSoftware/Brave-Browser",
+    "brave-browser": "~/.config/BraveSoftware/Brave-Browser",
+    "msedge": "~/.config/microsoft-edge",
+    "microsoft-edge": "~/.config/microsoft-edge",
+    "vivaldi": "~/.config/vivaldi",
+    "vivaldi-bin": "~/.config/vivaldi",
+}
 DEFAULT_ROOT = "~/.local/share/browser-control/cdp-profiles"
 ROOT_ENV = "BROWSER_CONTROL_ROOT"
 PID_FILE = ".pid"
@@ -214,6 +230,46 @@ def _proc_text(pid: int, name: str) -> str:
     return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
 
 
+def _cmdline_value(cmd: str, flag: str) -> str:
+    """The value of `--flag=value` (or `--flag value`) in a /proc cmdline.
+
+    Both spellings: Chrome accepts both and a launcher may write either. ""
+    when the flag is absent.
+    """
+    parts = str(cmd).split()
+    for index, part in enumerate(parts):
+        if part.startswith(flag + "="):
+            return part[len(flag) + 1:]
+        if part == flag and index + 1 < len(parts):
+            return parts[index + 1]
+    return ""
+
+
+def _main_processes() -> list[tuple[int, str, str]]:
+    """(pid, exe, cmdline) for every Chromium-family MAIN process here.
+
+    A renderer, GPU or zygote process carries `--type=`; the main process does
+    not, and it is the one that owns a profile and answers CDP.
+    """
+    found: list[tuple[int, str, str]] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return found
+    for entry in entries:
+        try:
+            pid = int(entry)
+        except ValueError:
+            continue
+        cmd = _proc_text(pid, "cmdline")
+        if not cmd or "--type=" in cmd:
+            continue
+        exe = os.path.basename(os.path.realpath(f"/proc/{pid}/exe"))
+        if exe in BROWSER_EXES:
+            found.append((pid, exe, cmd))
+    return sorted(found)
+
+
 def _find_pid(profile: str) -> int:
     """The pid running ON this profile, from its own cmdline.
 
@@ -222,20 +278,8 @@ def _find_pid(profile: str) -> int:
     never hand back a renderer — or a process we did not start.
     """
     marker = f"--user-data-dir={profile}"
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return 0
-    for entry in entries:
-        try:
-            pid = int(entry)
-        except ValueError:
-            continue
-        cmdline = _proc_text(pid, "cmdline")
-        if marker not in cmdline or "--type=" in cmdline:
-            continue
-        exe = os.path.basename(os.path.realpath(f"/proc/{pid}/exe"))
-        if exe in BROWSER_EXES:
+    for pid, _exe, cmd in _main_processes():
+        if marker in cmd:
             return pid
     return 0
 
@@ -275,6 +319,95 @@ def _spawn(argv: list[str]) -> int:
     return proc.pid
 
 
+# ------------------------------------------------------------ what is running
+def _to_int(text: str) -> int:
+    try:
+        return int(str(text).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _default_profile(exe: str) -> str:
+    """The default data directory of a browser executable, when it exists."""
+    raw = DEFAULT_PROFILES.get(exe, "")
+    if not raw:
+        return ""
+    path = os.path.abspath(os.path.expanduser(raw))
+    return path if os.path.isdir(path) else ""
+
+
+def _is_managed(profile: str) -> bool:
+    """Is this profile one of ours? Prefix-safe, so a sibling root is not."""
+    return bool(profile) and os.path.abspath(profile).startswith(
+        os.path.abspath(root()) + os.sep)
+
+
+def browsers() -> list[dict]:
+    """Every Chromium-family browser RUNNING here, ours or the user's.
+
+    One /proc pass over the main processes: each with the profile it runs on
+    (`--user-data-dir`, else the default data directory for that executable)
+    and whether a DevTools endpoint answers for it — which is what makes it
+    drivable. `managed` says the profile is one this CLI owns, so the answer
+    is about the whole machine rather than our own corner of it.
+    """
+    rows: list[dict] = []
+    for pid, exe, cmd in _main_processes():
+        flag = _cmdline_value(cmd, "--user-data-dir")
+        profile = flag or _default_profile(exe)
+        port = cdp.port_of(profile) if profile else 0
+        if not port:
+            port = _to_int(_cmdline_value(cmd, "--remote-debugging-port"))
+        reachable = cdp.answers(port)
+        endpoint: dict = {"port": port, "reachable": reachable}
+        if reachable:
+            endpoint["tabs"] = len(cdp.page_rows_at(port))
+        rows.append({"pid": pid, "exe": exe,
+                     "path": os.path.realpath(f"/proc/{pid}/exe"),
+                     "profile": profile,
+                     "profile_from": ("flag" if flag else
+                                      ("default" if profile else "")),
+                     "managed": _is_managed(profile),
+                     "cdp": endpoint})
+    # ours first, then whatever can be driven, then by pid
+    return sorted(rows, key=lambda r: (not r["managed"],
+                                       not r["cdp"]["reachable"], r["pid"]))
+
+
+def list_browsers() -> dict:
+    """`list`: every browser running here, drivable or not."""
+    rows = browsers()
+    return {"ok": True, "count": len(rows),
+            "drivable": sum(1 for r in rows if r["cdp"]["reachable"]),
+            "browsers": rows}
+
+
+def list_tabs() -> dict:
+    """`list-tabs`: the page tabs of every DRIVABLE browser, by browser.
+
+    Grouped by browser, because that is what tells two tabs with the same
+    title apart — and a tab handle (`id:`) is only meaningful against the
+    browser it came from. Window grouping is not in this scope.
+    """
+    groups: list[dict] = []
+    total = 0
+    for row in browsers():
+        port = _to_int(row["cdp"]["port"])
+        if not row["cdp"]["reachable"]:
+            continue
+        group = {"pid": row["pid"], "exe": row["exe"],
+                 "profile": row["profile"], "managed": row["managed"],
+                 "port": port, "tabs": []}
+        try:
+            group["tabs"] = cdp.rows_to_tabs(cdp.page_rows_at(port))
+        except ControlError as e:      # answered /json/version, then stopped
+            group["error"] = e.message
+        group["count"] = len(group["tabs"])
+        total += group["count"]
+        groups.append(group)
+    return {"ok": True, "count": total, "browsers": groups}
+
+
 # ------------------------------------------------------------- read-backs
 def _rows(profile: str) -> list[dict]:
     """The page tabs, as every verb reports them."""
@@ -305,13 +438,35 @@ def _wait_rows(profile: str, timeout: float = TAB_WAIT_S) -> list[dict]:
     return rows
 
 
-def _wait_tab(profile: str, target_id: str,
+def _wait_tabs(profile: str, ids: list[str],
+               timeout: float = TAB_WAIT_S) -> tuple[dict, list[str]]:
+    """(rows by id, ids still missing) after ONE bounded poll."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            rows = _rows(profile)
+        except ControlError:
+            rows = []                  # mid-startup, or the browser is gone
+        seen = {r["id"]: r for r in rows if r["id"] in ids}
+        missing = [i for i in ids if i not in seen]
+        if not missing or time.time() >= deadline:
+            return seen, missing
+        time.sleep(0.25)
+
+
+def _wait_url(profile: str, url: str,
               timeout: float = TAB_WAIT_S) -> dict | None:
-    """The row for a target id, once the list shows it."""
+    """The tab a just-started browser opened for `url`, once it shows it.
+
+    Matched by the requested URL, tolerant of the trailing slash the browser
+    adds: a startup page has no id we were told, so the URL is what names it.
+    """
+    want = url.rstrip("/")
     deadline = time.time() + timeout
     while time.time() < deadline:
         for row in _rows(profile):
-            if row["id"] == target_id:
+            got = str(row["url"]).rstrip("/")
+            if got == want or got.startswith(want):
                 return row
         time.sleep(0.25)
     return None
@@ -333,28 +488,39 @@ def _wait_gone(profile: str, target_id: str,
         time.sleep(0.2)
 
 
-def _open_tab(profile: str, url: str) -> dict:
-    """One new tab, verified: the id CDP made must appear in the tab list."""
-    result = cdp.browser_call(profile, "Target.createTarget", {"url": url})
-    target_id = str(result.get("targetId") or "")
-    if not target_id:
-        fail("no-page-tab", "CDP made no tab to name")
-    row = _wait_tab(profile, target_id)
-    if row is None:
-        raise ControlError(
-            "no-page-tab",
-            f"CDP made a tab ({target_id}) that the tab list does not show")
-    return row
+def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
+    """One new tab per URL: every id from CDP, all verified together.
+
+    `Target.createTarget` answers with the id it made and ONE poll loop then
+    proves every id is in the tab list. A partial result refuses and names
+    what is missing — and the tabs that did open stay open, because a refusal
+    is not a reason to destroy work.
+    """
+    ids: list[str] = []
+    for url in urls:
+        result = cdp.browser_call(profile, "Target.createTarget", {"url": url})
+        target_id = str(result.get("targetId") or "")
+        if not target_id:
+            fail("no-page-tab", f"CDP made no tab for {url!r}")
+        ids.append(target_id)
+    found, missing = _wait_tabs(profile, ids)
+    if missing:
+        fail("no-page-tab",
+             f"{len(missing)} of {len(ids)} tabs never showed up in the tab "
+             "list: " + ", ".join(missing[:4]))
+    return [found[target_id] for target_id in ids]
 
 
 # ------------------------------------------------------------------ verbs
-def launch(url: str = "", browser: str = "") -> dict:
-    """Start the managed browser (or adopt the running one) and prove it.
+def launch(urls: list[str] | None = None, browser: str = "") -> dict:
+    """Start (or adopt) the managed browser and prove the pages are there.
 
-    A fresh start always gets a page (`about:blank` when no URL was asked
-    for). An already-running browser is handed the URL as a new tab; with no
-    URL it is left alone. `started` says which of the two happened.
+    `urls` is what to open: a fresh start loads the FIRST as its startup page
+    and opens the rest as tabs; an already-running browser is handed each as
+    a new tab; an empty list just makes sure a page exists. `started` says
+    which of the two happened and `opened` names the tabs this call made.
     """
+    wanted = [safe_url(url) for url in (urls or [])]
     path = binary(browser)
     profile = profile_dir(path)
     try:
@@ -362,19 +528,28 @@ def launch(url: str = "", browser: str = "") -> dict:
     except OSError as e:
         raise ControlError("profile-unusable",
                            f"cannot create {profile}: {e}") from e
-    wanted = safe_url(url) if url else ""
     already = cdp.reachable(profile)
-    opened = None
+    requests: list[str] = []
+    opened: list[dict] = []
     if already:
         if wanted:
-            opened = _open_tab(profile, wanted)
+            requests = wanted
+            opened = _open_tabs(profile, wanted)
     else:
-        _record_pid(profile, _spawn([path, *flags(profile),
-                                     wanted or "about:blank"]))
+        first = wanted[0] if wanted else "about:blank"
+        requests = [first, *wanted[1:]]
+        _record_pid(profile, _spawn([path, *flags(profile), first]))
         if not _wait_port(profile):
             fail("launch-failed",
                  f"started {path} on {profile} but no CDP endpoint answered "
                  f"within {LAUNCH_WAIT_S:g}s")
+        row = _wait_url(profile, first)
+        if row is None:
+            fail("no-page-tab",
+                 f"{path} is up on {profile} but shows no tab for {first!r}")
+        opened = [row]
+        if len(wanted) > 1:
+            opened += _open_tabs(profile, wanted[1:])
     rows = _wait_rows(profile)
     if not rows:
         fail("no-page-tab",
@@ -382,9 +557,12 @@ def launch(url: str = "", browser: str = "") -> dict:
              "(browser-control-cli open https://…)")
     reply = {"ok": True, "started": not already, "browser": path,
              "profile": profile, "port": cdp.port_of(profile),
-             "pid": _pid_of(profile), "tabs": rows}
-    if opened:
-        reply["tab"] = f"id:{opened['id']}"
+             "pid": _pid_of(profile), "tabs": rows,
+             "opened": [{"requested": requests[index], "id": row["id"],
+                         "url": row["url"], "title": row["title"]}
+                        for index, row in enumerate(opened)]}
+    if len(opened) == 1:
+        reply["tab"] = f"id:{opened[0]['id']}"
     return reply
 
 
@@ -426,6 +604,7 @@ def stop(browser: str = "") -> dict:
     Path(_pid_file(profile)).unlink(missing_ok=True)
     return {"ok": True, "stopped": True, "pid": pid, "profile": profile}
 
+
 def tabs(browser: str = "") -> dict:
     """Every page tab, id-sorted."""
     profile = resolve_profile(browser)
@@ -435,14 +614,25 @@ def tabs(browser: str = "") -> dict:
             "count": len(rows), "tabs": rows}
 
 
-def new_tab(url: str = "", browser: str = "") -> dict:
-    """Open ONE tab and name it (`id:<target id>`)."""
+def new_tab(urls: list[str] | None = None, browser: str = "") -> dict:
+    """Open one tab per URL (`about:blank` when none was given), all named.
+
+    The reply carries `opened` — one entry per tab this call made — plus, for
+    a single URL, the `tab`/`id`/`url`/`title` keys the first slice had.
+    """
     profile = resolve_profile(browser)
     ensure_up(profile)
-    row = _open_tab(profile, safe_url(url) if url else "about:blank")
-    return {"ok": True, "tab": f"id:{row['id']}", "id": row["id"],
-            "url": row["url"], "title": row["title"],
-            "count": len(_rows(profile))}
+    wanted = [safe_url(url) for url in (urls or [])] or ["about:blank"]
+    opened = _open_tabs(profile, wanted)
+    reply: dict = {
+        "ok": True, "count": len(_rows(profile)),
+        "opened": [{"requested": url, "id": row["id"], "url": row["url"],
+                    "title": row["title"]}
+                   for url, row in zip(wanted, opened, strict=True)]}
+    if len(opened) == 1:
+        reply.update({"tab": f"id:{opened[0]['id']}", "id": opened[0]["id"],
+                      "url": opened[0]["url"], "title": opened[0]["title"]})
+    return reply
 
 
 def close_tab(spec: str, browser: str = "") -> dict:

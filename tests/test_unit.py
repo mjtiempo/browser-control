@@ -125,9 +125,13 @@ def t_port_file() -> None:
         assert cdp.port_of(profile) == 34591
 
 
-def _fake_endpoint(body: list[object]) -> tuple[http.server.HTTPServer, int]:
+def _fake_endpoint(tabs: list[object]) -> tuple[http.server.HTTPServer, int]:
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            # a real endpoint answers an OBJECT for /json/version and the tab
+            # list for /json, so the fake does too
+            body = {"Browser": "Fake/1.0"} if self.path == "/json/version" \
+                else tabs
             payload = json.dumps(body).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -144,13 +148,13 @@ def _fake_endpoint(body: list[object]) -> tuple[http.server.HTTPServer, int]:
 
 
 def t_page_rows_from_a_fake_endpoint() -> None:
-    body: list[object] = [
+    tabs: list[object] = [
         {"type": "page", "id": "B", "title": "second", "url": "https://b/"},
         {"type": "page", "id": "A", "title": "first", "url": "https://a/"},
         {"type": "service_worker", "id": "S", "title": "sw", "url": "sw.js"},
         "not-an-object",
     ]
-    server, port = _fake_endpoint(body)
+    server, port = _fake_endpoint(tabs)
     try:
         with tempfile.TemporaryDirectory() as profile:
             Path(profile, cdp.PORT_FILE).write_text(f"{port}\n")
@@ -164,23 +168,28 @@ def t_page_rows_from_a_fake_endpoint() -> None:
 
 
 def t_cli_dispatch() -> None:
-    seen: dict[str, str] = {}
+    """One URL, several URLs, and the flags that are stripped — as argv."""
+    seen: dict[str, object] = {}
 
-    def fake_launch(url: str = "", browser: str = "") -> dict:
-        seen["url"] = url
+    def fake_launch(urls: list[str] | None = None, browser: str = "") -> dict:
+        seen["urls"] = list(urls or [])
         seen["browser"] = browser
-        return {"ok": True, "url": url}
+        return {"ok": True, "opened": list(urls or [])}
 
     original = cli_main.launch
     cli_main.launch = fake_launch          # type: ignore[assignment]
     try:
-        rc, out, err = run_cli(["open", "https://example.com",
+        rc, out, err = run_cli(["open", "https://a.example",
+                                "https://b.example",
                                 "--browser", "brave-browser"])
         assert rc == 0, (rc, err)
         assert err == "", err
-        assert json.loads(out) == {"ok": True, "url": "https://example.com"}
-        assert seen == {"url": "https://example.com",
+        assert json.loads(out)["opened"] == ["https://a.example",
+                                              "https://b.example"]
+        assert seen == {"urls": ["https://a.example", "https://b.example"],
                         "browser": "brave-browser"}, seen
+        rc, out, err = run_cli(["open"])          # no URL is allowed
+        assert rc == 0 and json.loads(out)["opened"] == [], (rc, out, err)
     finally:
         cli_main.launch = original         # type: ignore[assignment]
 
@@ -201,22 +210,82 @@ def t_cli_prints_the_service_reply() -> None:
         cli_main.tabs = original           # type: ignore[assignment]
 
 
+def t_cli_lists() -> None:
+    """`list` and `list-tabs` print the service reply and take no flags."""
+    rows = [{"pid": 1, "exe": "chrome", "managed": False,
+             "cdp": {"port": 0, "reachable": False}}]
+    calls: list[str] = []
+
+    def fake_list_browsers() -> dict:
+        calls.append("list")
+        return {"ok": True, "count": 1, "browsers": rows}
+
+    def fake_list_tabs() -> dict:
+        calls.append("list-tabs")
+        return {"ok": True, "count": 0, "browsers": []}
+
+    originals = (cli_main.list_browsers, cli_main.list_tabs)
+    cli_main.list_browsers = fake_list_browsers     # type: ignore[assignment]
+    cli_main.list_tabs = fake_list_tabs             # type: ignore[assignment]
+    try:
+        rc, out, err = run_cli(["list"])
+        assert rc == 0 and json.loads(out)["browsers"] == rows, (rc, out, err)
+        rc, out, _err = run_cli(["list-tabs"])
+        assert rc == 0 and json.loads(out)["count"] == 0, out
+        assert calls == ["list", "list-tabs"], calls
+        for argv in (["list", "extra"], ["list", "--browser", "chromium"],
+                     ["list-tabs", "x"], ["list-tabs", "--browser=chrome"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    finally:
+        (cli_main.list_browsers, cli_main.list_tabs) = originals  # type: ignore[assignment]
+
+
+def t_cmdline_value() -> None:
+    """Chrome writes `--flag=value` and `--flag value`; both are read."""
+    value = browser._cmdline_value                            # noqa: SLF001
+    assert value("chrome --user-data-dir=/x/y z", "--user-data-dir") == "/x/y"
+    assert value("chrome --user-data-dir /x/y z", "--user-data-dir") == "/x/y"
+    assert value("chrome --user-data-dir=", "--user-data-dir") == ""
+    assert value("chrome --user-data-dir", "--user-data-dir") == ""
+    assert value("chrome", "--user-data-dir") == ""
+    assert value("chrome --remote-debugging-port=0",
+                 "--remote-debugging-port") == "0"
+
+
 def t_cli_argv_is_strict() -> None:
-    rc, _out, err = run_cli(["frobnicate"])
-    assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
-    for argv in (["open", "https://a", "https://b"],
-                 ["open", "--workspace", "1"],
-                 ["close", "now"],
-                 ["tabs", "extra"],
-                 ["close-tab"],
-                 ["new-tab", "a", "b"]):
-        rc, _out, err = run_cli(argv)
-        assert rc == 2, (argv, rc)
-        assert "ERR[bad-args]" in err, (argv, err)
-    rc, _out, err = run_cli([])
-    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
-    rc, out, _err = run_cli(["--help"])
-    assert rc == 0 and out.startswith("usage: browser-control-cli"), out
+    """A refused argv must never reach the service — a tripwire, not a hope.
+
+    The services are replaced with a boom: the run that found the multi-URL
+    support (2026-09-18) started a real browser on the default profile root
+    because an argv the parser was supposed to refuse turned out to be legal.
+    """
+
+    def boom(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("an argv that must be refused reached the service")
+
+    originals = (cli_main.launch, cli_main.new_tab)
+    cli_main.launch = boom                 # type: ignore[assignment]
+    cli_main.new_tab = boom                # type: ignore[assignment]
+    try:
+        rc, _out, err = run_cli(["frobnicate"])
+        assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
+        for argv in (["open", "--workspace", "1"],
+                     ["open", "https://a", "-x"],
+                     ["close", "now"],
+                     ["tabs", "extra"],
+                     ["close-tab"],
+                     ["new-tab", "-x"],
+                     ["list", "extra"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2, (argv, rc)
+            assert "ERR[bad-args]" in err, (argv, err)
+        rc, _out, err = run_cli([])
+        assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+        rc, out, _err = run_cli(["--help"])
+        assert rc == 0 and out.startswith("usage: browser-control-cli"), out
+    finally:
+        (cli_main.launch, cli_main.new_tab) = originals  # type: ignore[assignment]
 
 
 def t_selftest() -> None:
@@ -255,6 +324,8 @@ def main() -> int:
         ("port file is not proof of a port", t_port_file),
         ("page rows from a fake endpoint", t_page_rows_from_a_fake_endpoint),
         ("cli dispatches with flags stripped", t_cli_dispatch),
+        ("cli lists browsers and tabs", t_cli_lists),
+        ("cmdline flag values are read", t_cmdline_value),
         ("cli prints the service reply", t_cli_prints_the_service_reply),
         ("cli argv is strict", t_cli_argv_is_strict),
         ("selftest proves the install", t_selftest),

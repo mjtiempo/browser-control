@@ -296,11 +296,126 @@ def c_no_leftover_process() -> str:
     return "nothing of ours is left running"
 
 
+def c_new_tab_several() -> str:
+    """`new-tab a b c` — one call, three tabs, every id re-read."""
+    base = base_url()
+    urls = [f"{base}/six-a", f"{base}/six-b", f"{base}/six-c"]
+    before = len(pages(STATE["port"]))
+    reply = ok_json("new-tab", *urls)
+    opened = [row["id"] for row in reply["opened"]]
+    assert len(opened) == 3 and len(set(opened)) == 3, reply
+    assert [row["requested"] for row in reply["opened"]] == urls, reply
+    rows = pages(STATE["port"])
+    assert len(rows) == before + 3, (before, rows)
+    assert set(opened) <= {r["id"] for r in rows}, (opened, rows)
+    assert reply["count"] == len(rows), reply
+    for tid in opened:                       # leave it as we found it
+        ok_json("close-tab", f"id:{tid}")
+    return f"3 tabs from one call: {', '.join(i[:6] for i in opened)}"
+
+
+def c_open_several() -> str:
+    """`open a b c` — every site opens, and each is named by its own id."""
+    base = base_url()
+    urls = [f"{base}/seven-a", f"{base}/seven-b", f"{base}/seven-c"]
+    before = len(pages(STATE["port"]))
+    reply = ok_json("open", *urls)
+    assert reply["started"] is False, reply           # the browser was up
+    assert reply["pid"] == STATE["pid"], reply
+    assert [row["requested"] for row in reply["opened"]] == urls, reply
+    rows = pages(STATE["port"])
+    assert len(rows) == before + 3, (before, rows)
+    for url in urls:
+        assert any(str(r["url"]).startswith(url) for r in rows), (url, rows)
+    for row in reply["opened"]:                       # leave it as we found it
+        ok_json("close-tab", f'id:{row["id"]}')
+    return "3 sites in one call, each named by its id"
+
+
+def c_list_sees_our_browser() -> str:
+    data = ok_json("list")
+    ours = [b for b in data["browsers"] if b["pid"] == STATE["pid"]]
+    assert len(ours) == 1, data
+    row = ours[0]
+    assert row["managed"] is True, row
+    assert row["cdp"]["reachable"] is True, row
+    assert row["cdp"]["port"] == STATE["port"], row
+    assert row["profile"] == STATE["profile"], row
+    assert row["cdp"]["tabs"] == len(pages(STATE["port"])), row
+    assert data["drivable"] >= 1, data
+    return (f'ours is managed + drivable on port {STATE["port"]} — '
+            f'{data["count"]} browser(s) running here')
+
+
+def c_list_tabs_groups_by_browser() -> str:
+    data = ok_json("list-tabs")
+    groups = [g for g in data["browsers"] if g["pid"] == STATE["pid"]]
+    assert len(groups) == 1, data
+    group = groups[0]
+    assert group["managed"] is True and group["port"] == STATE["port"], group
+    assert [t["id"] for t in group["tabs"]] == \
+        [t["id"] for t in pages(STATE["port"])], group
+    assert STATE["tab"] in {t["id"] for t in group["tabs"]}, group
+    assert group["count"] == len(group["tabs"]), group
+    return (f'{data["count"]} tab(s) across {len(data["browsers"])} '
+            "drivable browser(s), grouped and id-matched")
+
+
+def c_list_shows_a_browser_outside_cdp() -> str:
+    """A browser with no debugging port is LISTED, and never driven.
+
+    Launched here on its own throwaway profile: the point of the check is the
+    distinction `list` makes — visible in /proc, no endpoint, so `list-tabs`
+    and every other verb must leave it alone.
+    """
+    path = browser_lib.binary()
+    profile = tempfile.mkdtemp(prefix="browser-control-plain-")
+    proc = subprocess.Popen(
+        [path, f"--user-data-dir={profile}", "--no-first-run",
+         "--no-default-browser-check", "about:blank"],
+        start_new_session=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    stopped = False
+    try:
+        deadline = time.time() + 15
+        row = None
+        while time.time() < deadline:
+            row = next((b for b in ok_json("list")["browsers"]
+                        if b["pid"] == proc.pid), None)
+            if row:
+                break
+            time.sleep(0.5)
+        assert row is not None, f"pid {proc.pid} never showed up in `list`"
+        assert row["managed"] is False, row
+        assert row["profile"] == profile, row
+        assert row["cdp"] == {"port": 0, "reachable": False}, row
+        assert all(g["pid"] != proc.pid
+                   for g in ok_json("list-tabs")["browsers"]), row
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(proc.pid, signal.SIGTERM)
+        # reaps it: an unreaped child stays in /proc as a zombie
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        stopped = not browser_lib._pid_alive(proc.pid)  # noqa: SLF001
+        for _ in range(3):          # a dying browser still writes to it
+            shutil.rmtree(profile, ignore_errors=True)
+            if not Path(profile).exists():
+                break
+            time.sleep(0.3)
+    assert stopped, f"pid {proc.pid} survived SIGTERM"
+    return f"pid {proc.pid} listed, cdp unreachable, absent from list-tabs"
+
+
 CHECKS = (
     ("selftest answers without a browser", c_selftest),
     ("open starts a managed browser", c_open_starts_a_browser),
+    ("list sees it, drivable", c_list_sees_our_browser),
     ("tabs reads the tab list back", c_tabs_matches_the_tab_list),
+    ("list-tabs groups by browser", c_list_tabs_groups_by_browser),
     ("new-tab names the tab it made", c_new_tab),
+    ("new-tab with several URLs", c_new_tab_several),
+    ("open with several URLs", c_open_several),
     ("close-tab by id prefix", c_close_tab_by_id_prefix),
     ("close-tab by substring", c_close_tab_by_substring),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
@@ -308,6 +423,8 @@ CHECKS = (
     ("open adopts a running browser", c_open_adopts_the_running_browser),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),
+    ("a browser outside CDP is listed, not driven",
+     c_list_shows_a_browser_outside_cdp),
     ("no process is left behind", c_no_leftover_process),
 )
 

@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 11 hermetic + 12 live checks passing.
+Repo `main`, worktree clean, 13 hermetic + 17 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,21 +15,23 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 180 | `HANDLERS` table, `--browser`, `selftest`, JSON out / `ERR[code]` exit 2 |
-| `browser_control/lib/browser.py` | 462 | managed profile, resolve, launch, verified stop, tab ops |
-| `browser_control/lib/cdp.py` | 189 | endpoint (`DevToolsActivePort`), capped JSON GET, one websocket call |
+| `browser_control/cli/main.py` | 218 | `HANDLERS` table, `--browser`, `selftest`, JSON out / `ERR[code]` exit 2 |
+| `browser_control/lib/browser.py` | 652 | managed profile, resolve, launch, verified stop, tab ops, browser discovery |
+| `browser_control/lib/cdp.py` | 214 | endpoint (`DevToolsActivePort`), capped JSON GET, explicit-port reads, one websocket call |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 269 | 11 hermetic checks, no browser needed |
-| `tests/live_test.py` | 373 | 12 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 340 | 13 hermetic checks, no browser needed |
+| `tests/live_test.py` | 518 | 17 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
 | Verb | Does | Verified by (the read-back) |
 | --- | --- | --- |
-| `open [URL]` | starts the managed browser; if one is already up, hands it the URL as a new tab | the endpoint must **answer**, then a page tab must exist |
+| `open [URL...]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs | the endpoint must **answer**, then every opened tab must be in the tab list |
 | `close` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs |
-| `tabs` | page tabs, id-sorted | `/json` shape-checked |
-| `new-tab [URL]` | one tab, named `id:<target id>` | the id is re-read from the tab list |
+| `tabs` | the managed browser's page tabs, id-sorted | `/json` shape-checked |
+| `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, and whether CDP answers (+ its tab count) | one `/proc` pass, plus a CDP probe on the port each one names |
+| `list-tabs` | the page tabs of every **drivable** browser, grouped by browser | the same tab list the verbs use, read per browser |
+| `new-tab [URL...]` | one tab per URL (`about:blank` when none), every id named | each id from `Target.createTarget`, re-read from the tab list |
 | `close-tab SPEC` | one tab: `id:<prefix>` or a title/url substring | the id must be **absent** afterwards, else `close-tab-not-verified` |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
@@ -68,13 +70,15 @@ refusing `cdp-unreachable`.
 **Static** — all five Python files clean under an active LSP probe (0
 diagnostics).
 
-**Live battery** — `python3 tests/live_test.py` → **12 passed, 0 failed, 0
+**Live battery** — `python3 tests/live_test.py` → **17 passed, 0 failed, 0
 skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
 independent state back — a raw socket connect, a direct `/json` GET, `/proc`
-for the pid — for open, the tab list, new-tab, both `close-tab` spec forms,
-an ambiguous spec, five refusals, adoption of the running browser, the
-verified close, the idempotent close, and "nothing left running". With the
-command missing it reports 12 skips and exits 2.
+for the pid — for open, `list`, the tab list, `list-tabs` grouping, new-tab
+(single and several URLs), open with several URLs, both `close-tab` spec
+forms, an ambiguous spec, five refusals, adoption of the running browser, the
+verified close, the idempotent close, a browser with **no** debugging port
+(listed, never driven) and "nothing left running". With the command missing it
+reports 17 skips and exits 2.
 
 **Not proven yet**: no concurrent-`open` test (there is no lock), no
 multi-browser test (two live instances refuse), no CI.
@@ -123,12 +127,13 @@ the one thing that makes an install unusable. Covered hermetically (that
 refusal included) and by the battery's first check.
 
 ### 5.2 The live battery — done
-`tests/live_test.py` (373 lines, 12 checks): a temp `BROWSER_CONTROL_ROOT`, a
+`tests/live_test.py` (518 lines, 17 checks): a temp `BROWSER_CONTROL_ROOT`, a
 local page server so tabs have distinct URLs without the network, a
 skip-if-prereq that exits 2, and mandatory cleanup — close what you opened,
-kill what you started, remove the temp root (the skip path leaked one until
-it was fixed). Every check reads independent state (raw socket, direct
-`/json`, `/proc`) instead of trusting the reply.
+kill what you started (and wait for it), remove the temp root (the skip path
+leaked one until it was fixed, and the removal has to outlive a dying
+browser). Every check reads independent state (raw socket, direct `/json`,
+`/proc`) instead of trusting the reply.
 
 ### 5.3 Profile seeding — deferred
 Deliberately not being built yet, so the managed browser starts with none of

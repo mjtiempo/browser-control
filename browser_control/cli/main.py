@@ -21,6 +21,8 @@ from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     close_tab,
     launch,
+    list_browsers,
+    list_tabs,
     new_tab,
     stop,
     tabs,
@@ -32,10 +34,12 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
 
 USAGE = """usage: browser-control-cli VERB [ARGS]
 
-  open [URL]        start (or adopt) the managed browser; URL optional
+  open [URL...]     start (or adopt) the managed browser; each URL opens
   close             stop the managed browser this CLI started
-  tabs              list the browser's page tabs
-  new-tab [URL]     open a tab (about:blank when no URL)
+  tabs              the managed browser's page tabs, id-sorted
+  list              every Chromium-family browser running here, ours or not
+  list-tabs         the page tabs of every DRIVABLE browser, by browser
+  new-tab [URL...]  one tab per URL (about:blank when none)
   close-tab SPEC    close ONE tab: `id:<prefix>` or a title/url substring
   selftest          prove the install: interpreter, websockets, verbs
 
@@ -65,8 +69,28 @@ def _none(rest: list[str], verb: str) -> None:
         fail("bad-args", f"{verb}: takes no arguments, got {arg!r}")
 
 
+def _urls(rest: list[str], verb: str) -> list[str]:
+    """Every URL this verb was given, in order — none is dropped.
+
+    A flag is refused rather than ignored (the tab is `--tab`, and these verbs
+    take no other), and a caller that asks for three sites gets three.
+    """
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"{verb}: unknown flag {arg!r}")
+    return list(rest)
+
+
+def _no_browser_flag(verb: str, browser: str) -> None:
+    """Refuse `--browser` on a verb that reports every browser it finds."""
+    if browser:
+        fail("bad-args",
+             f"{verb}: --browser does not apply — this verb reports every "
+             "browser on the machine")
+
+
 def cmd_open(rest: list[str], browser: str) -> dict:
-    return launch(_one(rest, "open"), browser=browser)
+    return launch(_urls(rest, "open"), browser=browser)
 
 
 def cmd_close(rest: list[str], browser: str) -> dict:
@@ -80,7 +104,19 @@ def cmd_tabs(rest: list[str], browser: str) -> dict:
 
 
 def cmd_new_tab(rest: list[str], browser: str) -> dict:
-    return new_tab(_one(rest, "new-tab"), browser=browser)
+    return new_tab(_urls(rest, "new-tab"), browser=browser)
+
+
+def cmd_list(rest: list[str], browser: str) -> dict:
+    _none(rest, "list")
+    _no_browser_flag("list", browser)
+    return list_browsers()
+
+
+def cmd_list_tabs(rest: list[str], browser: str) -> dict:
+    _none(rest, "list-tabs")
+    _no_browser_flag("list-tabs", browser)
+    return list_tabs()
 
 
 def cmd_close_tab(rest: list[str], browser: str) -> dict:
@@ -128,6 +164,8 @@ HANDLERS: dict[str, Handler] = {
     "open": cmd_open,
     "close": cmd_close,
     "tabs": cmd_tabs,
+    "list": cmd_list,
+    "list-tabs": cmd_list_tabs,
     "new-tab": cmd_new_tab,
     "close-tab": cmd_close_tab,
     "selftest": cmd_selftest,
