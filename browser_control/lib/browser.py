@@ -1224,71 +1224,124 @@ def _page_count(profile: str) -> int | None:
         return None
 
 
-def stop(browser: str = "", force: bool = False) -> dict:
-    """Stop the managed browser this CLI started, and prove it stopped.
+def _named_browser(selector: dict) -> dict:
+    """The one live browser a caller NAMED, verified like `attach` verifies.
 
-    Three things it will not do:
-
-    * **It will not take tabs down silently.** A browser with page tabs open
-      refuses `tabs-open`, naming the count, because Chromium exits with its
-      last window — `--force` says the caller means it. An endpoint that no
-      longer answers cannot be asked, so nothing is claimed about its tabs.
-    * **It will not signal a pid that does not claim this profile.** The pid
-      file is a hint: the process's own cmdline has to carry
-      `--user-data-dir=<profile>`, or the pid is re-found, or the stop refuses
-      rather than aim SIGTERM at whatever inherited a recycled pid.
-    * **It will not SIGKILL.** A process that ignores SIGTERM is the caller's
-      to stop, and the refusal says so.
-
-    The reply requires the process AND the endpoint to be gone: `stopped: true`
-    only after both, plus `tabs` (the count it saw, or null) and `forced`.
-
-    The decision and the signal run under the profile's lock, so a `close`
-    cannot land in the middle of an `open` that is starting the same browser.
+    The same bar as `attach`: a running Chromium-family MAIN process of this
+    machine that answers CDP — and here also one whose endpoint VERIFIES, so
+    the pid about to be signalled is the process holding that port. Naming it
+    is the consent; this is what makes the name mean something.
     """
-    profile = managed_profile(browser)
-    with _lock(_lock_path(profile), "close") as lock:
-        pid = _pid_of(profile)
-        tabs = _page_count(profile)
-        if not pid:
-            if not cdp.reachable(profile):
-                reply = {"ok": True, "stopped": False, "profile": profile,
+    rows = browsers()
+    port = _to_int(selector.get("port"))
+    pid = _to_int(selector.get("pid"))
+    profile = str(selector.get("profile") or "")
+    if pid:
+        row = next((r for r in rows if r["pid"] == pid), None)
+        what = f"--pid {pid}"
+    elif profile:
+        want = _norm(profile)
+        row = next((r for r in rows if _norm(r["profile"]) == want), None)
+        what = f"--profile {profile}"
+    else:
+        row = next((r for r in rows
+                    if _to_int(r["cdp"]["port"]) == port), None)
+        what = f"--port {port}"
+    if row is None:
+        fail("no-browser",
+             f"no running Chromium-family browser matches {what}")
+    if not row["cdp"]["reachable"]:
+        fail("cdp-unreachable",
+             f"pid {row['pid']} does not answer CDP on port "
+             f"{row['cdp']['port']} — a browser this CLI cannot reach is not "
+             "one it stops by name")
+    if not row["cdp"]["verified"]:
+        fail("cdp-not-local",
+             f"the endpoint on port {row['cdp']['port']} is not pid "
+             f"{row['pid']}'s ({row['cdp'].get('reason') or 'unknown'}) — "
+             "refusing to signal it")
+    return row
+
+
+def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
+         profile: str = "") -> dict:
+    """Stop a browser, and prove it stopped.
+
+    Two ways in, and the difference is CONSENT:
+
+    * **no selector** — the managed browser on this CLI's own root, the one
+      `open` starts. An attached browser is never a candidate here: attaching
+      grants tab writes, not the right to stop somebody else's browser.
+    * **`--pid N` / `--port N` / `--profile DIR`** — exactly the browser the
+      caller NAMED, which is how one this CLI did not start (another tool's,
+      or one it merely attached to) gets stopped on purpose. Naming it is the
+      consent; `_named_browser` is the verification that the name points at a
+      live, answering, VERIFIED Chromium-family process. One selector per
+      call.
+
+    Both paths take the profile's lock (so a `close` cannot land inside an
+    `open`), refuse `tabs-open` while page tabs are open unless `--force`, and
+    require the process AND the endpoint to be gone before `stopped: true`.
+    Nothing is SIGKILLed, and a pid that no longer claims that profile is never
+    signalled.
+    """
+    given = [name for name, value in (("--port", port), ("--pid", pid),
+                                      ("--profile", profile)) if value]
+    if len(given) > 1:
+        fail("bad-args",
+             "close: name ONE browser — --port N, --pid N or --profile DIR")
+    named = bool(given)
+    row = _named_browser({"port": port, "pid": pid, "profile": profile}) \
+        if named else {}
+    target = str(row["profile"]) if row else managed_profile(browser)
+    with _lock(_lock_path(target), "close") as lock:
+        target_pid = _to_int(row["pid"]) if row else _pid_of(target)
+        tabs = _page_count(target)
+        if not target_pid:
+            if not cdp.reachable(target):
+                reply = {"ok": True, "stopped": False, "profile": target,
                          "tabs": tabs,
                          "reason": "no managed browser was running"}
                 if lock["warning"]:
                     reply["warning"] = lock["warning"]
                 return reply
             fail("browser-not-stopped",
-                 f"a browser answers on {profile} but no Chromium process on it "
-                 "can be identified — refusing to signal a process this CLI did "
-                 "not start")
+                 f"a browser answers on {target} but no Chromium process on "
+                 "it can be identified — refusing to signal a process this "
+                 "CLI did not start")
+        if row and not _pid_on_profile(target_pid, target):
+            fail("browser-not-stopped",
+                 f"pid {target_pid} is gone, or no longer runs {target} — "
+                 "nothing was signalled")
         if tabs and not force:
             fail("tabs-open",
-                 f"{tabs} page tab(s) are open in {profile} and stopping the "
+                 f"{tabs} page tab(s) are open in {target} and stopping the "
                  "browser closes them with it (Chromium exits with its last "
                  "window) — pass --force to stop it anyway, or take the tabs "
                  "first with `tab close ...` (`tab list` shows them)")
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.kill(target_pid, signal.SIGTERM)
         except OSError as e:
-            fail("browser-not-stopped", f"cannot stop pid {pid}: {e}")
+            fail("browser-not-stopped", f"cannot stop pid {target_pid}: {e}")
         deadline = time.time() + STOP_WAIT_S
-        while time.time() < deadline and _pid_alive(pid):
+        while time.time() < deadline and _pid_alive(target_pid):
             time.sleep(0.2)
-        if _pid_alive(pid):
+        if _pid_alive(target_pid):
             fail("browser-not-stopped",
-                 f"pid {pid} survived SIGTERM for {STOP_WAIT_S:g}s — stop it "
-                 "yourself; this CLI does not SIGKILL a browser")
+                 f"pid {target_pid} survived SIGTERM for {STOP_WAIT_S:g}s — "
+                 "stop it yourself; this CLI does not SIGKILL a browser")
         deadline = time.time() + PORT_WAIT_S
-        while time.time() < deadline and cdp.reachable(profile):
+        while time.time() < deadline and cdp.reachable(target):
             time.sleep(0.2)
-        if cdp.reachable(profile):
+        if cdp.reachable(target):
             fail("browser-not-stopped",
-                 f"pid {pid} is gone but the CDP endpoint on {profile} still "
-                 "answers")
-        Path(_pid_file(profile)).unlink(missing_ok=True)
-    reply = {"ok": True, "stopped": True, "pid": pid, "profile": profile,
-             "tabs": tabs, "forced": bool(tabs and force)}
+                 f"pid {target_pid} is gone but the CDP endpoint on {target} "
+                 "still answers")
+        Path(_pid_file(target)).unlink(missing_ok=True)
+    reply = {"ok": True, "stopped": True, "pid": target_pid,
+             "profile": target, "tabs": tabs,
+             "forced": bool(tabs and force), "named": named,
+             "managed": bool(row["managed"]) if row else True}
     if lock["warning"]:
         reply["warning"] = lock["warning"]
     return reply

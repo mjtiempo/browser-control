@@ -15,15 +15,15 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 857 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/cli/main.py` | 863 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
 | `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
 | `browser_control/lib/audit.py` | 158 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<timestamp>`, and a proven secret written as a length |
-| `browser_control/lib/browser.py` | 2056 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
+| `browser_control/lib/browser.py` | 2109 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
 | `browser_control/lib/cdp.py` | 656 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
 | `browser_control/lib/capabilities.py` | 108 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
-| `tests/test_unit.py` | 1515 | 34 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1639 | 52 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 1534 | 34 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1703 | 53 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -33,7 +33,7 @@ the other verbs own the browser.
 | Verb | Does | Verified by (the read-back) |
 | --- | --- | --- |
 | `open [URL...]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs | the endpoint must **answer**, then every opened tab must be in the tab list |
-| `close [--force]` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs, never signals a pid whose own cmdline does not name that profile, and refuses `tabs-open` while page tabs are open unless `--force` |
+| `close [--force] [--port N\|--pid N\|--profile DIR]` | stops the browser this CLI started — or, when NAMED, exactly that one, which is how another tool's browser goes | the pid dies **and** the endpoint stops answering; never SIGKILLs, never signals a pid whose own cmdline does not name that profile, and refuses `tabs-open` while page tabs are open unless `--force`; a named browser must be a live, answering, VERIFIED Chromium-family process |
 | `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, whether CDP answers, whether the endpoint VERIFIED, and (when it did) the listener pid/exe the kernel names (+ its tab count) | one `/proc` pass, a CDP probe on the port each one names, and the socket's owner from `/proc/net/tcp` + `/proc/<pid>/fd` |
 | `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
 | `attach --port N \| --pid N \| --profile DIR` | makes a running browser this CLI did not start writable (a `tab` write target) | the profile comes from a live Chromium-family process of this machine that ANSWERS on its endpoint, never from the caller |
@@ -154,15 +154,20 @@ multi-browser test (two live instances refuse), no CI.
    the port is checked in `/proc`, every drive of an unverified endpoint
    refuses `cdp-not-local`, and `list`/`tab list` name the pid and exe that
    actually own it.
-4. **One browser at a time** — there is no `--profile`/instance selector; two
-   live instances refuse instead of being addressable.
+4. **One browser at a time** — there is no `--profile`/instance selector for
+   DRIVING; two live instances still refuse instead of being addressable.
+   (Partial: `close`, `attach` and `detach` all take `--port`/`--pid`/
+   `--profile` — §5.19 — so the lifecycle verbs can address one already.)
 5. **Not published** — the wheel builds and installs locally, but there is no
    README, no declared license, and no index to publish to.
 6. **No CI** — both suites run by hand; nothing runs them on a push.
 7. **No human output** — every verb prints JSON; there is no `--json` switch
    because there is no alternative format yet.
-8. **`stop` refuses when the pid cannot be identified** — honest, but it means
-   a browser adopted from another tool cannot be closed by this CLI.
+8. ~~**`stop` refuses when the pid cannot be identified**~~ — DONE (§5.19):
+   `close --pid N`/`--port N`/`--profile DIR` stops exactly the browser the
+   caller NAMES, after verifying it is a live, answering, VERIFIED
+   Chromium-family process — so another tool's browser can be closed on purpose,
+   while an implicit `close` still never touches it.
 9. **A suppressed dialog parks a tab for good** — measured: Chrome suppresses a
    JavaScript dialog no client was attached to answer, and then nothing on the
    CDP side can clear it (`tab dialog accept` says `no-dialog`, which IS the
@@ -192,7 +197,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.18 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.19 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -644,6 +649,45 @@ to clean up; an unopenable path is a warning, never a failure); battery (two
 `open`s launched at once on one root → **one started, one adopted the same
 pid, both URLs in the tab list, exactly one live browser for that profile** —
 and the whole battery then closes what it started).
+
+### 5.19 Stopping a browser by NAME — consent, then verification — done
+
+`close` had one way in: the managed browser on this CLI's own root. That keeps
+the rule "attaching grants tab writes, not the right to stop somebody else's
+browser", but it also meant a browser another tool started — or one this CLI
+merely attached to — could not be stopped at all.
+
+Now there are two ways in, and the difference is CONSENT:
+
+| `close` | stops | verification |
+| --- | --- | --- |
+| no selector | the managed browser on this root | pid file (identity-checked) → `/proc` marker → endpoint verified |
+| `--pid N` / `--port N` / `--profile DIR` | exactly the browser NAMED | a live Chromium-family MAIN process of this machine that answers CDP and whose endpoint VERIFIES (the same bar `attach` uses) |
+
+Naming it is the consent, and the verification is what makes the name mean
+something: `close --pid 999999` refuses `no-browser` with nothing signalled, a
+name that points at an endpoint which is not that process's refuses
+`cdp-not-local`, and the reply says which path ran (`named`, `managed`). The
+implicit path is unchanged, so the attach check next to it still proves that a
+plain `close` will not touch a foreign browser.
+
+Everything else holds on both paths: the profile lock, `tabs-open` unless
+`--force` (checked in the battery against a foreign browser — its own tab count,
+through its own verified endpoint), SIGTERM only, and the process AND the
+endpoint gone before `stopped: true`.
+
+A detail worth keeping in mind for tests, learned here: a browser spawned by a
+test is that test's unreaped CHILD, so `/proc/<pid>` survives as a zombie after
+it dies. The library's `_pid_alive` treats a zombie as dead (its docstring says
+why: `kill(pid, 0)` on a zombie answers, which would refuse a stop that
+actually worked), so the battery check asserts with `_pid_alive`, not with bare
+`/proc` existence.
+
+Hermetic: `close` argv for all three selectors (and `--pid` + `--port` together,
+`--list`, a bare word — all `bad-args`). Battery: a foreign browser, started by
+the check on its own profile, refuses `no-browser` for a meaningless pid,
+refuses `tabs-open` for its tabs, then stops **by name** with `--force` — pid
+gone, port closed, gone from `list`.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,

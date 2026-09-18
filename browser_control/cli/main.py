@@ -47,8 +47,10 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
 USAGE = """usage: browser-control-cli VERB [ARGS]
 
   open [URL...]      start (or adopt) the managed browser; each URL opens
-  close [--force]    stop the managed browser this CLI started; --force even
-                     when it holds tabs (they close with it)
+  close [--force] [--port N|--pid N|--profile DIR]
+                     stop the managed browser this CLI started — or the one
+                     NAMED, which is how another tool's browser goes too;
+                     --force even when it holds tabs (they close with it)
   list               every Chromium-family browser running here, ours or not
   info               the browser this CLI would drive, and its endpoint
   attach [--port N|--pid N|--profile DIR]
@@ -230,14 +232,18 @@ def cmd_open(rest: list[str], browser: str) -> dict:
 
 
 def cmd_close(rest: list[str], browser: str) -> dict:
-    """`close [--force]` — stop the managed browser, verified.
+    """`close [--force] [--port N | --pid N | --profile DIR]`.
 
-    A browser with page tabs refuses `tabs-open` unless `--force`: stopping it
-    closes those tabs with it, and the caller should have to say so.
+    With no selector: the managed browser this CLI started. Naming one is how a
+    browser it did NOT start (another tool's, or one it merely attached to)
+    gets stopped on purpose — the name is the consent, and the browser has to
+    be a live, answering, VERIFIED Chromium-family process for it to mean
+    anything. `--force` says the tabs may go with it.
     """
     rest, force = _switch(rest, "--force")
-    _none(rest, "close")
-    return stop(browser=browser, force=force)
+    selector = _selector(rest, "close", ())
+    return stop(browser=browser, force=force, port=selector["port"],
+                pid=selector["pid"], profile=selector["profile"])
 
 
 def cmd_list(rest: list[str], browser: str) -> dict:

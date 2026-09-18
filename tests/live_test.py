@@ -1215,6 +1215,68 @@ def c_close_is_idempotent() -> str:
     return "a second close is a no-op, not a failure"
 
 
+def c_close_by_name_stops_a_foreign_browser() -> str:
+    """A browser this CLI did not start can be stopped by NAMING it.
+
+    The rule that an implicit `close` never touches somebody else's browser is
+    asserted next door, in the attach check. What this adds is the other half:
+    `close --pid N` (or `--port`, `--profile`) stops exactly the browser the
+    caller pointed at — and the name has to mean something, because it must be
+    a live, answering, VERIFIED Chromium-family process, with `tabs-open`
+    still guarding the tabs that stopping it would take down.
+    """
+    path = browser_lib.binary()
+    profile = tempfile.mkdtemp(prefix="browser-control-foreign-")
+    proc = subprocess.Popen(
+        [path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
+         "--no-first-run", "--no-default-browser-check", "about:blank"],
+        start_new_session=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    try:
+        port, deadline = 0, time.time() + 40
+        while time.time() < deadline:
+            try:
+                with open(Path(profile, "DevToolsActivePort")) as handle:
+                    port = int(handle.readline().strip() or 0)
+            except (OSError, ValueError):
+                port = 0
+            if port and listening(port):
+                break
+            time.sleep(0.5)
+        assert port, f"the foreign browser never published a port: {profile}"
+        # a name that means nothing refuses, and nothing is signalled
+        refuses("no-browser", "close", "--pid", "999999")
+        # its tabs are a refusal even when it is named: --force says they go
+        err = refuses("tabs-open", "close", "--pid", str(proc.pid))
+        assert "page tab" in err, err
+        assert Path(f"/proc/{proc.pid}").exists(), "the refusal stopped it"
+        reply = ok_json("close", "--pid", str(proc.pid), "--force")
+        assert reply["stopped"] is True, reply
+        assert reply["pid"] == proc.pid and reply["named"] is True, reply
+        assert reply["managed"] is False, reply
+        # `_pid_alive`, not bare /proc: this browser is the BATTERY's child, so
+        # an unreaped zombie keeps a /proc entry while being quite dead
+        # (`stop`'s own oracle says so, which is why it did not refuse)
+        assert not browser_lib._pid_alive(proc.pid), "still alive"  # noqa: SLF001
+        deadline = time.time() + 10
+        while time.time() < deadline and listening(port):
+            time.sleep(0.2)
+        assert not listening(port), f"port {port} still accepts connections"
+        assert all(b["pid"] != proc.pid
+                   for b in ok_json("list")["browsers"]), "still listed"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        for _ in range(3):
+            shutil.rmtree(profile, ignore_errors=True)
+            if not Path(profile).exists():
+                break
+            time.sleep(0.3)
+    return f"foreign pid {proc.pid} stopped BY NAME, tabs guard and all"
+
+
 def c_no_leftover_process() -> str:
     left = procs_on(ROOT)
     assert not left, f"processes still running on the throwaway root: {left}"
@@ -1534,6 +1596,8 @@ CHECKS = (
      c_list_shows_a_browser_outside_cdp),
     ("a foreign CDP browser is read, then attached for writes",
      c_attach_grants_writes),
+    ("a foreign browser can be stopped BY NAME",
+     c_close_by_name_stops_a_foreign_browser),
     ("no process is left behind", c_no_leftover_process),
 )
 

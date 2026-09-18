@@ -879,6 +879,9 @@ def t_cli_click_scroll_grammar() -> None:
 def t_cli_close_bulk() -> None:
     """`tab close`: argv for every selector, and the pure refusals."""
     calls: list[tuple] = []
+    # argv-only paths: the verbs are faked below, so nothing is written
+    fake_profile = os.path.join(tempfile.gettempdir(),
+                                "browser-control-argv-profile")
 
     def fake_close(specs: list[str], browser: str = "",
                    title: str | None = None, url: str | None = None,
@@ -925,23 +928,39 @@ def t_cli_close_bulk() -> None:
         ], calls
     finally:
         cli_main.close_tabs = original                 # type: ignore[assignment]
-    # `close` reaches the service with --force, and refuses anything else
+    # `close` reaches the service with --force and with a named browser, and
+    # refuses anything else (the selector is the same one attach/detach take)
     stops: list[tuple] = []
 
-    def fake_stop(browser: str = "", force: bool = False) -> dict:
-        stops.append((browser, force))
+    def fake_stop(browser: str = "", force: bool = False, port: int = 0,
+                  pid: int = 0, profile: str = "") -> dict:
+        stops.append((browser, force, port, pid, profile))
         return {"ok": True}
 
     original_stop = cli_main.stop
     cli_main.stop = fake_stop                         # type: ignore[assignment]
     try:
         for argv in (["close"], ["close", "--force"],
-                     ["close", "--browser=x", "--force"]):
+                     ["close", "--browser=x", "--force"],
+                     ["close", "--pid", "42"],
+                     ["close", "--port", "9222"],
+                     ["close", "--profile", fake_profile],
+                     ["close", "--pid", "42", "--force"]):
             rc, _out, err = run_cli(argv)
             assert rc == 0, (argv, rc, err)
-        assert stops == [("", False), ("", True), ("x", True)], stops
+        assert stops == [("", False, 0, 0, ""),
+                         ("", True, 0, 0, ""),
+                         ("x", True, 0, 0, ""),
+                         ("", False, 0, 42, ""),
+                         ("", False, 9222, 0, ""),
+                         ("", False, 0, 0, fake_profile),
+                         ("", True, 0, 42, "")], stops
     finally:
         cli_main.stop = original_stop                  # type: ignore[assignment]
+    for argv in (["close", "now"], ["close", "--pid", "1", "--port", "2"],
+                 ["close", "--pid"], ["close", "--list"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     # a repeatable flag with no value is refused in argv
     for flag in ("--except", "--like", "--title"):
         rc, _out, err = run_cli(["tab", "close", flag])

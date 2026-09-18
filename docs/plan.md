@@ -294,7 +294,7 @@ unclear oracle into a claim of absence.**
 | `tab upload` | mutation | `input.files` read back (name + size) | L2 | `no-file`, `upload-not-verified` |
 | `media-play/pause` | mutation | `video.paused` read back | L2 | `media-not-verified` |
 | `open` | mutation | window + tab identity re-read, under the profile lock (one `started: true`, ever) | L4 | `launch-failed`, `profile-busy` (naming the holder), `cdp-not-local`, `tab_refused` (window kept, reason named) |
-| `close` | mutation (lifecycle) | the pid AND the endpoint gone, the pid identified by its own cmdline | L4 | `tabs-open` unless `--force` (a browser with tabs refuses), `browser-not-stopped` (never SIGKILLs, never signals an unidentifiable process), `ambiguous-browser` (pid + profile path) |
+| `close [--force] [--port/--pid/--profile]` | mutation (lifecycle) | the pid AND the endpoint gone, the pid identified by its own cmdline; a NAMED browser must be live, answering and verified | L4 | `tabs-open` unless `--force`, `no-browser`/`cdp-unreachable`/`cdp-not-local` for a name that means nothing, `browser-not-stopped` (never SIGKILLs, never signals an unidentifiable process), `ambiguous-browser` (pid + profile path) |
 | `ensure` | mutation | port answers + pid recorded | L3 | `cdp-unreachable` with the real reason |
 | `profile-sync` | mutation | destination exists + file/byte count + copy kind | L2 | `profile-sync-failed` |
 | `search` | read | rendered vs empty vs wall vs unreachable | L3 | `search-denied`, `search-cdp` |
