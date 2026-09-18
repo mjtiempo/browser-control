@@ -1016,92 +1016,197 @@ def tab_info(spec: str, browser: str = "") -> dict:
             "browser": _brief(row)}
 
 
-def _exact_matches(field: str, value: str,
-                   browser: str) -> tuple[list[tuple[dict, dict, int]],
-                                         list[dict]]:
-    """(tabs this CLI may close, tabs it may not) that EXACTLY match.
+def _foreign_row(row: dict, tab: dict) -> dict:
+    """One match this CLI may not close, small enough to report whole."""
+    return {"id": tab["id"], "title": tab["title"], "url": tab["url"],
+            "pid": row["pid"], "exe": row["exe"],
+            "profile": row["profile"]}
 
-    Exact means the whole title (or URL), case-insensitively: `--title a` is
-    the tab called "a", not every tab with an "a" somewhere in it. A match in
-    a browser this CLI neither manages nor has attached is NOT closed and NOT
-    refused away — it is reported, because a bulk filter over the whole
-    machine that hits the user's own browsing must say so rather than fail or
-    pretend it did not see it.
-    """
+
+def _closeable(browser: str) -> list[dict]:
+    """The drivable browser rows, or a refusal naming what to do about it."""
     rows = _drivable(browser)
     if not rows:
         fail("cdp-unreachable",
              "no drivable browser"
              + (f" matching {browser!r}" if browser else "")
              + " — run `browser-control-cli open`")
-    wanted = str(value).lower()
+    return rows
+
+
+def _split(rows: list[dict]) -> tuple[list[tuple[dict, dict, int]],
+                                      list[dict]]:
+    """(tabs this CLI may close, matches in browsers it may not).
+
+    A match this CLI does not drive is REPORTED, never closed: a bulk close
+    over the whole machine that hits the user's own browsing must say so
+    rather than act on it, fail, or pretend it did not see it.
+    """
     ours: list[tuple[dict, dict, int]] = []
     foreign: list[dict] = []
     for row in rows:
+        for index, tab in enumerate(_tabs_of(row)[0]):
+            if row["managed"] or row["attached"]:
+                ours.append((row, tab, index))
+            else:
+                foreign.append(_foreign_row(row, tab))
+    return ours, foreign
+
+
+def _exact_matches(field: str, value: str,
+                   browser: str) -> tuple[list[tuple[dict, dict, int]],
+                                         list[dict]]:
+    """EXACT (case-insensitive) title/URL matches, ours and the rest.
+
+    Exact means the whole title (or URL): `--title a` is the tab called "a",
+    not every tab with an "a" somewhere in it.
+    """
+    wanted = str(value).lower()
+    ours: list[tuple[dict, dict, int]] = []
+    foreign: list[dict] = []
+    for row in _closeable(browser):
         for index, tab in enumerate(_tabs_of(row)[0]):
             if str(tab.get(field) or "").lower() != wanted:
                 continue
             if row["managed"] or row["attached"]:
                 ours.append((row, tab, index))
             else:
-                foreign.append({"id": tab["id"], "title": tab["title"],
-                                "url": tab["url"], "pid": row["pid"],
-                                "exe": row["exe"], "profile": row["profile"]})
+                foreign.append(_foreign_row(row, tab))
+    return ours, foreign
+
+
+def _spec_matches(specs: list[str], browser: str) -> tuple[
+        list[tuple[dict, dict, int]], list[dict]]:
+    """Every tab a SPEC set names — the union, deduplicated.
+
+    `tab close "x.com"` closes EVERY tab whose title or URL contains it: a
+    page verb refuses that ambiguity (`tab info x.com`), because it must not
+    pick among tabs nobody named, but a bulk close is exactly where a set is
+    the point. A spec that matches nothing refuses instead of reading as
+    "nothing to do", and one that matches only foreign tabs refuses
+    `not-managed`, naming the browser to attach.
+
+    Closing the LAST page tab of a browser takes its window with it, and
+    Chromium exits with its last window — so `--all` on the only tab stops the
+    browser as well. The ids are verified gone either way, which is why that
+    reads as a success with `count: 0` and not as a lost endpoint.
+    """
+    rows = _closeable(browser)
+    ours: list[tuple[dict, dict, int]] = []
+    foreign: list[dict] = []
+    seen: set[str] = set()
+    for spec in specs:
+        hits = 0
+        for row in rows:
+            for index, tab in enumerate(_tabs_of(row)[0]):
+                if not _match_spec([tab], spec):
+                    continue
+                hits += 1
+                if str(tab["id"]) in seen:
+                    continue
+                if row["managed"] or row["attached"]:
+                    seen.add(str(tab["id"]))
+                    ours.append((row, tab, index))
+                else:
+                    foreign.append(_foreign_row(row, tab))
+        if not hits:
+            have = ", ".join(f'{t["title"][:20] or t["url"][:20]}'
+                             for r in rows for t in _tabs_of(r)[0][:2])
+            fail("no-page-tab",
+                 f"no tab matches {spec!r} (have: {have or 'none'})")
+        if not ours and foreign:
+            fail("not-managed",
+                 f"every tab matching {spec!r} is in a browser this CLI did "
+                 f"not start ({foreign[0]['exe']} on "
+                 f"{foreign[0]['profile']}) — a write needs "
+                 "`attach --port N`, or `--browser NAME` to narrow it")
     return ours, foreign
 
 
 def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
-               url: str | None = None) -> dict:
-    """`tab close`: close every tab the specs — or the exact title/URL — name.
+               url: str | None = None, all_tabs: bool = False,
+               excepts: list[str] | None = None) -> dict:
+    """`tab close`: close every tab the arguments name, and prove it.
 
-    Two ways to name tabs, never both at once:
+    Four ways to name tabs, one per call:
 
-    * **SPECs** — the resolver every other verb uses (`id:<prefix>` or a
-      title/url substring), where several matches refuse with the candidates;
-    * **`--title VALUE` / `--url VALUE`** — an EXACT (case-insensitive) match
-      for a bulk close: every tab called "a", or every tab sitting on
-      `http://a/`. Those two flags take no SPEC.
+    * **SPECs** — `id:<prefix>` or a title/url substring; EVERY match closes
+      (`tab close "x.com"`), the union of the specs, deduplicated;
+    * **`--title VALUE` / `--url VALUE`** — an EXACT (case-insensitive) match;
+    * **`--all`** — every page tab this CLI drives;
+    * **`--except SPEC`** (which implies `--all`) — everything but the tabs
+      those specs name; several are allowed, and one that matches NOTHING
+      refuses, so a typo cannot silently close the tab it was meant to keep.
 
-    Everything to close resolves FIRST, so a bad argument or a foreign browser
-    cannot leave a half-applied close. The close then goes per browser and every
-    requested id is read back: a survivor is a refusal that names it.
+    Everything to close resolves FIRST, so a bad argument, an unmatched
+    exception or an ambiguous filter cannot leave a half-applied close. The
+    close then goes per browser and every requested id is read back: a
+    survivor is a refusal that names it. Tabs in browsers this CLI neither
+    manages nor has attached are reported in `skipped`, never closed.
     """
+    excepts = list(excepts or [])
+    named = bool(specs) or title is not None or url is not None
     for flag, value in (("--title", title), ("--url", url)):
         if value is not None and not str(value):
             fail("bad-args",
                  f"tab close: {flag} needs a value — an exact title or URL")
+    if any(not str(spec) for spec in excepts):
+        fail("bad-args", "tab close: --except needs a value — a TAB spec")
     if title is not None and url is not None:
         fail("bad-args",
              "tab close: name tabs by --title or by --url, not both")
     if specs and (title is not None or url is not None):
         fail("bad-args",
              "tab close: name tabs by SPEC or by --title/--url, not both")
-    if not specs and title is None and url is None:
+    if all_tabs and named:
         fail("bad-args",
-             "tab close: at least one TAB spec, or --title VALUE / --url URL "
-             "(an exact match), is required")
+             "tab close: --all takes no SPEC, --title or --url — it already "
+             "names every tab")
+    if excepts and named:
+        fail("bad-args",
+             "tab close: --except means EVERY tab but those, so it takes no "
+             "SPEC, --title or --url (add --all to say it explicitly)")
+    if not named and not all_tabs and not excepts:
+        fail("bad-args",
+             "tab close: name tabs with SPEC, --title VALUE, --url URL, or "
+             "--all [--except SPEC]")
     skipped: list[dict] = []
     filter_used: dict = {}
-    if title is not None or url is not None:
+    if all_tabs or excepts:
+        ours, foreign = _split(_closeable(browser))
+        keepers: set[str] = set()
+        for spec in excepts:
+            matched = [tab for _r, tab, _i in ours if _match_spec([tab], spec)]
+            matched += [tab for tab in foreign if _match_spec([tab], spec)]
+            if not matched and (ours or foreign):
+                fail("no-page-tab",
+                     f"tab close: --except {spec!r} matches no tab, so it "
+                     "would keep nothing — `tab list` shows what is open")
+            keepers |= {str(tab["id"]) for tab in matched}
+        ours = [(row, tab, index) for row, tab, index in ours
+                if str(tab["id"]) not in keepers]
+        skipped = [tab for tab in foreign if str(tab["id"]) not in keepers]
+    elif title is not None or url is not None:
         field = "title" if title is not None else "url"
         value = str(title if title is not None else url)
-        found, skipped = _exact_matches(field, value, browser)
+        ours, skipped = _exact_matches(field, value, browser)
         filter_used = {field: value}
-        if not found:
+        if not ours:
             if skipped:
                 fail("not-managed",
-                     f"{len(skipped)} tab(s) match {field} {value!r}, and every "
-                     f"one of them is in a browser this CLI did not start "
-                     f"({skipped[0]['exe']} on {skipped[0]['profile']}) — a "
-                     "write needs `attach --port N`, or `--browser NAME` to "
-                     "narrow it")
+                     f"{len(skipped)} tab(s) match {field} {value!r}, and "
+                     f"every one of them is in a browser this CLI did not "
+                     f"start ({skipped[0]['exe']} on "
+                     f"{skipped[0]['profile']}) — a write needs "
+                     "`attach --port N`, or `--browser NAME` to narrow it"
+                     )
             fail("no-page-tab",
                  f"no tab in a browser this CLI drives has {field} exactly "
                  f"{value!r} — `tab list` shows what is open")
     else:
-        found = _resolve_across(list(specs), browser, for_write=True)
+        ours, skipped = _spec_matches(list(specs), browser)
     by_profile: dict[str, list[str]] = {}
-    for row, tab, _index in found:
+    for row, tab, _index in ours:
         by_profile.setdefault(str(row["profile"]), []).append(str(tab["id"]))
     for profile, ids in by_profile.items():
         for target_id in ids:
@@ -1112,18 +1217,25 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
         survivors += _wait_ids_gone(profile, ids)
     if survivors:
         fail("close-tab-not-verified",
-             f"{len(survivors)} of {len(found)} tabs are still open: "
+             f"{len(survivors)} of {len(ours)} tabs are still open: "
              + ", ".join(str(i)[:10] for i in survivors[:4]))
     reply = {"ok": True,
              "closed": [{"id": tab["id"], "title": tab["title"],
                          "url": tab["url"], "pid": row["pid"],
                          "managed": row["managed"]}
-                        for row, tab, _index in found],
+                        for row, tab, _index in ours],
              "count": _tab_count()}
+    if all_tabs or excepts:
+        reply["all"] = True
+    if excepts:
+        reply["except"] = list(excepts)
     if filter_used:
         reply["filter"] = {**filter_used, "exact": True}
     if skipped:
         reply["skipped"] = skipped
+    if not ours:
+        reply["note"] = ("there was no tab to close: every one was kept by "
+                          "--except, or none matched")
     return reply
 
 

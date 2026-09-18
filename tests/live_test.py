@@ -908,48 +908,80 @@ def c_tab_dialog() -> str:
 
 
 def c_tab_close_bulk() -> str:
-    """`tab close --title/--url` closes every EXACT match, and only those."""
+    """A selector names a SET: substrings close every match, exact filters stay exact."""
     base = base_url()
     ok_json("tab", "nav", f"{base}/keep")
-    twins = [str(ok_json("tab", f"{base}/twin")["id"]) for _ in range(2)]
-    odd = str(ok_json("tab", f"{base}/twinx")["id"])
-    reply = ok_json("tab", "close", "--title", "twin")
-    closed = {str(row["id"]) for row in reply["closed"]}
-    assert closed == set(twins), (closed, twins)
-    assert reply["filter"] == {"title": "twin", "exact": True}, reply
-    assert [row["title"] for row in reply["closed"]] == ["twin", "twin"], \
-        reply["closed"]
-    refuses("no-page-tab", "tab", "info", f"id:{twins[0][:8]}")
-    # exact, so the tab called "twinx" is still there and closes by its URL
-    assert odd in {t["id"] for t in pages(STATE["port"])}, \
-        "a near-miss title was closed"
+    dups = [str(ok_json("tab", f"{base}/dup")["id"]) for _ in range(2)]
+    dupe = str(ok_json("tab", f"{base}/dupe")["id"])
+    # a SUBSTRING closes every tab it names — the point of `tab close "x.com"`
+    only = ok_json("tab", "close", "dupe")
+    assert [row["id"] for row in only["closed"]] == [dupe], only
+    both = ok_json("tab", "close", "dup")
+    assert {str(row["id"]) for row in both["closed"]} == set(dups), both
+    assert not set(dups) & {t["id"] for t in pages(STATE["port"])}, \
+        "the substring close left a duplicate behind"
+    # ...while `--title` is EXACT: `twinx` is not the tab called `twin`
+    twin = str(ok_json("tab", f"{base}/twin")["id"])
+    twinx = str(ok_json("tab", f"{base}/twinx")["id"])
+    exact = ok_json("tab", "close", "--title", "twin")
+    assert [row["id"] for row in exact["closed"]] == [twin], exact
+    assert exact["filter"] == {"title": "twin", "exact": True}, exact
+    assert twinx in {t["id"] for t in pages(STATE["port"])}, \
+        "an exact --title must not close a near-miss title"
     by_url = ok_json("tab", "close", "--url", f"{base}/twinx")
-    assert [row["id"] for row in by_url["closed"]] == [odd], by_url
-    # nothing matches: a refusal that names what it looked for
-    err = refuses("no-page-tab", "tab", "close", "--title", "no-such-title")
-    assert "no-such-title" in err, err
-    # the two ways to name tabs never mix, and argv decides before a browser
-    refuses("bad-args", "tab", "close", "--title", "a", "id:AB")
-    refuses("bad-args", "tab", "close", "--title", "a", "--url",
-            f"{base}/twin")
-    return ("closed exactly the two titled `twin`; a near-miss and a mixed "
-            "selector refuse")
+    assert [row["id"] for row in by_url["closed"]] == [twinx], by_url
+    assert by_url["filter"] == {"url": f"{base}/twinx", "exact": True}, by_url
+    # several specs in one call, verified together, and a typo still refuses
+    pair = [str(ok_json("tab", f"{base}/pair-{n}")["id"]) for n in (1, 2)]
+    joined = ok_json("tab", "close", f"id:{pair[0][:8]}", f"id:{pair[1][:8]}")
+    assert {row["id"] for row in joined["closed"]} == set(pair), joined
+    err = refuses("no-page-tab", "tab", "close", "no-such-tab-anywhere")
+    assert "no-such-tab-anywhere" in err, err
+    return "a substring closed every match; `--title twin` left `twinx` alone"
+
+
+def c_tab_close_all_except() -> str:
+    """`--all` closes every page tab this CLI drives; `--except` keeps one."""
+    base = base_url()
+    ok_json("tab", "nav", f"{base}/keep-me")
+    extras = [str(ok_json("tab", f"{base}/extra-{n}")["id"]) for n in (1, 2)]
+    reply = ok_json("tab", "close", "--all", "--except", "keep-me")
+    assert reply["all"] is True and reply["except"] == ["keep-me"], reply
+    assert {str(row["id"]) for row in reply["closed"]} == set(extras), reply
+    assert {t["id"] for t in pages(STATE["port"])} == {STATE["tab"]}, \
+        "--except must keep the tab it names"
+    # an exception that matches nothing refuses: a typo cannot close the tab
+    # it was meant to keep
+    refuses("no-page-tab", "tab", "close", "--all", "--except", "nope")
+    assert {t["id"] for t in pages(STATE["port"])} == {STATE["tab"]}, \
+        "the refused call must not have closed anything"
+    # `--except` alone means the same, and two exceptions are allowed
+    extra = str(ok_json("tab", f"{base}/extra-3")["id"])
+    alone = ok_json("tab", "close", "--except", "keep-me")
+    assert [row["id"] for row in alone["closed"]] == [extra], alone
+    assert STATE["tab"] in {t["id"] for t in pages(STATE["port"])}, \
+        "the excepted tab survived --except on its own"
+    # nothing left to close is a SUCCESS that says so, not a failure
+    empty = ok_json("tab", "close", "--all", "--except", "keep-me")
+    assert empty["closed"] == [] and empty["note"], empty
+    return "`--all` took the extras, `--except` kept the fixture both ways"
 
 
 def c_ambiguous_spec_refuses() -> str:
     first = str(ok_json("tab", f"{base_url()}/four-a")["id"])
     second = str(ok_json("tab", f"{base_url()}/four-b")["id"])
-    err = refuses("tab-ambiguous", "tab", "close", "four")
-    assert first[:6] in err or "four" in err, err
+    # a PAGE verb never picks among tabs nobody named...
+    err = refuses("tab-ambiguous", "tab", "info", "four")
+    assert "four" in err, err
     left = {t["id"] for t in pages(STATE["port"])}
     assert first in left and second in left, \
-        "the refusal must not have closed anything"
-    # several specs in ONE call, both verified together
-    reply = ok_json("tab", "close", f"id:{first[:8]}", f"id:{second[:8]}")
+        "the refusal must not have touched anything"
+    # ...while a bulk close is exactly where a SET is the point
+    reply = ok_json("tab", "close", "four")
     assert {row["id"] for row in reply["closed"]} == {first, second}, reply
     left = {t["id"] for t in pages(STATE["port"])}
     assert first not in left and second not in left, left
-    return "ambiguous refused with nothing closed; two specs closed in one call"
+    return "a page verb refuses ambiguity; `tab close` closes the whole set"
 
 
 def c_refusals() -> str:
@@ -1231,6 +1263,7 @@ CHECKS = (
     ("tab close by id prefix", c_close_tab_by_id_prefix),
     ("tab close by substring", c_close_tab_by_substring),
     ("tab close --title/--url closes every exact match", c_tab_close_bulk),
+    ("tab close --all / --except", c_tab_close_all_except),
     ("tab nav reads the address back", c_nav_reads_the_address_back),
     ("tab nav refuses a dead end", c_nav_refuses_a_dead_end),
     ("tab back/forward move the address", c_history_moves_the_address),

@@ -57,8 +57,10 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab [URL...]       open one tab per URL (about:blank when none)
   tab list           every drivable browser's page tabs, by browser
   tab info SPEC      one tab: `id:<prefix>` or a title/url substring
-  tab close SPEC...  close every tab the specs name, verified as a set;
-                     --title V or --url V close every EXACT match instead
+  tab close SPEC... | --title V | --url V | --all [--except SPEC...]
+                     close every tab named, verified as a set; each selector
+                     matches a SET (a substring closes all of them), --all
+                     closes every page tab, --except keeps the ones it names
   tab nav URL [--tab SPEC]       navigate, then read the address back
   tab back|forward [--tab SPEC]  history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
@@ -349,19 +351,50 @@ def cmd_tab_info(rest: list[str], browser: str) -> dict:
     return tab_info(_one(rest, "tab info", required=True), browser=browser)
 
 
-def cmd_tab_close(rest: list[str], browser: str) -> dict:
-    """`tab close SPEC... | --title VALUE | --url URL`.
+def _pop_all(rest: list[str], flag: str,
+             verb: str) -> tuple[list[str], list[str]]:
+    """Remove EVERY `--flag VALUE` (or `--flag=VALUE`), values in order.
 
-    `--title`/`--url` close EVERY tab that matches exactly (case-insensitive):
-    every tab called "a", or every tab on `http://a/`. They take no SPEC, and
-    a SPEC takes no filter — one way to name tabs per call, never both.
+    A repeatable flag needs its own reader: `--except a --except b` is two
+    exceptions, and `_pop` would leave the second one in argv.
+    """
+    out: list[str] = []
+    values: list[str] = []
+    index = 0
+    while index < len(rest):
+        arg = str(rest[index])
+        if arg == flag:
+            if index + 1 >= len(rest):
+                fail("bad-args", f"{verb}: {flag} needs a value")
+            values.append(str(rest[index + 1]))
+            index += 2
+            continue
+        if arg.startswith(flag + "="):
+            values.append(arg.split("=", 1)[1])
+            index += 1
+            continue
+        out.append(arg)
+        index += 1
+    return out, values
+
+
+def cmd_tab_close(rest: list[str], browser: str) -> dict:
+    """`tab close SPEC... | --title V | --url V | --all [--except SPEC...]`.
+
+    SPEC, `--title` and `--url` each name a SET of tabs and close every one of
+    them; `--all` names every page tab this CLI drives, and `--except SPEC`
+    keeps the tabs those specs name (it implies `--all`). One way to name tabs
+    per call, never two.
     """
     rest, title = _pop(rest, "--title", "tab close")
     rest, url = _pop(rest, "--url", "tab close")
+    rest, every = _switch(rest, "--all")
+    rest, excepts = _pop_all(rest, "--except", "tab close")
     for arg in rest:
         if str(arg).startswith("-"):
             fail("bad-args", f"tab close: unknown flag {arg!r}")
-    return close_tabs(rest, browser=browser, title=title, url=url)
+    return close_tabs(rest, browser=browser, title=title, url=url,
+                      all_tabs=every, excepts=excepts)
 
 
 def cmd_tab_nav(rest: list[str], browser: str) -> dict:
