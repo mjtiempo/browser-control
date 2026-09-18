@@ -85,7 +85,19 @@ DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
 <div id="tall"></div>
 <button id="below" aria-label="Below Button">below</button>
 <input id="field" type="text">
+<form id="ins-form">
+  <input id="ins" type="text" aria-label="Insert Target">
+  <input id="pw" type="password" aria-label="Password Field">
+  <button id="ins-go" type="submit">send</button>
+</form>
+<input id="upload" type="file" style="display:none">
 <script>
+  window.__keys = 0;
+  document.addEventListener('keydown', () => { window.__keys += 1; });
+  document.getElementById('ins-form')
+    .addEventListener('submit', (e) => {
+      e.preventDefault(); document.title = 'submitted';
+    });
   const root = document.getElementById('host').attachShadow({mode: 'open'});
   root.innerHTML =
     '<button id="in-shadow" aria-label="Shadow Action">shadow</button>';
@@ -104,8 +116,11 @@ DOM_FRAME = ("<!doctype html><title>frame</title>"
 
 
 def env() -> dict[str, str]:
-    """The environment every CLI call gets: the throwaway root, and ours."""
-    return {**os.environ, "BROWSER_CONTROL_ROOT": ROOT}
+    """The environment every CLI call gets: the throwaway root, and an action
+    log INSIDE it — so redaction can be asserted and the user's real log is
+    never touched."""
+    return {**os.environ, "BROWSER_CONTROL_ROOT": ROOT,
+            "BROWSER_CONTROL_LOG": os.path.join(ROOT, "actions.jsonl")}
 
 
 # ------------------------------------------------------------------- harness
@@ -558,6 +573,85 @@ def c_dom_reveal_then_click() -> str:
     return "an off-screen button was revealed by CDP and then clicked"
 
 
+def c_dom_focus_insert_and_type() -> str:
+    """`tab focus` → `tab insert` → `tab type`, each with its read-back."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    focused = ok_json("tab", "focus", "Insert Target")
+    assert focused["focused"] is True, focused
+    inserted = ok_json("tab", "insert", "hello")
+    assert inserted["verified"] is True, inserted
+    assert inserted["length_after"] - inserted["length_before"] == 5, inserted
+    value = ok_json("tab", "js", "document.querySelector('#ins').value")
+    assert value["value"] == "hello", value
+    typed = ok_json("tab", "type", " xy")
+    assert typed["verified"] is True, typed
+    keys = int(ok_json("tab", "js", "String(window.__keys)")["value"])
+    assert keys >= 3, keys          # one keydown per character, and Enter before
+    return (f"insert {inserted['length_before']}→{inserted['length_after']}, "
+            f"type → {keys} keydowns")
+
+
+def c_dom_press_reaches_the_page() -> str:
+    """`tab press` dispatches a real key; the effect is the page's to show."""
+    ok_json("tab", "focus", "Insert Target")
+    pressed = ok_json("tab", "press", "enter")
+    assert pressed["key"] == "Enter", pressed
+    assert pressed["verified"] is False, pressed      # declared unverified
+    title = ok_json("tab", "js", "document.title")["value"]
+    assert title == "submitted", title               # the form's handler ran
+    err = refuses("bad-args", "tab", "press", "nope")
+    assert "unknown key" in err, err
+    refuses("focus-not-verified", "tab", "focus", "Dom Fixture Heading")
+    return "Enter reached the form handler; an unknown key and an unfocusable heading refused"
+
+
+def c_dom_upload_attaches_a_file() -> str:
+    """`tab upload` fills the one control JavaScript cannot: a HIDDEN input."""
+    path = os.path.join(tempfile.gettempdir(), "browser-control-upload.txt")
+    Path(path).write_text("uploaded by the battery\n", encoding="utf-8")
+    size = os.path.getsize(path)
+    try:
+        reply = ok_json("tab", "upload", path, "--selector", "#upload")
+        files = reply["input"]["files"]
+        assert [f["name"] for f in files] == [os.path.basename(path)], reply
+        assert files[0]["size"] == size, reply
+        refuses("no-file", "tab", "upload", "/nope/missing.txt")
+        refuses("bad-args", "tab", "upload", "relative.txt")
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    return f"the hidden input holds {os.path.basename(path)} ({size} bytes)"
+
+
+def c_dom_password_never_reaches_the_log() -> str:
+    """A proven secret is written as a length: `redacted: true`, no text."""
+    secret = f"battery-{os.getpid()}-not-in-the-log"
+    ok_json("tab", "focus", "Password Field")
+    inserted = ok_json("tab", "insert", secret)
+    assert inserted["verified"] is True, inserted
+    log = Path(ROOT, "actions.jsonl")
+    assert log.exists(), "the battery's own action log was not written"
+    text = log.read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in text.splitlines()]
+    marked = [row for row in rows
+              if row.get("redacted") and row["args"][:1] == ["insert"]]
+    assert marked, rows[-3:]
+    assert secret not in json.dumps(marked[-1]), marked[-1]
+    assert marked[-1]["args"][1].startswith("<redacted:"), marked[-1]
+    assert secret not in text, "the secret reached the log"
+    return f"the password insert logged {marked[-1]['args'][1]}"
+
+
+def c_dom_text_needs_a_focus() -> str:
+    """Typing with nothing focused refuses instead of doing nothing quietly."""
+    ok_json("tab", "nav", "about:blank")
+    err = refuses("no-focus", "tab", "insert", "x")
+    assert "tab focus" in err, err
+    err = refuses("no-focus", "tab", "type", "x")
+    assert "nothing is focused" in err, err
+    return "insert and type refused with no focus, naming the fix"
+
+
 def c_ambiguous_spec_refuses() -> str:
     first = str(ok_json("tab", f"{base_url()}/four-a")["id"])
     second = str(ok_json("tab", f"{base_url()}/four-b")["id"])
@@ -860,6 +954,11 @@ CHECKS = (
     ("tab scroll wheels the page and nested scrollers",
      c_dom_scroll_moves_the_document_and_nested),
     ("tab scroll reveals, then click lands", c_dom_reveal_then_click),
+    ("tab focus, insert, type", c_dom_focus_insert_and_type),
+    ("tab press reaches the page", c_dom_press_reaches_the_page),
+    ("tab upload fills a hidden input", c_dom_upload_attaches_a_file),
+    ("a password never reaches the log", c_dom_password_never_reaches_the_log),
+    ("typing needs a focus", c_dom_text_needs_a_focus),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),

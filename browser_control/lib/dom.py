@@ -43,15 +43,20 @@ Contracts worth stating because they were measured, not assumed:
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
 # The private helpers below are this layer's contract with lib.browser: the
 # tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
+from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
 from browser_control.lib import browser as tabs  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
-from browser_control.lib.errors import fail  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ControlError,
+    fail,
+)
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
@@ -62,6 +67,29 @@ EVAL_TIMEOUT_S = 15.0
 SCROLL_EDGE_STEP = 2500     # one wheel notch when scrolling to an edge
 SCROLL_EDGE_STEPS = 12      # and how many of them an edge is worth
 SCROLL_MOVE_S = 4.0         # how long one wheel is given to move something
+TYPE_PAUSE_S = 0.008        # between keystrokes: the page's handlers need air
+
+# The keys `press` can send, and the exact (key, code, virtual key code, text)
+# a CDP key event needs. A wrong triple SILENTLY does nothing in the page, so
+# a free-form key string is not the honest surface: an unknown name refuses
+# and names the table. Only Enter and Space carry text (a keyDown without text
+# does not submit a form).
+KEYS = {
+    "enter": ("Enter", "Enter", 13, "\r"),
+    "tab": ("Tab", "Tab", 9, ""),
+    "escape": ("Escape", "Escape", 27, ""),
+    "backspace": ("Backspace", "Backspace", 8, ""),
+    "delete": ("Delete", "Delete", 46, ""),
+    "space": (" ", "Space", 32, " "),
+    "arrowup": ("ArrowUp", "ArrowUp", 38, ""),
+    "arrowdown": ("ArrowDown", "ArrowDown", 40, ""),
+    "arrowleft": ("ArrowLeft", "ArrowLeft", 37, ""),
+    "arrowright": ("ArrowRight", "ArrowRight", 39, ""),
+    "home": ("Home", "Home", 36, ""),
+    "end": ("End", "End", 35, ""),
+    "pageup": ("PageUp", "PageUp", 33, ""),
+    "pagedown": ("PageDown", "PageDown", 34, ""),
+}
 
 # One prelude for every verb that looks at the page: the element set, the
 # label, the role, the geometry, the hit-test, a SHADOW-PIERCING query, and a
@@ -98,6 +126,17 @@ PRELUDE = r"""
     ? role(el) + (attr(el, 'id') ? '#' + attr(el, 'id') : '')
       + (label(el) ? ' ' + label(el).slice(0, 40) : '')
     : null;
+  // A STABLE identity for an element: tag, id and its place in the tree — no
+  // value, no innerText, so typing into it does not change it (which is what
+  // makes it usable for "is this still the same field?").
+  const path = (el) => {
+    if (!el) return null;
+    const chain = [];
+    for (let n = el; n && n.parentElement; n = n.parentElement) {
+      chain.push(Array.prototype.indexOf.call(n.parentElement.children, n));
+    }
+    return role(el) + '#' + (attr(el, 'id') || '') + '@' + chain.join('.');
+  };
   const rendered = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return null;
@@ -191,18 +230,66 @@ TEXT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
                               length: full.length, truncated: full.length > cap});
 })())""")
 
-# The element a reveal acts on, as a REMOTE OBJECT (no returnByValue), so it
-# can be turned into a nodeId and handed to `DOM.scrollIntoViewIfNeeded` —
-# a CDP method, not a line of JavaScript.
-REVEAL_EXPR = ("(() => {" + PRELUDE + r"""
+# The element a focus, a reveal or an upload acts on, as a REMOTE OBJECT (no
+# returnByValue), so it can become a nodeId or an objectId for a DOM method —
+# a CDP method, not a line of JavaScript. `__VISIBLE__` is false for upload: a
+# file input is usually hidden on purpose, and hiding it is not a reason to
+# refuse to fill it.
+ELEMENT_EXPR = ("(() => {" + PRELUDE + r"""
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
+        index = __INDEX__, visible = __VISIBLE__;
+  const all = mode === 'selector' ? query(selector)
+    : query(INTERACTIVE).filter(
+        (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  const live = all.filter((el) => !visible || rendered(el) !== null);
+  return live[index] || null;
+})()""")
+
+# Did the DOM focus actually land on that element? (The oracle for `focus`.)
+FOCUS_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
   const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
         index = __INDEX__;
   const all = mode === 'selector' ? query(selector)
     : query(INTERACTIVE).filter(
         (el) => label(el).toLowerCase().indexOf(needle) >= 0);
   const live = all.filter((el) => rendered(el) !== null);
-  return live[index] || null;
-})()""")
+  const el = live[index] || null;
+  return {found: !!el, focused: !!el && el === document.activeElement,
+          active: describe(document.activeElement),
+          tag: el ? el.tagName.toLowerCase() : null};
+})())""")
+
+# What the DOM focus is, before and after text: enough to judge whether the
+# text landed, and NEVER the value itself (a password would ride home in it).
+TEXT_TARGET_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const el = document.activeElement;
+  const empty = !el || el === document.body || el === document.documentElement;
+  const frame = !!(el && el.tagName && el.tagName.toLowerCase() === 'iframe');
+  const value = el && typeof el.value === 'string' ? el.value : null;
+  const editable = !!(el && el.isContentEditable);
+  const text = editable ? textOf(el) : null;
+  return {focused: !empty, frame: frame,
+          editable: !empty && (value !== null || editable),
+          secret: frame || /type\s*=\s*["']?password\b/i.test(
+            (el && el.outerHTML) || ''),
+          active: describe(el), target: path(el),
+          length: value !== null ? value.length
+                  : (text !== null ? text.length : null)};
+})())""")
+
+# What the page thinks a file input holds (the read-back for `upload`).
+FILES_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
+        index = __INDEX__, visible = __VISIBLE__;
+  const all = mode === 'selector' ? query(selector)
+    : query(INTERACTIVE).filter(
+        (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  const live = all.filter((el) => !visible || rendered(el) !== null);
+  const el = live[index] || null;
+  const files = el && el.files ? el.files : null;
+  return {found: !!el, files: files ? Array.from(files).map(
+    (f) => ({name: f.name, size: f.size})) : null};
+})())""")
 
 # The document's scroll position, and the nearest scroller under a point —
 # the thing a wheel THERE would move (a nested container, not the page).
@@ -228,6 +315,27 @@ STATE_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   return {url: location.href, title: document.title,
           active: describe(document.activeElement),
           x: Math.round(scrollX), y: Math.round(scrollY)};
+})())""")
+
+UPLOAD_DEFAULT_SELECTOR = "input[type=file]"
+
+# The candidates a verb that IGNORES visibility acts on: a file input is
+# usually hidden on purpose, and hiding it is not a reason to refuse to fill
+# it. The rows carry the shape `_pick` needs (zeros for geometry), so the
+# ambiguity rule is the same one every other verb uses.
+CANDIDATES_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
+        cap = __CAP__;
+  const all = mode === 'selector' ? query(selector)
+    : query(INTERACTIVE).filter(
+        (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  return {total: all.length, offscreen: 0, truncated: all.length > cap,
+          matches: all.slice(0, cap).map((el) => ({
+            tag: el.tagName.toLowerCase(), role: role(el), name: describe(el),
+            text: label(el).slice(0, 120), in_viewport: false,
+            clipped: false, box: [0, 0, 0, 0], center: [0, 0],
+            viewport: [0, 0, 0, 0], point: [0, 0], hit: false,
+            hit_element: null}))};
 })())""")
 
 WAIT_EXPRS = {
@@ -347,6 +455,82 @@ def _element(row: dict) -> dict:
             ("tag", "role", "name", "type", "href", "text", "in_viewport",
              "clipped", "box", "center", "viewport", "point", "hit",
              "hit_element")}
+
+
+def _match_args(expression: str, needle: str, css: str,
+                index: int | None = None, visible: bool = True) -> str:
+    """Fill the placeholders every matcher expression shares."""
+    filled = (expression
+              .replace("__MODE__", json.dumps("selector" if css else "text"))
+              .replace("__NEEDLE__", json.dumps(needle.lower()))
+              .replace("__SELECTOR__", json.dumps(css))
+              .replace("__VISIBLE__", "true" if visible else "false"))
+    if "__INDEX__" in filled:
+        filled = filled.replace("__INDEX__", str(_int(index)))
+    return filled
+
+
+def _node_of(session: cdp.Session, expression: str) -> int:
+    """The DOM node an element-returning expression resolves to.
+
+    Without `returnByValue` the element comes back as a REMOTE OBJECT that
+    lives as long as the session, and `DOM.requestNode` turns it into the
+    nodeId a DOM method takes — which is how focus and reveal act without a
+    line of JavaScript.
+    """
+    handle = session.handle(expression)
+    if not handle:
+        return 0
+    session.call("DOM.getDocument", {"depth": 0})
+    node = session.call("DOM.requestNode", {"objectId": handle})
+    return _int(node.get("nodeId"))
+
+
+def _text_target(session: cdp.Session) -> dict:
+    """What the DOM focus is right now (see `TEXT_TARGET_EXPR`).
+
+    A probe that cannot answer is reported as an UNREADABLE focus, which the
+    caller treats as a secret (fail closed) and as an oracle that cannot
+    judge.
+    """
+    try:
+        data = session.evaluate(TEXT_TARGET_EXPR)
+    except Exception:                                          # noqa: BLE001
+        return {"focused": True, "frame": True, "editable": True,
+                "secret": True, "active": None, "length": None,
+                "unreadable": True}
+    return data if isinstance(data, dict) else {
+        "focused": True, "frame": True, "editable": True, "secret": True,
+        "active": None, "length": None, "unreadable": True}
+
+
+def _is_secret(probe: dict) -> bool:
+    """Is the focused field a password (or one this page cannot tell us about)?
+
+    Pure, so the policy is testable without a browser: unreadable, a frame, or
+    a `type=password` attribute all mean YES.
+    """
+    return bool(probe.get("secret") or probe.get("frame")
+                or probe.get("unreadable"))
+
+
+def _text_verdict(before: dict, after: dict, chars: int) -> tuple[bool | None, str]:
+    """(verified, why) for a text verb.
+
+    True  — the field is readable and its text grew: the text landed.
+    False — the field is readable and did NOT change: it did not land.
+    None  — the oracle cannot judge (a frame, a canvas, an unreadable value,
+            or a focus that moved): an unclear oracle is not proof of absence.
+    """
+    if after.get("frame") or before.get("frame") \
+            or after.get("length") is None:
+        return None, "the focused field is not readable from this document"
+    if after.get("target") != before.get("target"):
+        return None, "the focus moved while the text was being written"
+    grew = _int(after.get("length")) - _int(before.get("length"))
+    if grew > 0:
+        return True, f"the field grew by {grew} character(s) for {chars}"
+    return False, "the focused field did not change"
 
 
 def _reply(row: dict, tab_row: dict, data: dict) -> dict:
@@ -675,23 +859,11 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
             data: dict) -> dict:
     """`DOM.scrollIntoViewIfNeeded` for one element, then prove it is visible."""
     needle, css = _query_args(text, selector, "tab scroll")
-    handle = session.handle(REVEAL_EXPR
-                            .replace("__MODE__",
-                                     json.dumps("selector" if css else "text"))
-                            .replace("__NEEDLE__", json.dumps(needle.lower()))
-                            .replace("__SELECTOR__", json.dumps(css))
-                            .replace("__INDEX__", str(_int(index))))
-    if not handle:
+    node_id = _node_of(session, _match_args(ELEMENT_EXPR, needle, css, index))
+    if not node_id:
         fail("no-match",
              f"no rendered element matches {needle or css!r}"
              + (f" (--index {index} is past the end)" if index else ""))
-    session.call("DOM.getDocument", {"depth": 0})
-    node = session.call("DOM.requestNode", {"objectId": handle})
-    node_id = _int(node.get("nodeId"))
-    if not node_id:
-        fail("cdp-error",
-             "DOM.requestNode found no node for the element the matcher "
-             "resolved — it may have left the document")
     session.call("DOM.scrollIntoViewIfNeeded", {"nodeId": node_id})
     # prove it: the SAME matcher now finds it inside the viewport
     deadline = time.time() + SCROLL_MOVE_S
@@ -741,3 +913,237 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
                   "length": _int(data.get("length")),
                   "truncated": bool(data.get("truncated"))})
     return reply
+
+
+def focus(text: str | None = None, selector: str | None = None,
+          index: int | None = None, tab: str = "", browser: str = "") -> dict:
+    """`tab focus`: put the DOM focus (the caret) on one element.
+
+    This is the CARET, not the tab's frontmost position — that is `tab
+    activate`. Focusing needs no coordinates, no window focus and no hit-test,
+    so it works on a background tab and while a layer surface owns the pointer;
+    it does scroll the element into view, which is why an element outside the
+    viewport is a perfectly good target. `DOM.focus` is the CDP method, and the
+    read-back is `document.activeElement`.
+    """
+    needle, css = _query_args(text, selector, "tab focus")
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, needle, css, FIND_CAP)
+        element = _pick(data, needle, css, index)
+        node_id = _node_of(session,
+                           _match_args(ELEMENT_EXPR, needle, css, index))
+        if not node_id:
+            fail("no-match",
+                 f"{_describe(element)} left the document before the focus "
+                 "could be set")
+        try:
+            session.call("DOM.focus", {"nodeId": node_id})
+        except ControlError as e:
+            # the protocol says WHY (a disabled control, an element that
+            # cannot be focused): that is the verb's own verdict, not a
+            # generic CDP failure
+            fail("focus-not-verified",
+                 f"{_describe(element)} cannot take the DOM focus: {e.message}")
+        probe = session.evaluate(_match_args(FOCUS_PROBE, needle, css, index))
+    probe = probe if isinstance(probe, dict) else {}
+    if not probe.get("focused"):
+        fail("focus-not-verified",
+             f"{_describe(element)} did not take the DOM focus — "
+             f"{probe.get('active') or 'nothing'} has it instead (a disabled "
+             "control, or an element that cannot be focused)")
+    return {"ok": True, "focused": True, "element": _element(element),
+            "active": probe.get("active"), "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}  # noqa: SLF001
+
+
+def press(key: str, tab: str = "", browser: str = "") -> dict:
+    """`tab press`: one key event at the DOM focus (CDP `Input`).
+
+    Enter submits a focused form, Tab moves on, Escape closes a widget — the
+    page's own handlers run, exactly as if a finger pressed it. The DISPATCH is
+    verified (an error envelope refuses); the effect belongs to the page, so the
+    reply says `verified: false` and the caller reads the outcome with `tab
+    text`, `tab info` or `tab js`.
+    """
+    name = str(key or "").strip().lower()
+    if name not in KEYS:
+        fail("bad-args", f"tab press: unknown key {key!r} "
+                         f"(have: {', '.join(sorted(KEYS))})")
+    key_name, code, vk, text = KEYS[name]
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        down: dict = {"type": "keyDown" if text else "rawKeyDown",
+                      "key": key_name, "code": code,
+                      "windowsVirtualKeyCode": vk,
+                      "nativeVirtualKeyCode": vk}
+        if text:
+            down["text"] = text
+            down["unmodifiedText"] = text
+        session.call("Input.dispatchKeyEvent", down)
+        session.call("Input.dispatchKeyEvent",
+                     {"type": "keyUp", "key": key_name, "code": code,
+                      "windowsVirtualKeyCode": vk,
+                      "nativeVirtualKeyCode": vk})
+    return {"ok": True, "key": key_name, "target": "page",
+            "verified": False,
+            "note": ("the key event was dispatched; read the effect with "
+                     "`tab text`, `tab info` or `tab js`"),
+            "tab": f"id:{tab_row['id']}", "browser": tabs._brief(row)}  # noqa: SLF001
+
+
+def _preflight(session: cdp.Session, text: str, verb: str) -> dict:
+    """Refuse a text write with nowhere to go; mark a PROVEN secret.
+
+    `Input.insertText` into no focus is a silent no-op, and a click target that
+    takes no text is the same trap one step further — both are refusals that
+    name the fix rather than writes nobody can see.
+    """
+    before = _text_target(session)
+    if not before.get("focused"):
+        fail("no-focus",
+             f"{verb}: nothing is focused, so there is nowhere to put the text "
+             "— run `tab focus TEXT` first")
+    if not before.get("editable"):
+        fail("no-focus",
+             f"{verb}: the focus is on {before.get('active')!r}, which takes "
+             "no text — run `tab focus TEXT` first")
+    if _is_secret(before):
+        audit.LOG.mark_secret(text)   # fail closed: a secret, or unreadable
+    return before
+
+
+def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
+                text: str, rung: str) -> dict:
+    """The reply `insert` and `type` share, from the read-back verdict."""
+    verified, why = _text_verdict(before, after, len(text))
+    if verified is not None and not verified:
+        fail(f"{rung}-not-verified",
+             f"{why}: {before.get('active')!r} did not take the "
+             f"{len(text)} character(s)")
+    reply = {"ok": True, "rung": rung, "chars": len(text),
+             "active": after.get("active") or before.get("active"),
+             "verified": bool(verified),
+             "length_before": before.get("length"),
+             "length_after": after.get("length"),
+             "tab": f"id:{tab_row['id']}",
+             "browser": tabs._brief(row)}  # noqa: SLF001
+    if verified is None:
+        reply["note"] = why
+    return reply
+
+
+def insert(text: str, tab: str = "", browser: str = "") -> dict:
+    """`tab insert`: insert TEXT at the DOM focus — ONE atomic input event.
+
+    The durable rung: `Input.insertText` puts the whole string in in one call,
+    the way an IME does, and the read-back judges whether the focused field
+    grew. The text itself is NEVER echoed — a password's value would ride home
+    in the reply — and a password (or an unreadable focus) marks the action log
+    so the secret is written as a length.
+    """
+    value = str(text or "")
+    if not value:
+        fail("bad-args", "tab insert: TEXT is required")
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        before = _preflight(session, value, "tab insert")
+        session.call("Input.insertText", {"text": value})
+        after = _text_target(session)
+    return _text_reply(row, tab_row, before, after, value, "insert")
+
+
+def type_text(text: str, tab: str = "", browser: str = "") -> dict:
+    """`tab type`: type TEXT as REAL per-character key events.
+
+    Three events per character (keyDown, char, keyUp) on ONE connection, for a
+    page whose handlers listen per key (autocomplete, validation, masked
+    inputs). `tab insert` is the rung to try first — this one is slower and
+    exists for the pages where it is the only thing that works. A newline in
+    TEXT becomes an Enter key press; a character outside the Latin-1 range
+    still rides the `char` event even if its virtual key code means nothing.
+    """
+    value = str(text or "")
+    if not value:
+        fail("bad-args", "tab type: TEXT is required")
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        before = _preflight(session, value, "tab type")
+        for char in value:
+            if char == "\n":
+                session.call("Input.dispatchKeyEvent",
+                             {"type": "keyDown", "key": "Enter",
+                              "code": "Enter", "windowsVirtualKeyCode": 13,
+                              "nativeVirtualKeyCode": 13})
+                session.call("Input.dispatchKeyEvent",
+                             {"type": "keyUp", "key": "Enter",
+                              "code": "Enter", "windowsVirtualKeyCode": 13,
+                              "nativeVirtualKeyCode": 13})
+            else:
+                vk = ord(char)
+                base = {"key": char, "code": char,
+                        "windowsVirtualKeyCode": vk,
+                        "nativeVirtualKeyCode": vk}
+                session.call("Input.dispatchKeyEvent",
+                             {"type": "keyDown", **base})
+                session.call("Input.dispatchKeyEvent",
+                             {"type": "char", "text": char, **base})
+                session.call("Input.dispatchKeyEvent",
+                             {"type": "keyUp", **base})
+            time.sleep(TYPE_PAUSE_S)      # the page's handlers need air
+        after = _text_target(session)
+    return _text_reply(row, tab_row, before, after, value, "type")
+
+
+def upload(path: str, selector: str | None = None, index: int | None = None,
+           tab: str = "", browser: str = "") -> dict:
+    """`tab upload`: attach a local file to an `<input type=file>`.
+
+    The one form control page JavaScript cannot fill: `input.files` is
+    read-only and a hidden input cannot be clicked. The route is the CDP method
+    `DOM.setFileInputFiles`, which takes the element as an OBJECT id — so it
+    works through a shadow root too — and the input is usually hidden on
+    purpose, which is why this verb (alone) does not require visibility. The
+    file is a path on THIS machine, checked before the browser is asked
+    anything, and the read-back is what the PAGE thinks it holds: one file,
+    the same name and the same size.
+    """
+    file_path = str(path or "")
+    if not os.path.isabs(file_path):
+        fail("bad-args",
+             f"tab upload: FILE must be an absolute path, got {file_path!r}")
+    if not os.path.isfile(file_path):
+        fail("no-file", f"tab upload: no such file: {file_path}")
+    size = os.path.getsize(file_path)
+    css = str(selector or "").strip() or UPLOAD_DEFAULT_SELECTOR
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        data = session.evaluate(
+            _match_args(CANDIDATES_EXPR, "", css).replace("__CAP__",
+                                                          str(FIND_CAP)))
+        element = _pick(data if isinstance(data, dict) else {},
+                        "", css, index)
+        handle = session.handle(_match_args(ELEMENT_EXPR, "", css, index,
+                                            visible=False))
+        if not handle:
+            fail("no-match",
+                 f"tab upload: {element.get('tag')} left the document before "
+                 "the file could be set")
+        session.call("DOM.setFileInputFiles",
+                     {"files": [file_path], "objectId": handle})
+        got = session.evaluate(_match_args(FILES_EXPR, "", css, index,
+                                           visible=False))
+    got = got if isinstance(got, dict) else {}
+    files = got.get("files")
+    files = files if isinstance(files, list) else []
+    first = files[0] if files and isinstance(files[0], dict) else {}
+    name = os.path.basename(file_path)
+    if len(files) != 1 or first.get("name") != name \
+            or _int(first.get("size"), -1) != size:
+        fail("upload-not-verified",
+             f"tab upload: the page holds {files!r}, not one file named "
+             f"{name!r} of {size} bytes")
+    return {"ok": True, "file": file_path,
+            "input": {"selector": css, "files": files},
+            "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}  # noqa: SLF001

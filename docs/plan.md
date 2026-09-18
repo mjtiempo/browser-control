@@ -157,8 +157,9 @@ Page-level, under `tab`:
 `tab reload` · `tab js EXPR` · `tab wait --for …` ·
 `tab find TEXT|--selector CSS` · `tab text` · `tab click TEXT|--selector CSS` ·
 `tab scroll --by N|--edge top\|bottom|TEXT` ·
-`tab focus-el` · `tab press KEY` ·
-`tab insert-text TEXT` · `tab type-keystrokes TEXT` · `tab upload FILE` ·
+`tab focus TEXT|--selector CSS` ·
+`tab press KEY` · `tab insert TEXT` · `tab type TEXT` ·
+`tab upload FILE [--selector CSS]` ·
 `tab media state|play|pause` · `tab ad-state` · `tab skip-ad`.
 
 A SPEC is a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; one
@@ -183,8 +184,9 @@ or a bare word that is not a URL → `bad-args` (never dropped).
 Delivered so far: `open`, `close`, `list`, `info`, `attach`, `attach --list`,
 `detach`, `tab [URL…]`, `tab list`, `tab info`, `tab close`, `tab nav`,
 `tab back`, `tab forward`, `tab reload`, `tab js`, `tab wait`, `tab find`,
-`tab text`, `tab click`, `tab scroll`, `selftest` — the rest of the list is
-the target surface; [`progress.md`](progress.md) is the state of the work.
+`tab text`, `tab click`, `tab scroll`, `tab focus`, `tab press`, `tab insert`,
+`tab type`, `tab upload`, `selftest` — the rest of the list is the target
+surface; [`progress.md`](progress.md) is the state of the work.
 
 ## 4. Verification appetite
 
@@ -233,18 +235,23 @@ unclear oracle into a claim of absence.**
 
 | Verb | Kind | Oracle | Level | On failure |
 | --- | --- | --- | --- | --- |
-| `tabs` | read | `/json` shape + endpoint ownership | L2 | `cdp-unreachable`, `no-page-tab` |
-| `find` | read | rect + visibility | L2 | `no-match` |
-| `js` | read/write | none (returns the value) | L0 | `cdp-error` only |
-| `wait --for …` | read | the predicate itself, polled | L3 | `wait-timeout` |
-| `nav` | mutation | `readyState` + observed URL + not an error page | L3 | `nav-failed`, `nav-not-verified` |
-| `new-tab` | mutation | the tab row exists, id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
-| `close-tab` | mutation | requested ids absent from the re-read list | L3 | `close-tab-not-verified` (report survivors) |
-| `activate-tab` | mutation | target row re-read + visibility | L2 | `verified:false` + note (a fact, not a refusal) |
-| `focus-el` | mutation | `document.activeElement === el` | L2 | `focus-not-verified` |
-| `press` | mutation | strict envelope only | L1 | `cdp-error` (caller re-reads the effect) |
-| `insert-text`, `type-keystrokes` | mutation | strict envelope + password detection | L1 | `cdp-error` |
-| `upload` | mutation | `input.files` read back (name + size) | L2 | `upload-not-verified` |
+| `tab list` | read | `/json` shape + endpoint ownership | L2 | `cdp-unreachable`, `no-page-tab` |
+| `tab info` | read | the spec resolves to exactly one tab | L2 | `no-page-tab`, `tab-ambiguous` |
+| `tab find` | read | rect + visibility + a real hit-test | L2 | `no-match`, `no-viewport` |
+| `tab text` | read | the page's rendered text, truncated IN the page | L2 | `no-match` |
+| `tab js` | read/write | none (returns the value) | L0 | `js-error`, `eval-timeout`, `result-too-large` |
+| `tab wait --for …` | read | the predicate itself, polled | L3 | `wait-timeout` |
+| `tab nav` · `tab back`/`forward` | mutation | the MOVE first (a new document or a changed address), then `readyState` + not an error page | L3 | `nav-failed`, `nav-not-verified` |
+| `tab reload` | mutation | `performance.timeOrigin` changed: a NEW document | L3 | `reload-not-verified` |
+| `tab [URL…]` | mutation | the tab row exists, the id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
+| `tab close SPEC…` | mutation | every requested id ABSENT from the re-read list | L3 | `close-tab-not-verified` (report survivors) |
+| `tab activate` | mutation | target row re-read + visibility | L2 | `verified:false` + note (a fact, not a refusal) |
+| `tab click` | mutation | hit-test before, then url/title/focus/scroll before-and-after | L4 | `occluded`, `no-viewport-target`, `ambiguous-element` |
+| `tab scroll` | mutation | the polled scroll position of the document and of the scroller under the point | L3 | `scroll-not-verified` |
+| `tab focus` | mutation | `document.activeElement === el` | L2 | `focus-not-verified` (the protocol's own reason) |
+| `tab press` | mutation | the strict dispatch only | L1 | `cdp-error` (the caller reads the effect) |
+| `tab insert` · `tab type` | mutation | the focused field's text LENGTH grew — never the value | L2 | `no-focus`, `insert-not-verified`/`type-not-verified`; `verified:false` when the field is unreadable |
+| `tab upload` | mutation | `input.files` read back (name + size) | L2 | `no-file`, `upload-not-verified` |
 | `media-play/pause` | mutation | `video.paused` read back | L2 | `media-not-verified` |
 | `open` | mutation | window + tab identity re-read | L4 | `launch-failed`, `tab_refused` (window kept, reason named) |
 | `ensure` | mutation | port answers + pid recorded | L3 | `cdp-unreachable` with the real reason |

@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 21 hermetic + 32 live checks passing.
+Repo `main`, worktree clean, 24 hermetic + 37 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,13 +15,14 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 553 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv |
-| `browser_control/lib/dom.py` | 743 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `scroll` |
+| `browser_control/cli/main.py` | 656 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/lib/dom.py` | 1149 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `scroll`, `focus`, `press`, `insert`, `type`, `upload` |
+| `browser_control/lib/audit.py` | 108 | the JSONL action log: fail-open, and a proven secret written as a length |
 | `browser_control/lib/browser.py` | 1281 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
 | `browser_control/lib/cdp.py` | 513 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 787 | 21 hermetic checks, no browser needed |
-| `tests/live_test.py` | 969 | 32 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 936 | 24 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1068 | 37 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -50,6 +51,11 @@ the other verbs own the browser.
 | `tab text [--selector CSS]` | the rendered text | truncated **in the page**, so the reply is bounded and `length` still reports the full size |
 | `tab click TEXT \| --selector CSS [--index N]` | **real input** (`Input.dispatchMouseEvent` move+press+release) at the element's viewport centre | `occluded` when the point reaches something else · `no-viewport-target` when it is off-screen (with the remedy) · `ambiguous-element` for several matches · the reply carries `changed` (url/title/focus/scroll before and after) |
 | `tab scroll --by N \| --edge top\|bottom \| TEXT` | **real wheel input** (`mouseWheel`) or `DOM.scrollIntoViewIfNeeded` for one element | `scroll-not-verified` when a requested edge was not reached, or a wheel moved nothing and the document was not already at that end; the reply names which scroller moved (`document` / `nested`) |
+| `tab focus TEXT \| --selector CSS [--index N]` | the DOM focus (the CARET, not the tab's frontmost position) — `DOM.focus` | `document.activeElement === el`; `focus-not-verified` names why (the protocol says "not focusable", a disabled control) |
+| `tab press KEY` | one key event at the focus — `Input.dispatchKeyEvent` | the dispatch is verified and the reply says `verified: false`: the effect belongs to the page (`tab text`/`tab info`/`tab js` read it); an unknown key is `bad-args` naming the table |
+| `tab insert TEXT` | `Input.insertText` — ONE atomic event | the focused field's **length grew** (`verified: true`), a readable field that did not change refuses `insert-not-verified`, an unreadable one (frame/canvas) reports `verified: false`; `no-focus` when nothing is focused |
+| `tab type TEXT` | real per-character key events (`keyDown`, `char`, `keyUp`) on one connection | same oracle and codes as `insert` (`type-not-verified`) |
+| `tab upload FILE [--selector CSS] [--index N]` | `DOM.setFileInputFiles` (an objectId, so shadow roots work) | `input.files` read back: one file, same name **and size**; `no-file`/`upload-not-verified` |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
@@ -149,12 +155,12 @@ multi-browser test (two live instances refuse), no CI.
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4 and 5.5 have
-landed** (§1, §2), **5.3 is deferred by decision** — the next actionable step
-is 5.6 (input and forms: `tab focus-el`, `tab press`, `tab insert-text`, `tab
-type-keystrokes`, `tab upload`, with the audit log) — and every later verb is
-expected to add its check to `tests/live_test.py`. The CLI grammar is settled
-(§1): page work lives under `tab`, browser work stays top-level.
+Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5 and 5.6
+have landed** (§1, §2), **5.3 is deferred by decision** — the next actionable
+step is 5.7 (media: `tab media state|play|pause`, `tab ad-state`, `tab
+skip-ad`) — and every later verb is expected to add its check to
+`tests/live_test.py`. The CLI grammar is settled (§1): page work lives under
+`tab`, browser work stays top-level.
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -275,13 +281,49 @@ them behind `no-match`, so "not there" and "not in view" are different answers.
 `cdp.Session` keeps ONE connection per verb — a click is three dispatches and
 two reads, a scroll-to-edge is a wheel and a read per step.
 
-### 5.6 Input and forms
-`focus-el`, `press`, `insert-text`, `type-keystrokes`, `upload`. Focus proven
-through `document.activeElement`; password detection (fail-closed) and the
-audit log land here, because redaction has nowhere to write until then;
-`upload` verified through `input.files`.
-*Done when* a password typed through `insert-text` logs a length, not the
-secret, and an upload read-back mismatches → `upload-not-verified`.
+### 5.6 Input and forms — done
+The typing half: `tab focus`, `tab press`, `tab insert`, `tab type`,
+`tab upload` — all five CDP-native (`DOM.focus`, `Input.dispatchKeyEvent`,
+`Input.insertText`, `Input.setFileInputFiles`), with JavaScript only in the
+read-backs.
+
+* **`tab focus`** is the CARET, not the tab's frontmost position (that is `tab
+  activate`) — it needs no coordinates, no window focus and no hit-test, so it
+  works on a background tab and while a layer surface owns the pointer. The
+  read-back is `document.activeElement`, and the protocol's own words survive:
+  a heading answers `ERR[focus-not-verified]: … cannot take the DOM focus:
+  DOM.focus: Element is not focusable`.
+* **`tab press`** sends one key from a fixed table (enter/tab/escape/arrows/
+  home/end/page up-down/space/backspace/delete — Enter and Space carry `text`,
+  without which a form never submits). The dispatch is verified and the reply
+  declares `verified: false`: the effect is the page's, and the battery reads
+  it back (Enter reached the form's submit handler).
+* **`tab insert`** (atomic) and **`tab type`** (per key) share one oracle: a
+  **stable DOM path** plus the field's text LENGTH before and after — never the
+  value, so a password cannot ride home in the reply. A readable field that did
+  not change refuses (`insert-not-verified`/`type-not-verified`); an unreadable
+  one (a frame, a canvas) reports `verified: false`, because an unclear oracle
+  is not proof the text was absent; nothing focused refuses `no-focus` with the
+  remedy (`Input.insertText` into no focus is a silent no-op).
+* **`tab upload`** fills the one control JavaScript cannot (`input.files` is
+  read-only, and the input is usually hidden) via `DOM.setFileInputFiles`,
+  which takes an OBJECT id — so it works through a shadow root — and is the one
+  matcher that does not require visibility.
+* **The action log** (`lib/audit.py`, 108 lines): one JSONL line per CLI call,
+  refusals included, at `~/.local/state/browser-control/actions.jsonl`
+  (`BROWSER_CONTROL_LOG` names it, `off` disables). **Fail-open** — a log that
+  cannot be written never fails a verb — and a verb that PROVES the text it
+  handled is secret marks that exact text, so the line carries
+  `<redacted: N chars>` and `redacted: true` while the rest of it (the verb,
+  the tab spec, the refusal code) survives. Password detection fails CLOSED:
+  a `type=password` field, a focus inside an iframe, or a probe that cannot
+  answer all count as a secret.
+
+The first live run found one bug in the oracle: the "did the focus move?"
+guard compared descriptions that **included the field's value**, so typing
+changed the identity and every `insert` reported `verified: false` while the
+text landed. Fixed with the stable DOM path — and the battery now asserts the
+lengths, the key count, and that the secret is absent from the whole log.
 
 ### 5.7 Media
 `media-state|play|pause` (judged from the read-back), `ad-state`, `skip-ad`

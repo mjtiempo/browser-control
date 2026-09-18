@@ -19,6 +19,7 @@ from collections.abc import Callable
 from browser_control import __version__
 from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
+from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
 from browser_control.lib import dom  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     attach,
@@ -75,6 +76,13 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  wheel until the edge is reached, verified
   tab scroll TEXT|--selector CSS [--index N] [--tab SPEC]
                                  bring one element into view (a CDP method)
+  tab focus TEXT|--selector CSS [--index N] [--tab SPEC]
+                                 put the DOM focus (the caret) on an element
+  tab press KEY [--tab SPEC]     one key event at the focus (enter, tab, …)
+  tab insert TEXT [--tab SPEC]   insert TEXT atomically at the focus
+  tab type TEXT [--tab SPEC]     type TEXT as real per-character key events
+  tab upload FILE [--selector CSS] [--index N] [--tab SPEC]
+                                 attach a file to an <input type=file>
   selftest           prove the install: interpreter, websockets, verbs
 
 SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
@@ -477,6 +485,84 @@ def cmd_tab_scroll(rest: list[str], browser: str) -> dict:
         at=at, tab=spec, browser=browser)
 
 
+def cmd_tab_focus(rest: list[str], browser: str) -> dict:
+    """`tab focus TEXT | --selector CSS [--index N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab focus")
+    rest, selector = _pop(rest, "--selector", "tab focus")
+    rest, index = _pop(rest, "--index", "tab focus")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab focus: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab focus: one TEXT at most, got {len(rest)}")
+    needle = rest[0] if rest else None
+    if (needle is None) == (selector is None):
+        fail("bad-args", "tab focus: give TEXT or --selector CSS, not both")
+    return dom.focus(needle, selector=selector,
+                     index=_int(index, "tab focus --index")
+                     if index is not None else None,
+                     tab=spec, browser=browser)
+
+
+def cmd_tab_press(rest: list[str], browser: str) -> dict:
+    """`tab press KEY [--tab SPEC]` — one key event at the DOM focus."""
+    rest, spec = _tab_flag(rest, "tab press")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab press: unknown flag {arg!r}")
+    if not rest:
+        fail("bad-args", "tab press: KEY is required (enter, tab, escape, …)")
+    if len(rest) > 1:
+        fail("bad-args", f"tab press: one KEY at most, got {len(rest)}")
+    return dom.press(rest[0], tab=spec, browser=browser)
+
+
+def _text_arg(rest: list[str], verb: str, tab: str) -> str:
+    """The single TEXT a writing verb takes — nothing else, and no flags."""
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"{verb}: unknown flag {arg!r}")
+    if not rest:
+        fail("bad-args", f"{verb}: TEXT is required")
+    if len(rest) > 1:
+        fail("bad-args",
+             f"{verb}: one TEXT at most, got {len(rest)} — quote it if it "
+             "has spaces")
+    return rest[0]
+
+
+def cmd_tab_insert(rest: list[str], browser: str) -> dict:
+    """`tab insert TEXT [--tab SPEC]` — atomic insert at the DOM focus."""
+    rest, spec = _tab_flag(rest, "tab insert")
+    return dom.insert(_text_arg(rest, "tab insert", spec), tab=spec,
+                      browser=browser)
+
+
+def cmd_tab_type(rest: list[str], browser: str) -> dict:
+    """`tab type TEXT [--tab SPEC]` — real per-character key events."""
+    rest, spec = _tab_flag(rest, "tab type")
+    return dom.type_text(_text_arg(rest, "tab type", spec), tab=spec,
+                         browser=browser)
+
+
+def cmd_tab_upload(rest: list[str], browser: str) -> dict:
+    """`tab upload FILE [--selector CSS] [--index N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab upload")
+    rest, selector = _pop(rest, "--selector", "tab upload")
+    rest, index = _pop(rest, "--index", "tab upload")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab upload: unknown flag {arg!r}")
+    if not rest:
+        fail("bad-args", "tab upload: FILE is required (an absolute path)")
+    if len(rest) > 1:
+        fail("bad-args", f"tab upload: one FILE at most, got {len(rest)}")
+    return dom.upload(rest[0], selector=selector,
+                      index=_int(index, "tab upload --index")
+                      if index is not None else None,
+                      tab=spec, browser=browser)
+
+
 # `tab`'s subcommands: a reserved first word, so a URL can never be mistaken
 # for one (and vice versa).
 TAB_SUBCOMMANDS: dict[str, Handler] = {
@@ -493,6 +579,11 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
     "wait": cmd_tab_wait,
     "click": cmd_tab_click,
     "scroll": cmd_tab_scroll,
+    "focus": cmd_tab_focus,
+    "press": cmd_tab_press,
+    "insert": cmd_tab_insert,
+    "type": cmd_tab_type,
+    "upload": cmd_tab_upload,
 }
 
 HANDLERS: dict[str, Handler] = {
@@ -539,15 +630,27 @@ def main(argv: list[str] | None = None) -> int:
         print("ERR[bad-args]: a verb is required "
               f"(have: {', '.join(HANDLERS)})", file=sys.stderr)
         return 2
+    verb = ""
+    ok = False
+    code: str | None = None
     try:
         rest, browser = _browser_flag(args)
         verb, rest = rest[0], rest[1:]
+        audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:
             raise ControlError("unknown-command",
                                f"{verb} (have: {', '.join(HANDLERS)})")
         print(json.dumps(handler(rest, browser)))
+        ok = True
         return 0
     except ControlError as e:
+        code = e.code
         print(f"ERR[{e.code}]: {e.message}", file=sys.stderr)
         return 2
+    finally:
+        # one line per invocation, refusals included. A secret the verb PROVED
+        # is written as a length, never as text (lib.audit), and a log that
+        # cannot be written never fails a verb.
+        audit.LOG.write(action=verb, ok=ok, code=code,
+                        args=rest if verb else args)

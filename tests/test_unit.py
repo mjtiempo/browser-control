@@ -23,8 +23,19 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from browser_control.cli import main as cli_main  # noqa: E402  # pyright: ignore[reportMissingImports]
-from browser_control.lib import browser, cdp, dom  # noqa: E402  # pyright: ignore[reportMissingImports]
-from browser_control.lib.errors import ControlError  # noqa: E402  # pyright: ignore[reportMissingImports]
+from browser_control.lib import (  # noqa: E402  # pyright: ignore[reportMissingImports]
+    audit,
+    browser,
+    cdp,
+    dom,
+)
+from browser_control.lib.errors import (  # noqa: E402  # pyright: ignore[reportMissingImports]
+    ControlError,
+)
+
+# A hermetic run must not append to the user's REAL action log: `cli.main`
+# writes one line per invocation, and this suite makes hundreds of them.
+os.environ.setdefault("BROWSER_CONTROL_LOG", "off")
 
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -675,6 +686,141 @@ def t_cli_click_scroll_grammar() -> None:
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
 
 
+def t_keys_and_verdicts() -> None:
+    """The key table is well formed and the text verdict is tri-state."""
+    for name, triple in dom.KEYS.items():                     # noqa: SLF001
+        key, code, vk, text = triple
+        assert key and code and isinstance(text, str), name
+        assert 8 <= vk <= 255, (name, vk)
+    # a keyDown without text does not submit a form: Enter and Space carry it
+    assert dom.KEYS["enter"][3] == "\r"                      # noqa: SLF001
+    assert dom.KEYS["space"][3] == " "                       # noqa: SLF001
+    before = {"active": "input#s", "target": "input#s@0.1",
+              "length": 3, "frame": False}
+    verdicts = [dom._text_verdict(before, after, 3)[0]         # noqa: SLF001
+                for after in (
+                    dict(before, length=6),        # it grew: verified
+                    dict(before, length=3),        # readable, unchanged: NO
+                    dict(before, target="input#t@0.2", length=6),  # moved
+                    dict(before, frame=True, length=6),   # a frame: unclear
+                    dict(before, length=None))]    # no value to read: unclear
+    assert verdicts == [True, False, None, None, None], verdicts
+    secrets = [dom._is_secret(probe) for probe in (            # noqa: SLF001
+        {"secret": True}, {"frame": True}, {"unreadable": True},
+        {"secret": False})]
+    assert secrets == [True, True, True, False], secrets
+
+
+def t_audit_redaction() -> None:
+    """A proven secret never reaches the log; the log never breaks a verb."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            audit.LOG.begin("tab")
+            audit.LOG.write(action="tab", ok=True, args=["insert", "hunter2"])
+            audit.LOG.begin("tab")
+            audit.LOG.mark_secret("hunter2")
+            assert audit.LOG.redacted is True
+            audit.LOG.write(action="tab", ok=False,
+                            code="insert-not-verified",
+                            args=["insert", "hunter2"])
+            with open(path, encoding="utf-8") as handle:
+                rows = [json.loads(line) for line in handle]
+            assert rows[0]["args"] == ["insert", "hunter2"], rows[0]
+            assert rows[0].get("redacted") is None, rows[0]
+            assert rows[1]["args"] == ["insert", "<redacted: 7 chars>"], rows[1]
+            assert rows[1]["redacted"] is True, rows[1]
+            assert rows[1]["ok"] is False and rows[1]["code"], rows[1]
+            # the CONTROL line kept it (nothing was marked yet); the marked
+            # line did not — that is the property, not "the file never held a
+            # string a caller typed before marking it"
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+            assert "hunter2" in lines[0], lines[0]
+            assert "hunter2" not in lines[1], lines[1]
+            # `off` writes nothing at all
+            os.environ["BROWSER_CONTROL_LOG"] = "off"
+            size = os.path.getsize(path)
+            audit.LOG.write(action="tab", args=["x"])
+            assert os.path.getsize(path) == size
+            # an unwritable path is not a failure of the verb
+            os.environ["BROWSER_CONTROL_LOG"] = "/proc/nope/actions.jsonl"
+            audit.LOG.write(action="tab", args=["x"])
+        finally:
+            os.environ.pop("BROWSER_CONTROL_LOG", None)
+            audit.LOG.begin("")
+
+
+def t_cli_input_grammar() -> None:
+    """`tab focus|press|insert|type|upload` argv — flags stripped, none lost."""
+    calls: list[tuple] = []
+
+    def fake_focus(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, tab: str = "",
+                   browser: str = "") -> dict:
+        calls.append(("focus", text, selector, index, tab, browser))
+        return {"ok": True}
+
+    def fake_press(key: str = "", tab: str = "", browser: str = "") -> dict:
+        calls.append(("press", key, tab, browser))
+        return {"ok": True}
+
+    def fake_insert(text: str = "", tab: str = "",
+                    browser: str = "") -> dict:
+        calls.append(("insert", text, tab, browser))
+        return {"ok": True}
+
+    def fake_type(text: str = "", tab: str = "", browser: str = "") -> dict:
+        calls.append(("type", text, tab, browser))
+        return {"ok": True}
+
+    def fake_upload(path: str = "", selector: str | None = None,
+                    index: int | None = None, tab: str = "",
+                    browser: str = "") -> dict:
+        calls.append(("upload", path, selector, index, tab, browser))
+        return {"ok": True}
+
+    originals = (dom.focus, dom.press, dom.insert, dom.type_text, dom.upload)
+    target = os.path.join(tempfile.gettempdir(), "upload-me.txt")
+    (dom.focus, dom.press, dom.insert, dom.type_text,
+     dom.upload) = (fake_focus, fake_press, fake_insert, fake_type,
+                    fake_upload)                       # type: ignore[assignment]
+    try:
+        for argv in (["tab", "focus", "Search Box"],
+                     ["tab", "focus", "--selector", "#s", "--index", "1",
+                      "--tab", "id:AB"],
+                     ["tab", "press", "enter"],
+                     ["tab", "insert", "hello world"],
+                     ["tab", "type", "abc"],
+                     ["tab", "upload", target, "--selector", "#file"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("focus", "Search Box", None, None, "", ""),
+            ("focus", None, "#s", 1, "id:AB", ""),
+            ("press", "enter", "", ""),
+            ("insert", "hello world", "", ""),
+            ("type", "abc", "", ""),
+            ("upload", target, "#file", None, "", ""),
+        ], calls
+    finally:
+        (dom.focus, dom.press, dom.insert, dom.type_text,
+         dom.upload) = originals                      # type: ignore[assignment]
+    # every one of these refuses BEFORE a browser is touched
+    for argv in (["tab", "focus"], ["tab", "focus", "a", "--selector", "b"],
+                 ["tab", "focus", "a", "b"], ["tab", "press"],
+                 ["tab", "press", "enter", "tab"],
+                 ["tab", "press", "nope"], ["tab", "insert"],
+                 ["tab", "insert", "a", "b"], ["tab", "type"],
+                 ["tab", "type", "a", "b"], ["tab", "upload"],
+                 ["tab", "upload", "relative.txt"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    rc, _out, err = run_cli(["tab", "upload", "/nope/missing.txt"])
+    assert rc == 2 and "ERR[no-file]" in err, (rc, err)
+
+
 def t_cmdline_value() -> None:
     """Chrome writes `--flag=value` and `--flag value`; both are read."""
     value = browser._cmdline_value                            # noqa: SLF001
@@ -767,6 +913,9 @@ def main() -> int:
         ("nav/history/reload grammar", t_cli_nav_grammar),
         ("dom verbs' argv", t_cli_dom_grammar),
         ("click/scroll argv", t_cli_click_scroll_grammar),
+        ("keys, verdicts and secrets", t_keys_and_verdicts),
+        ("the log redacts and never fails a verb", t_audit_redaction),
+        ("input verbs' argv", t_cli_input_grammar),
         ("dom shape filters", t_dom_shape_filters),
         ("the net-change test", t_same_page),
         ("one page verb, one tab", t_one_tab_addressing),
