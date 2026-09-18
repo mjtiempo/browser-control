@@ -28,7 +28,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # The sibling modules are not resolvable before the path insert above; the
 # project-level pyright run resolves them, so only `E402` is suppressed here.
 from browser_control.cli import main as cli_main  # noqa: E402
-from browser_control.lib import audit, browser, cdp, dom  # noqa: E402
+from browser_control.lib import (  # noqa: E402
+    audit,
+    browser,
+    capabilities,
+    cdp,
+    dom,
+)
 from browser_control.lib.errors import ControlError  # noqa: E402
 
 # A hermetic run must not append to the user's REAL action log — it makes
@@ -1383,6 +1389,48 @@ def t_endpoint_ownership() -> None:
     assert cdp.listener_of(0) == {}, "port 0 is not a question"
 
 
+def t_capability_surface() -> None:
+    """Every verb is CLASSIFIED, in a closed vocabulary, and `selftest` says so.
+
+    This is the plan's *Kind* column turned into something a policy gate can
+    read: the check and the runtime answer come from the same function, so a
+    verb added without a class fails here AND shows up in the reply.
+    """
+    assert capabilities.unclassified(cli_main.HANDLERS,
+                                    cli_main.TAB_SUBCOMMANDS) == [], \
+        capabilities.unclassified(cli_main.HANDLERS, cli_main.TAB_SUBCOMMANDS)
+    for action, classes in capabilities.ACTIONS.items():
+        assert classes, f"{action} has no class"
+        for name in classes:
+            assert name in capabilities.CLASSES, (action, name)
+        top = action.split()[0]
+        assert top in cli_main.HANDLERS, action
+        parts = action.split()
+        if top == "tab" and len(parts) > 1:
+            assert parts[1] in cli_main.TAB_SUBCOMMANDS, action
+    # the classes a caller would guess, including the ones a MODE decides
+    assert capabilities.ACTIONS["tab js"] == ("code", "write")
+    assert capabilities.ACTIONS["tab text"] == ("read",)
+    assert capabilities.ACTIONS["tab screenshot"] == ("read", "file")
+    assert capabilities.ACTIONS["tab upload"] == ("write", "file")
+    assert capabilities.ACTIONS["tab dialog state"] == ("read",)
+    assert capabilities.ACTIONS["tab dialog accept"] == ("write",)
+    assert capabilities.ACTIONS["tab wait"] == ("read",)
+    assert capabilities.ACTIONS["tab wait --for js"] == ("code",)
+    assert capabilities.ACTIONS["selftest"] == ("read",)
+    # and the reply a caller gets is the table the library declares
+    rc, out, err = run_cli(["selftest"])
+    assert rc == 0, (rc, err)
+    caps = json.loads(out)["capabilities"]
+    assert caps["classes"] == list(capabilities.CLASSES), caps["classes"]
+    assert caps["unclassified"] == [], caps
+    assert caps["by_class"]["code"] == ["tab js", "tab wait --for js"], \
+        caps["by_class"]["code"]
+    assert caps["by_class"]["file"] == ["tab screenshot", "tab upload"], \
+        caps["by_class"]["file"]
+    assert caps["by_class"]["egress"] == [], caps["by_class"]["egress"]
+
+
 def t_pid_alive() -> None:
     assert browser._pid_alive(os.getpid()) is True                 # noqa: SLF001
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
@@ -1412,6 +1460,7 @@ def main() -> int:
         ("a working log makes no scratch directory",
          t_a_working_log_makes_no_scratch_dirs),
         ("the port is checked against the kernel", t_endpoint_ownership),
+        ("every verb is classified", t_capability_surface),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),
         ("media argv", t_cli_media_grammar),

@@ -19,6 +19,7 @@ from collections.abc import Callable
 from browser_control import __version__
 from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
 from browser_control.lib import browser as browser_lib  # pyright: ignore[reportMissingImports]
+from browser_control.lib import capabilities  # pyright: ignore[reportMissingImports]
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib import dom  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
@@ -289,6 +290,14 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
              "profile_root": browser_lib.root(),
              "action_log": audit.LOG.path() or "off",
              "verbs": sorted(HANDLERS),
+             "capabilities": {
+                 "classes": list(capabilities.CLASSES),
+                 "by_class": capabilities.by_class(),
+                 # asked from the SAME function the hermetic test uses, so a
+                 # verb added without a class shows up in this reply instead of
+                 # being quietly missing from a table nobody re-reads
+                 "unclassified": capabilities.unclassified(HANDLERS,
+                                                           TAB_SUBCOMMANDS)},
              "browsers": found}
     if browser:
         reply["requested"] = {"name": browser,

@@ -15,14 +15,15 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 807 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/cli/main.py` | 857 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
 | `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
 | `browser_control/lib/audit.py` | 158 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<timestamp>`, and a proven secret written as a length |
 | `browser_control/lib/browser.py` | 1386 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate` |
 | `browser_control/lib/cdp.py` | 656 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 1250 | 30 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1340 | 45 live checks on a throwaway root, skip ≠ pass |
+| `browser_control/lib/capabilities.py` | 108 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
+| `tests/test_unit.py` | 1484 | 33 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1596 | 51 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -189,7 +190,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.16 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.17 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -557,6 +558,44 @@ reports `verified: false` with that pid, `tab list` shows it under `unverified`,
 and putting the file back drives the real browser again; plus `list` naming the
 verified listener for a healthy browser).
 
+### 5.17 The capability surface — what every verb can DO — done
+
+The plan's *Kind* column turned into something a program can read. A policy
+gate, an agent's own guardrails or a reviewer can now ask "may this run?"
+without hardcoding a verb list that rots the first time a verb is added.
+
+`lib/capabilities.py` declares one entry per RESOLVED ACTION, because a
+subcommand can change the answer — `tab dialog state` reads while
+`tab dialog accept` writes, `tab media state` reads while `tab wait --for load`
+reads and `tab wait --for js` runs caller code:
+
+| class | means | how many |
+| --- | --- | --- |
+| `read` | reads state; /proc and loopback CDP only | 11 |
+| `write` | changes the page, the browser, or this CLI's authorization | 26 |
+| `code` | runs caller-supplied code: `tab js`, `tab wait --for js` | 2 |
+| `file` | touches a path the CALLER named: `tab screenshot`, `tab upload` | 2 |
+| `egress` | would reach the network — nothing yet; the plugin tier will | 0 |
+
+`file` is about the caller's data, not infrastructure: every verb may append to
+the action log and `open` writes a profile, which is the tool's own business.
+
+Three things keep it true rather than decorative:
+
+* **`selftest` reports it** — `capabilities: {classes, by_class,
+  unclassified}`, so the answer comes from the tool itself;
+* **one function, two askers** — `capabilities.unclassified(HANDLERS,
+  TAB_SUBCOMMANDS)` is what `selftest` prints AND what the hermetic test
+  asserts is empty, so a new verb cannot exist in one place and be missing from
+  the other;
+* **the battery checks the shipped surface** — every verb `selftest` lists is
+  covered by a class in the same reply.
+
+It is a DECLARATION, not a sandbox: it says what a verb can reach, and
+enforcement (if ever wanted — `--allow read,file`) belongs to whoever reads it.
+That is why it was the prerequisite for the policy gate and not the gate
+itself.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -571,7 +610,8 @@ passes its own live check through the contract.
 
 ### 5.10 Hardening (parallel, any time)
 Launch/sync lock; a `--profile`/instance selector; richer `stop` identity.
-(The `/proc` ownership guard is DONE — §5.16.)
+(DONE here: the `/proc` ownership guard — §5.16 — and the capability surface —
+§5.17.)
 
 ### 5.11 `open --windowless` — built, measured, REJECTED
 A windowless start (`--no-startup-window`: CDP up, no window, no page) was built

@@ -253,7 +253,11 @@ unclear oracle into a claim of absence.**
    file; the process holding the listening socket is checked in `/proc`, and a
    drive of anything else refuses `cdp-not-local` naming the holder. `list`
    reports the listener, `tab list` reports it under `unverified`.
-10. **Escape hatches are declared unverified.** `js` and `cdp` return the
+10. **The surface is DECLARED.** Every verb carries capability classes
+    (`read`/`write`/`code`/`file`/`egress`) per resolved action in
+    `lib/capabilities.py`; `selftest` reports them and a hermetic check keeps
+    them complete. It declares, it does not enforce.
+11. **Escape hatches are declared unverified.** `js` and `cdp` return the
    protocol's own answer; the caller owns judgment.
 
 ### Per-verb appetite

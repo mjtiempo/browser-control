@@ -409,8 +409,18 @@ def c_selftest() -> str:
     assert data["websockets"] and data["python"], data
     assert Path(data["python"]).exists(), data["python"]
     assert data["browsers"], "selftest found no browser yet the battery runs"
+    # the capability surface ships with the command, and covers every verb it
+    # lists: a policy reader gets the classes, the runtime gets the check
+    caps = data["capabilities"]
+    assert caps["unclassified"] == [], caps
+    covered = {action.split()[0]
+               for actions in caps["by_class"].values()
+               for action in actions}
+    assert set(data["verbs"]) <= covered, (data["verbs"], sorted(covered))
+    assert caps["by_class"]["code"] == ["tab js", "tab wait --for js"], caps
     return (f'{data["version"]} on {data["python_version"]}, '
-            f'websockets {data["websockets"]}')
+            f'websockets {data["websockets"]}, '
+            f'{len(caps["by_class"])} capability classes')
 
 
 def c_open_starts_a_browser() -> str:
