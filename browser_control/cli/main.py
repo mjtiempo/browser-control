@@ -22,6 +22,7 @@ from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
 from browser_control.lib import dom  # pyright: ignore[reportMissingImports]
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
+    activate,
     attach,
     attachments,
     browser_info,
@@ -60,6 +61,17 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab nav URL [--tab SPEC]       navigate, then read the address back
   tab back|forward [--tab SPEC]  history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
+  tab activate [SPEC]            bring a tab forward (it raises its window)
+  tab hover TEXT|--selector CSS [--index N] [--tab SPEC]
+                                 put the pointer on an element (`:hover`)
+  tab check TEXT|--selector CSS [--index N] [--uncheck] [--tab SPEC]
+                                 check a box or radio with real input
+  tab select TEXT|--selector CSS --value V [--index N] [--tab SPEC]
+                                 choose one <option> with real arrow keys
+  tab dialog [state|accept|dismiss] [--text VALUE] [--tab SPEC]
+                                 read, accept or dismiss a JavaScript dialog
+  tab screenshot PATH [--full] [--force] [--tab SPEC]
+                                 write a PNG of the page (its header vouches)
   tab js EXPR [--tab SPEC]       evaluate an expression (can write; unverified)
   tab find TEXT|--selector CSS [--cap N] [--tab SPEC]
                                  a visible element, in PAGE coordinates
@@ -87,8 +99,10 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  read or drive the page's video/audio
   selftest           prove the install: interpreter, websockets, verbs
 
-SPEC   a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; a
-       spec matching nothing, or several tabs, refuses and names them
+SPEC   a CDP target id prefix (`id:2D4BC76C`), `active` (the tab whose page
+       reports itself visible — only one per window), or a title/url
+       substring; a spec matching nothing, or several tabs, refuses and names
+       them
 flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
                         (info/tab list); default: a live managed browser, else
                         the first Chromium-family one on PATH
@@ -318,6 +332,12 @@ def _pop(rest: list[str], flag: str, verb: str) -> tuple[list[str], str | None]:
     return out, value
 
 
+def _switch(rest: list[str], flag: str) -> tuple[list[str], bool]:
+    """Pull a VALUE-LESS flag (`--uncheck`, `--full`, `--force`) out of argv."""
+    given = any(str(arg) == flag for arg in rest)
+    return [arg for arg in rest if str(arg) != flag], given
+
+
 def _tab_flag(rest: list[str], verb: str) -> tuple[list[str], str]:
     """`--tab SPEC`, or "" — the tab a page verb acts on."""
     rest, spec = _pop(rest, "--tab", verb)
@@ -381,6 +401,109 @@ def cmd_tab_reload(rest: list[str], browser: str) -> dict:
     rest, spec = _tab_flag(rest, "tab reload")
     _none(rest, "tab reload")
     return reload(tab=spec, browser=browser)
+
+
+def cmd_tab_activate(rest: list[str], browser: str) -> dict:
+    """`tab activate [SPEC]` — make that tab the frontmost one, verified."""
+    return activate(_one(rest, "tab activate"), browser=browser)
+
+
+def cmd_tab_hover(rest: list[str], browser: str) -> dict:
+    """`tab hover TEXT | --selector CSS [--index N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab hover")
+    rest, selector = _pop(rest, "--selector", "tab hover")
+    rest, index = _pop(rest, "--index", "tab hover")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab hover: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab hover: one TEXT at most, got {len(rest)}")
+    needle = rest[0] if rest else None
+    if (needle is None) == (selector is None):
+        fail("bad-args", "tab hover: give TEXT or --selector CSS, not both")
+    return dom.hover(needle, selector=selector,
+                     index=_int(index, "tab hover --index")
+                     if index is not None else None,
+                     tab=spec, browser=browser)
+
+
+def cmd_tab_check(rest: list[str], browser: str) -> dict:
+    """`tab check TEXT | --selector CSS [--index N] [--uncheck] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab check")
+    rest, selector = _pop(rest, "--selector", "tab check")
+    rest, index = _pop(rest, "--index", "tab check")
+    rest, uncheck = _switch(rest, "--uncheck")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab check: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab check: one TEXT at most, got {len(rest)}")
+    needle = rest[0] if rest else None
+    if (needle is None) == (selector is None):
+        fail("bad-args", "tab check: give TEXT or --selector CSS, not both")
+    return dom.check(needle, selector=selector,
+                     index=_int(index, "tab check --index")
+                     if index is not None else None,
+                     uncheck=uncheck, tab=spec, browser=browser)
+
+
+def cmd_tab_select(rest: list[str], browser: str) -> dict:
+    """`tab select TEXT | --selector CSS --value V [--index N] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab select")
+    rest, selector = _pop(rest, "--selector", "tab select")
+    rest, index = _pop(rest, "--index", "tab select")
+    rest, value = _pop(rest, "--value", "tab select")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab select: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab select: one TEXT at most, got {len(rest)}")
+    needle = rest[0] if rest else None
+    if (needle is None) == (selector is None):
+        fail("bad-args", "tab select: give TEXT or --selector CSS, not both")
+    if value is None:
+        fail("bad-args",
+             "tab select: --value is required — the option's value, or its "
+             "exact label")
+    return dom.select(needle, selector=selector, value=value,
+                      index=_int(index, "tab select --index")
+                      if index is not None else None,
+                      tab=spec, browser=browser)
+
+
+def cmd_tab_dialog(rest: list[str], browser: str) -> dict:
+    """`tab dialog [state|accept|dismiss] [--text VALUE] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab dialog")
+    rest, text = _pop(rest, "--text", "tab dialog")
+    mode = _one(rest, "tab dialog") or "state"
+    if text is not None and mode != "accept":
+        fail("bad-args",
+             "tab dialog: --text is the answer to a prompt — it goes with "
+             "`accept`")
+    return dom.dialog(mode, text=text, tab=spec, browser=browser)
+
+
+def cmd_tab_screenshot(rest: list[str], browser: str) -> dict:
+    """`tab screenshot PATH | --path PATH [--full] [--force] [--tab SPEC]`."""
+    rest, spec = _tab_flag(rest, "tab screenshot")
+    rest, path = _pop(rest, "--path", "tab screenshot")
+    rest, full = _switch(rest, "--full")
+    rest, force = _switch(rest, "--force")
+    for arg in rest:
+        if str(arg).startswith("-"):
+            fail("bad-args", f"tab screenshot: unknown flag {arg!r}")
+    if len(rest) > 1:
+        fail("bad-args", f"tab screenshot: one PATH at most, got {len(rest)}")
+    if rest and path is not None:
+        fail("bad-args",
+             "tab screenshot: give PATH or --path PATH, not both")
+    target = path if path is not None else (rest[0] if rest else "")
+    if not target:
+        fail("bad-args",
+             "tab screenshot: a PATH is required (an absolute path ending in "
+             ".png)")
+    return dom.screenshot(target, full=full, force=force, tab=spec,
+                          browser=browser)
 
 
 def cmd_tab_js(rest: list[str], browser: str) -> dict:
@@ -593,6 +716,12 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
     "back": cmd_tab_back,
     "forward": cmd_tab_forward,
     "reload": cmd_tab_reload,
+    "activate": cmd_tab_activate,
+    "hover": cmd_tab_hover,
+    "check": cmd_tab_check,
+    "select": cmd_tab_select,
+    "dialog": cmd_tab_dialog,
+    "screenshot": cmd_tab_screenshot,
     "js": cmd_tab_js,
     "find": cmd_tab_find,
     "text": cmd_tab_text,

@@ -42,7 +42,11 @@ Contracts worth stating because they were measured, not assumed:
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import contextlib
 import json
+import math
 import os
 import time
 from typing import Any
@@ -67,6 +71,11 @@ EVAL_TIMEOUT_S = 15.0
 SCROLL_EDGE_STEP = 2500     # one wheel notch when scrolling to an edge
 SCROLL_EDGE_STEPS = 12      # and how many of them an edge is worth
 SCROLL_MOVE_S = 4.0         # how long one wheel is given to move something
+CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
+DIALOG_PROBE_S = 1.5        # how long the tab is given to prove it is awake
+DIALOG_CLEAR_S = 3.0        # how long the renderer is given to come back
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+SHOT_MAX_PX = 100_000        # a dimension no screenshot of this page can have
 TYPE_PAUSE_S = 0.008        # between keystrokes: the page's handlers need air
 MEDIA_TIMEOUT_S = 5.0       # how long a play/pause is given to take effect
 
@@ -397,6 +406,90 @@ MEDIA_ACTION_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   return {count: all.length, found: true,
           element: el.tagName.toLowerCase(), paused: el.paused,
           error: window.__bcMediaError || null};
+})())""")
+
+# Did the pointer really LAND on that element? `:hover` is matched by the
+# engine from the real hover state, so it is the page's own answer — and the
+# point must still hit-test into the element (a child counts, an overlay does
+# not).
+HOVER_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
+        index = __INDEX__;
+  const all = mode === 'selector' ? query(selector)
+    : query(INTERACTIVE).filter(
+        (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  const live = all.filter((el) => rendered(el) !== null);
+  const el = live[index] || null;
+  const under = document.elementFromPoint(__X__, __Y__);
+  return {found: !!el,
+          hovered: !!el && el.matches(':hover'),
+          chain: !!el && !!under && (el === under || el.contains(under)),
+          under: under ? describe(under) : null};
+})())""")
+
+# What a checkbox or radio IS and whether it is checked (the oracle for
+# `check`: the control's own property, read before and after the click).
+CHECK_READ = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
+        index = __INDEX__;
+  const all = mode === 'selector' ? query(selector)
+    : query(INTERACTIVE).filter(
+        (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  const live = all.filter((el) => rendered(el) !== null);
+  const el = live[index] || null;
+  if (!el) return {found: false};
+  const tag = el.tagName.toLowerCase();
+  const type = String(el.getAttribute('type') || '').toLowerCase();
+  return {found: true, tag: tag, type: type, name: describe(el),
+          checkable: tag === 'input' && (type === 'checkbox' ||
+                                        type === 'radio'),
+          checked: !!el.checked, disabled: !!el.disabled};
+})())""")
+
+# Which `<option>` a value names, and what the control holds now. Value first,
+# then the exact label: a caller that passes what the user would SEE is not
+# guessing, and the reply says which of the two matched.
+SELECT_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
+        index = __INDEX__, wanted = __VALUE__;
+  const all = mode === 'selector' ? query(selector)
+    : query(INTERACTIVE).filter(
+        (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  const live = all.filter((el) => rendered(el) !== null);
+  const el = live[index] || null;
+  if (!el) return {found: false};
+  const tag = el.tagName.toLowerCase();
+  if (tag !== 'select')
+    return {found: true, tag: tag, is_select: false, name: describe(el)};
+  const options = Array.from(el.options);
+  const optionLabel = (o) => String(o.label || o.text).trim();
+  const byValue = options.filter((o) => String(o.value) === wanted);
+  const byLabel = options.filter((o) => optionLabel(o) === wanted);
+  const chosen = byValue.length ? byValue : byLabel;
+  return {found: true, is_select: true, tag: tag, name: describe(el),
+          multiple: !!el.multiple, disabled: !!el.disabled,
+          value: String(el.value), selected: el.selectedIndex,
+          options: options.length, matched: chosen.length,
+          by: byValue.length ? 'value' : (byLabel.length ? 'label' : 'none'),
+          target: chosen.length === 1 ? options.indexOf(chosen[0]) : -1,
+          target_value: chosen.length === 1
+            ? String(chosen[0].value) : '',
+          target_label: chosen.length === 1
+            ? optionLabel(chosen[0]).slice(0, 60) : '',
+          candidates: chosen.slice(0, 5).map(
+            (o) => String(o.value).slice(0, 40)),
+          labels: options.slice(0, 12).map(
+            (o) => optionLabel(o).slice(0, 40))};
+})())""")
+
+# What the page says its own geometry is — the numbers a screenshot is judged
+# by (the file's own header must match them).
+SHOT_METRICS = ("JSON.stringify((() => {" + PRELUDE + r"""
+  return {iw: innerWidth, ih: innerHeight, dpr: devicePixelRatio,
+          sw: document.documentElement.scrollWidth,
+          sh: document.documentElement.scrollHeight,
+          url: location.href, title: document.title,
+          visibility: document.visibilityState};
 })())""")
 
 WAIT_EXPRS = {
@@ -790,6 +883,523 @@ def click(text: str | None = None, selector: str | None = None,
                      "element.click() take it; `changed` is whether anything "
                      "observable moved"),
             "tab": f"id:{tab_row['id']}", "browser": tabs._brief(row)}  # noqa: SLF001
+
+
+def hover(text: str | None = None, selector: str | None = None,
+          index: int | None = None, tab: str = "", browser: str = "") -> dict:
+    """`tab hover`: put the pointer ON one element, verified by `:hover`.
+
+    Menus, tooltips and CSS-only UI open on a MOVE, not a click, and
+    `Input.dispatchMouseEvent` of type `mouseMoved` is that move. Nothing in
+    the DOM has to change for a hover to have happened, so the oracle is the
+    engine's own hover state: the element (or something inside it) matches
+    `:hover` AND the point still hit-tests into it. A point that reaches
+    another element refuses `occluded` BEFORE any event is sent, exactly like
+    `click` — and the pointer stays where it was put, so a caller that needs
+    another position asks for it.
+    """
+    needle, css = _query_args(text, selector, "tab hover")
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, needle, css, FIND_CAP)
+        element = _pick(data, needle, css, index)
+        if not element.get("in_viewport"):
+            fail("no-viewport-target",
+                 f"{_describe(element)} is at page {element.get('box')}, "
+                 "outside the viewport — scroll it into view first: "
+                 f"`tab scroll {needle or '--selector ' + css!r}`")
+        if not element.get("hit"):
+            fail("occluded",
+                 f"{_describe(element)} is at viewport {element.get('point')} "
+                 f"but that point reaches "
+                 f"{element.get('hit_element') or 'nothing'} instead — "
+                 "something is on top of it")
+        x, y = [_int(v) for v in (element.get("point") or [])][:2]
+        session.call("Input.dispatchMouseEvent",
+                     {"type": "mouseMoved", "x": x, "y": y,
+                      "button": "none", "buttons": 0})
+        probe = session.evaluate(
+            _match_args(HOVER_PROBE, needle, css, index)
+            .replace("__X__", str(x)).replace("__Y__", str(y)))
+    probe = probe if isinstance(probe, dict) else {}
+    if not (probe.get("hovered") and probe.get("chain")):
+        fail("hover-not-verified",
+             f"{_describe(element)} at viewport {[x, y]} does not match "
+             "`:hover` after the pointer moved there "
+             f"({probe.get('under') or 'nothing'} is at that point) — the "
+             "page may re-render, or the element moved between the read and "
+             "the move")
+    return {"ok": True, "hovered": True, "verified": True,
+            "element": _element(element), "point": [x, y],
+            "under": probe.get("under"),
+            "note": ("real input (CDP): one mouseMoved; the read-back is the "
+                     "engine's own `:hover` state"),
+            "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}       # noqa: SLF001
+
+
+def _check_state(session: cdp.Session, needle: str, css: str,
+                 index: int | None) -> dict:
+    """The control's own checked/disabled facts, read from the page."""
+    probe = session.evaluate(_match_args(CHECK_READ, needle, css, index))
+    return probe if isinstance(probe, dict) else {}
+
+
+def _checkable(probe: dict, element: dict) -> None:
+    """Refuse what a click cannot make checked, naming what it is."""
+    if not probe.get("checkable"):
+        kind = str(probe.get("tag") or element.get("tag") or "element")
+        type_ = str(probe.get("type") or "")
+        label = f"{kind}[{type_}]" if type_ else kind
+        fail("not-checkable",
+             f"{_describe(element)} is {label} — `tab check` drives a "
+             "checkbox or a radio button")
+    if probe.get("disabled"):
+        fail("not-checkable",
+             f"{_describe(element)} is disabled — a user cannot change it, "
+             "and neither will this")
+
+
+def check(text: str | None = None, selector: str | None = None,
+          index: int | None = None, uncheck: bool = False, tab: str = "",
+          browser: str = "") -> dict:
+    """`tab check`: make a checkbox (or radio) checked, or not, and read it.
+
+    Real input at the element's centre — the click a user makes — and the
+    oracle is the control's own `checked`. Already in the wanted state means
+    NO click: a click would toggle it away, so the reply is `changed: false`
+    and the read-back still stands behind it.
+    """
+    needle, css = _query_args(text, selector, "tab check")
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    want = not uncheck
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, needle, css, FIND_CAP)
+        element = _pick(data, needle, css, index)
+        before = _check_state(session, needle, css, index)
+        _checkable(before, element)
+        if bool(before.get("checked")) == want:
+            return {"ok": True, "checked": want, "changed": False,
+                    "verified": True, "element": _element(element),
+                    "note": ("already in that state — no click was sent, "
+                             "because a click would toggle it"),
+                    "tab": f"id:{tab_row['id']}",
+                    "browser": tabs._brief(row)}       # noqa: SLF001
+        if not element.get("in_viewport"):
+            fail("no-viewport-target",
+                 f"{_describe(element)} is at page {element.get('box')}, "
+                 "outside the viewport — scroll it into view first: "
+                 f"`tab scroll {needle or '--selector ' + css!r}`")
+        if not element.get("hit"):
+            fail("occluded",
+                 f"{_describe(element)} is at viewport {element.get('point')} "
+                 f"but that point reaches "
+                 f"{element.get('hit_element') or 'nothing'} instead — "
+                 "something is on top of it")
+        x, y = [_int(v) for v in (element.get("point") or [])][:2]
+        for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
+                              ("mouseReleased", 0)):
+            session.call("Input.dispatchMouseEvent",
+                         {"type": kind, "x": x, "y": y, "button": "left",
+                          "buttons": buttons, "clickCount": 1})
+        after = _check_state(session, needle, css, index)
+        deadline = time.time() + CHECK_TIMEOUT_S
+        while bool(after.get("checked")) != want and time.time() < deadline:
+            time.sleep(0.15)
+            after = _check_state(session, needle, css, index)
+    if bool(after.get("checked")) != want:
+        fail("check-not-verified",
+             f"{_describe(element)} reports checked={after.get('checked')} "
+             f"after the click at viewport {[x, y]} — the page may have "
+             "re-set it, or the control is not the one that reacted")
+    return {"ok": True, "checked": want, "changed": True, "verified": True,
+            "element": _element(element), "point": [x, y],
+            "checked_before": bool(before.get("checked")),
+            "note": "real input (CDP); the read-back is the control's own `checked`",
+            "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}           # noqa: SLF001
+
+
+def _select_probe(session: cdp.Session, needle: str, css: str,
+                  index: int | None, value: str) -> dict:
+    """Which option a value names, and what the control holds (see the SQL)."""
+    expression = (_match_args(SELECT_PROBE, needle, css, index)
+                  .replace("__VALUE__", json.dumps(str(value))))
+    probe = session.evaluate(expression)
+    return probe if isinstance(probe, dict) else {}
+
+
+def select(text: str | None = None, selector: str | None = None,
+           value: str = "", index: int | None = None, tab: str = "",
+           browser: str = "") -> dict:
+    """`tab select`: choose one `<option>` with REAL key events.
+
+    A `<select>` popup is the browser's own widget and no CDP method opens it —
+    but it does not need opening: focusing the control and pressing ArrowDown /
+    ArrowUp moves the selection, and measured, that fires the page's own
+    `change` handler with `isTrusted: true`, exactly as a user's choice does.
+    `--value` names an option by its value first, then by its exact label; the
+    read-back is the control's own value and selectedIndex, so a page that
+    ignores or re-sets the choice refuses instead of claiming success.
+    """
+    needle, css = _query_args(text, selector, "tab select")
+    wanted = str(value or "")
+    if not wanted:
+        fail("bad-args",
+             "tab select: --value is required — the option's value, or its "
+             "exact label")
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, needle, css, FIND_CAP)
+        element = _pick(data, needle, css, index)
+        probe = _select_probe(session, needle, css, index, wanted)
+        if not probe.get("is_select"):
+            kind = str(probe.get("tag") or element.get("tag") or "?")
+            fail("not-a-select",
+                 f"{_describe(element)} is a {kind}, not a <select> — this "
+                 "verb picks one option, and only a <select> has options")
+        if probe.get("disabled"):
+            fail("not-a-select",
+                 f"{_describe(element)} is disabled — a user cannot choose in "
+                 "it, and neither will this")
+        if probe.get("multiple"):
+            fail("not-a-select",
+                 f"{_describe(element)} is a multiple select — it holds a "
+                 "SET of options, and this verb sets one (use `tab js`)")
+        matched = _int(probe.get("matched"))
+        if not matched:
+            labels = ", ".join(str(name) for name in
+                               (probe.get("labels") or [])[:12])
+            fail("no-match",
+                 f"no <option> in {_describe(element)} has value or label "
+                 f"{wanted!r} (have: {labels or 'none'})")
+        if matched > 1:
+            candidates = ", ".join(str(name) for name in
+                                   (probe.get("candidates") or [])[:5])
+            fail("ambiguous-option",
+                 f"{matched} options in {_describe(element)} match "
+                 f"{wanted!r}: {candidates} — their VALUES are what tell them "
+                 "apart")
+        target = _int(probe.get("target"), -1)
+        selected = _int(probe.get("selected"), -1)
+        delta = target - selected
+        if not delta:
+            return {"ok": True, "selected": True, "changed": False,
+                    "verified": True, "trusted": True, "keys": 0,
+                    "element": _element(element),
+                    "value": probe.get("value"),
+                    "label": probe.get("target_label"),
+                    "option_index": target, "by": probe.get("by"),
+                    "note": "already selected — no key was sent",
+                    "tab": f"id:{tab_row['id']}",
+                    "browser": tabs._brief(row)}   # noqa: SLF001
+        node_id = _node_of(session,
+                           _match_args(ELEMENT_EXPR, needle, css, index))
+        if not node_id:
+            fail("no-match",
+                 f"{_describe(element)} left the document before the choice "
+                 "could be made")
+        try:
+            session.call("DOM.focus", {"nodeId": node_id})
+        except ControlError as e:
+            fail("select-not-verified",
+                 f"{_describe(element)} cannot take the DOM focus, so the "
+                 f"arrow keys would go elsewhere: {e.message}")
+        key = KEYS["arrowdown" if delta > 0 else "arrowup"]
+        key_name, code, vk, _text = key
+        for _step in range(abs(delta)):
+            session.call("Input.dispatchKeyEvent",
+                         {"type": "rawKeyDown", "key": key_name,
+                          "code": code, "windowsVirtualKeyCode": vk,
+                          "nativeVirtualKeyCode": vk})
+            session.call("Input.dispatchKeyEvent",
+                         {"type": "keyUp", "key": key_name, "code": code,
+                          "windowsVirtualKeyCode": vk,
+                          "nativeVirtualKeyCode": vk})
+        after = _select_probe(session, needle, css, index, wanted)
+        deadline = time.time() + CHECK_TIMEOUT_S
+        while (_int(after.get("selected"), -1) != target
+               and time.time() < deadline):
+            time.sleep(0.15)
+            after = _select_probe(session, needle, css, index, wanted)
+    if _int(after.get("selected"), -1) != target \
+            or str(after.get("value")) != str(probe.get("target_value")):
+        fail("select-not-verified",
+             f"{_describe(element)} reports "
+             f"value={after.get('value')!r} at index "
+             f"{after.get('selected')!r} after {abs(delta)} arrow key(s) — "
+             f"the wanted option is index {target} "
+             f"(value {probe.get('target_value')!r}); the page may ignore the "
+             "key events, or re-set the control")
+    return {"ok": True, "selected": True, "changed": True, "verified": True,
+            "trusted": True, "element": _element(element),
+            "value": after.get("value"), "label": probe.get("target_label"),
+            "option_index": target, "options": probe.get("options"),
+            "by": probe.get("by"), "keys": abs(delta),
+            "value_before": probe.get("value"),
+            "note": ("REAL key events (CDP) on the focused control, so the "
+                     "page's `change` handler sees isTrusted: true"),
+            "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}           # noqa: SLF001
+
+
+NO_DIALOG_NOTE = (
+    "the browser is not showing a JavaScript dialog for this tab. Two ways "
+    "that happens: there is none, or the dialog was SUPPRESSED because no "
+    "client had the Page domain enabled when it opened — there is nothing "
+    "left to answer then, and the renderer stays parked: `tab nav URL` "
+    "replaces the document (and its renderer), `tab close` ends the tab")
+
+# Chromium's own words for "there is no dialog": the one error that makes
+# accept/dismiss definitive rather than a guess.
+NO_DIALOG_MARK = "No dialog is showing"
+
+
+def _no_dialog(error: ControlError) -> bool:
+    """Did the browser refuse because it is showing no dialog of ours?"""
+    return NO_DIALOG_MARK in str(error.message)
+
+
+def dialog(mode: str = "state", text: str | None = None, tab: str = "",
+           browser: str = "") -> dict:
+    """`tab dialog`: read whether a JavaScript dialog is up, or answer it.
+
+    Measured (Chrome 152, headed), and the reason this verb exists:
+
+    * a page's own dialog PARKS its renderer — every read on that tab times
+      out until the dialog is answered;
+    * Chrome SUPPRESSES dialogs for a target whose Page domain was never
+      enabled: the browser shows nothing, `handleJavaScriptDialog` reports
+      "No dialog is showing", and the tab never comes back;
+    * with the domain enabled first, the dialog is announced, answered, and
+      the renderer returns — which is why every session this CLI opens enables
+      it (`cdp.Session`).
+
+    So `state` reports only what can be PROVEN: the tab answering proves no
+    dialog is blocking it (`open: false`), and a tab that cannot answer is
+    reported as `open: null, verified: false` rather than as a claim of
+    absence. `accept`/`dismiss` is the definitive answer — the browser errors
+    for a dialog it is not showing — and its read-back is the renderer
+    answering again.
+    """
+    name = str(mode or "state").strip().lower()
+    if name not in ("state", "accept", "dismiss"):
+        fail("bad-args",
+             f"tab dialog: MODE is state, accept or dismiss, got {mode!r}")
+    if name == "state":
+        row, tab_row = _resolve(tab, browser, for_write=False)
+        opened: object = None
+        verified = False
+        note = ""
+        try:
+            with _session(row, tab_row) as session:
+                try:
+                    session.evaluate("1", timeout=DIALOG_PROBE_S)
+                    opened, verified = False, True
+                    note = ("the tab answers, so no dialog is blocking it "
+                            "(a dialog parks the renderer)")
+                except ControlError as e:
+                    if e.code != "eval-timeout":
+                        raise
+                    note = ("the tab does not answer: a JavaScript dialog it "
+                            "opened, or a script that does not yield — "
+                            "`tab dialog accept|dismiss` tells them apart, "
+                            "because the browser errors for a dialog it is "
+                            "not showing")
+        except ControlError as e:
+            if e.code != "blocked":
+                raise
+            note = ("the tab was already blocked before the Page domain "
+                    "could be enabled — if a dialog did it, Chromium "
+                    "suppressed it and there is nothing left to answer: "
+                    "`tab dialog accept|dismiss` says so for certain, and "
+                    "`tab close` ends it")
+        return {"ok": True, "open": opened, "verified": verified,
+                "blocked": True if opened is None else None, "note": note,
+                "tab": f"id:{tab_row['id']}",
+                "browser": tabs._brief(row)}       # noqa: SLF001
+    # accept | dismiss: NO Page.enable first — a dialog that is already up
+    # cannot be announced any more, and enabling is exactly what blocks on a
+    # parked tab, while the handling command answers regardless
+    params: dict = {"accept": name == "accept"}
+    if text is not None:
+        params["promptText"] = str(text)
+    row, tab_row = _resolve(tab, browser, for_write=True)
+    with cdp.Session(cdp.target_ws(cdp.port_of(str(row["profile"])),
+                                   str(tab_row["id"])),
+                     page_domain=False) as session:
+        try:
+            session.call("Page.handleJavaScriptDialog", params)
+        except ControlError as e:
+            if _no_dialog(e):
+                fail("no-dialog", NO_DIALOG_NOTE)
+            raise
+        answered = False
+        deadline = time.time() + DIALOG_CLEAR_S
+        while time.time() < deadline:
+            try:
+                session.evaluate("1", timeout=0.8)
+                answered = True
+                break
+            except ControlError as e:
+                if e.code not in ("eval-timeout", "cdp-error", "blocked"):
+                    raise
+                time.sleep(0.2)
+    if not answered:
+        fail("dialog-not-verified",
+             f"the {name} was sent, but the tab still does not answer "
+             f"within {DIALOG_CLEAR_S:g}s — a page can open another dialog "
+             "immediately (see `tab dialog state`), or a script is spinning")
+    return {"ok": True, "handled": True, "accepted": name == "accept",
+            "verified": True, "prompt_text": text if text is not None else None,
+            "note": ("the browser answered the dialog and the tab answers "
+                     "again; the dialog's own text is not in this reply — it "
+                     "opened before this connection, and Chromium announces a "
+                     "dialog only once"),
+            "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}           # noqa: SLF001
+
+
+def _png_size(data: bytes) -> list[int]:
+    """[width, height] from the PNG's OWN header, or [] when it is not one.
+
+    The file is judged by its bytes, not by the answer that produced it: a
+    screenshot whose header disagrees with the page's own geometry is refused
+    before it is written anywhere.
+    """
+    if len(data) < 24 or not data.startswith(PNG_SIG) or data[12:16] != b"IHDR":
+        return []
+    return [int.from_bytes(data[16:20], "big"),
+            int.from_bytes(data[20:24], "big")]
+
+
+def _pixels(css: int, dpr: float) -> int:
+    """CSS pixels → device pixels, or a refusal.
+
+    Both numbers come from the PAGE, so a nonsense pair must become a refusal
+    rather than an exception or a silently wrong expectation: this is the value
+    the PNG's own header is compared against.
+    """
+    try:
+        value = int(round(css * dpr))
+    except (OverflowError, ValueError) as e:
+        fail("screenshot-not-verified",
+             f"the page reports {css} px at devicePixelRatio {dpr:g}, which is "
+             f"not a size ({e}) — nothing was written")
+    if not 0 < value <= SHOT_MAX_PX:
+        fail("screenshot-not-verified",
+             f"the page reports {css} px at devicePixelRatio {dpr:g}, i.e. "
+             f"{value} device pixels — no screenshot of it exists — nothing "
+             "was written")
+    return value
+
+
+def _shot_target(path: str) -> str:
+    """The absolute path a screenshot may be written to, or a refusal."""
+    target = os.path.abspath(os.path.expanduser(str(path or "")))
+    if os.path.isdir(target):
+        fail("bad-args", f"tab screenshot: {target} is a directory")
+    if not target.lower().endswith(".png"):
+        fail("bad-args",
+             f"tab screenshot: {path!r} must end in .png — the data IS a PNG, "
+             "and a name that says otherwise is a lie about the file")
+    parent = os.path.dirname(target)
+    if not os.path.isdir(parent):
+        fail("bad-args",
+             f"tab screenshot: {parent} is not a directory — create it first")
+    return target
+
+
+def _write_shot(target: str, data: bytes, force: bool) -> None:
+    """Write the PNG; refuse to clobber unless `force`.
+
+    Without `force` the open is EXCLUSIVE, so "it did not exist" is the
+    kernel's answer rather than a check that can lose a race. With `force` the
+    bytes land on a temporary name and are renamed into place, so a failed
+    write never replaces a good file.
+    """
+    if not force:
+        try:
+            handle = os.open(target,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            fail("file-exists",
+                 f"tab screenshot: {target} already exists — pass --force to "
+                 "replace it")
+        except OSError as e:
+            fail("write-failed", f"tab screenshot: {target}: {e}")
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+        return
+    temp = f"{target}.bc-{os.getpid()}.part"
+    try:
+        with open(temp, "wb") as out:
+            out.write(data)
+        os.replace(temp, target)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            os.remove(temp)
+        fail("write-failed", f"tab screenshot: {target}: {e}")
+
+
+def screenshot(path: str, full: bool = False, force: bool = False,
+               tab: str = "", browser: str = "") -> dict:
+    """`tab screenshot`: the page as a PNG the file's OWN header vouches for.
+
+    A READ: nothing about the page changes, so it needs no `attach` — but it
+    writes a file, which is why the path must be absolute, end in `.png`, and
+    not already exist without `--force`.
+
+    `Page.captureScreenshot` is the CDP method, and the verification is
+    arithmetic rather than faith: the PNG's IHDR must agree with the page's
+    own `innerWidth/innerHeight` (or `scrollWidth/scrollHeight` with `--full`)
+    times `devicePixelRatio` — measured, those are EXACT on this browser. A
+    file that would not match is not written at all.
+    """
+    target = _shot_target(path)
+    row, tab_row = _resolve(tab, browser, for_write=False)
+    with _session(row, tab_row) as session:
+        metrics = session.evaluate(SHOT_METRICS)
+        if not isinstance(metrics, dict):
+            fail("cdp-error", "the page did not report its geometry")
+        shot = session.call("Page.captureScreenshot",
+                            {"format": "png",
+                             "captureBeyondViewport": bool(full)})
+        encoded = str(shot.get("data") or "")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as e:
+            fail("cdp-error",
+                 f"Page.captureScreenshot: the data is not base64 ({e})")
+    dpr = _num(metrics.get("dpr"), 1.0)
+    if not math.isfinite(dpr) or dpr <= 0:
+        fail("screenshot-not-verified",
+             f"the page reports devicePixelRatio {metrics.get('dpr')!r}, which "
+             "no size can be checked against — nothing was written")
+    want = ([_int(metrics.get("sw")), _int(metrics.get("sh"))] if full
+            else [_int(metrics.get("iw")), _int(metrics.get("ih"))])
+    expected = [_pixels(css, dpr) for css in want]
+    size = _png_size(data)
+    if not size:
+        fail("screenshot-not-verified",
+             "the bytes are not a PNG (no signature, no IHDR) — nothing was "
+             "written")
+    if size != expected:
+        fail("screenshot-not-verified",
+             f"the PNG is {size[0]}x{size[1]} but this page says the "
+             f"{'document' if full else 'viewport'} is {want[0]}x{want[1]} CSS "
+             f"px at devicePixelRatio {dpr:g} ({expected[0]}x{expected[1]} "
+             "pixels) — nothing was written")
+    _write_shot(target, data, force)
+    return {"ok": True, "path": target, "bytes": len(data),
+            "width": size[0], "height": size[1], "full": bool(full),
+            "device_pixel_ratio": dpr, "css_size": want, "verified": True,
+            "url": metrics.get("url"), "title": metrics.get("title"),
+            "visibility": metrics.get("visibility"),
+            "note": ("the file's IHDR matches the page's own geometry; a "
+                     "read, so no attach is needed"),
+            "tab": f"id:{tab_row['id']}",
+            "browser": tabs._brief(row)}           # noqa: SLF001
 
 
 def scroll(by: int | None = None, edge: str | None = None,

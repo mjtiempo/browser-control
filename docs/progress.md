@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 26 hermetic + 39 live checks passing.
+Repo `main`, worktree clean, 28 hermetic + 45 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,14 +15,14 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 677 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
-| `browser_control/lib/dom.py` | 1336 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `media` |
-| `browser_control/lib/audit.py` | 108 | the JSONL action log: fail-open, and a proven secret written as a length |
-| `browser_control/lib/browser.py` | 1281 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
-| `browser_control/lib/cdp.py` | 513 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` |
+| `browser_control/cli/main.py` | 806 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
+| `browser_control/lib/audit.py` | 100 | the JSONL action log: fail-open, and a proven secret written as a length |
+| `browser_control/lib/browser.py` | 1386 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate` |
+| `browser_control/lib/cdp.py` | 656 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 1002 | 26 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1151 | 39 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 1178 | 28 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1312 | 45 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -158,15 +158,34 @@ multi-browser test (two live instances refuse), no CI.
    because there is no alternative format yet.
 8. **`stop` refuses when the pid cannot be identified** — honest, but it means
    a browser adopted from another tool cannot be closed by this CLI.
+9. **A suppressed dialog parks a tab for good** — measured: Chrome suppresses a
+   JavaScript dialog no client was attached to answer, and then nothing on the
+   CDP side can clear it (`tab dialog accept` says `no-dialog`, which IS the
+   answer). `tab nav URL` replaces the document and its renderer, which is the
+   way out; `tab close` ends the tab. A page that alerts between two CLI
+   invocations therefore costs that tab its state — the honest limit of a
+   one-shot CLI, and the reason `tab dialog` reports `open: null` instead of
+   guessing.
+10. **Frames are still out of scope** — `find`/`text` see the top document and
+    open shadow roots only (measured and tested); iframe content needs its own
+    target scoping, which nothing needs yet.
+11. **The default action log never writes** — `~/.local/state/browser-control/`
+    is not created, and the log is fail-open, so every default-path write is
+    silently dropped (observed while checking that a test run had not touched
+    it: the file does not exist). Either create the directory in
+    `audit.ActionLog.write` or say that `BROWSER_CONTROL_LOG` must point at a
+    directory that exists.
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6 and
-5.7 have landed** (§1, §2), **5.3 and the ad functions are deferred by
-decision** — the next actionable step is 5.8 (headless search: `search QUERY
-[--engine …]`) — and every later verb is expected to add its check to
-`tests/live_test.py`. The CLI grammar is settled (§1): page work lives under
-`tab`, browser work stays top-level.
+Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
+5.12 and 5.13 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+(search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
+measured and rejected**. What is left in the CORE is **5.10: the launch/sync
+lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
+all three deferred at the operator's request, not forgotten. Every later verb
+is expected to add its check to `tests/live_test.py`; the CLI grammar is
+settled (§1).
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -357,6 +376,57 @@ The battery gets its media **offline**: the fixture records a canvas with
 `MediaRecorder` into a blob and hands it to a muted, looping `<video>`, so
 `play` has something the browser will actually start without a gesture.
 
+### 5.13 Pointer, form, dialog and screenshot verbs — done (A–D, F)
+
+Six verbs, each verified by the page's own answer rather than by a call that
+returned:
+
+| Verb | Oracle (what makes it `verified: true`) |
+| --- | --- |
+| `tab activate [SPEC]` | the page's own `document.visibilityState`, before and after `Page.bringToFront`; a tab that still reports `hidden` refuses `activate-not-verified` |
+| `tab hover TEXT\|--selector CSS` | the engine's `:hover` state on the element (or something inside it) **and** the point still hit-testing into it; an occluded or moved point refuses before any event is sent |
+| `tab check TEXT\|--selector CSS [--uncheck]` | the control's own `checked`, read before and after a real click; already in the wanted state means NO click (a click would toggle it away) |
+| `tab select TEXT\|--selector CSS --value V` | the control's own `value`/`selectedIndex` after REAL arrow keys — by value first, then exact label |
+| `tab dialog [state\|accept\|dismiss] [--text V]` | the renderer answering again (accept/dismiss), or the tab answering at all (`open: false`); the browser's own "No dialog is showing" is what makes a refusal definitive |
+| `tab screenshot PATH [--full] [--force]` | the PNG's own IHDR against the page's reported geometry × `devicePixelRatio`; a mismatch writes nothing |
+
+Measured while building them (Chrome 152, headed), and what shaped the design:
+
+1. **Dialogs are suppressed unless a client has the Page domain enabled.**
+   `open`-time alone is not enough: a dialog that opens while nobody is
+   attached parks the renderer **forever** — `Page.handleJavaScriptDialog`
+   reports "No dialog is showing", every `Runtime.evaluate` times out, and
+   even `location.href = …` cannot run. With the domain enabled first, the
+   dialog is announced (`type`, `message`), handled in 0.0 s, and the renderer
+   returns. **Every session this CLI opens now enables the domain**, which is
+   why a dialog raised during a verb is NAMED in the refusal (in ~1.1 s, not
+   the 15 s budget) instead of becoming a mystery timeout.
+2. **`Page.navigate` is the way out of a parked tab** (0.0 s reply, the
+   renderer is replaced, the tab answers again) — which is why `tab nav` is
+   now a browser-side command instead of a `location.href` assignment. It also
+   removes the old "an assignment the page ignored" ambiguity, and a URL the
+   browser turns into a download is named as one.
+3. **`<select>` needs no popup**: focusing the control and pressing ArrowDown /
+   ArrowUp moves the selection, and the page's `change` handler sees
+   `isTrusted: true` — real input, not a DOM write.
+4. **`:hover` is observable**: after one `mouseMoved` the element matches
+   `:hover` (ancestors match too, hence the hit-test half of the oracle).
+5. **Screenshot geometry is exactly `dim × devicePixelRatio`**: viewport mode
+   matches `innerWidth/innerHeight`, `--full` matches
+   `scrollWidth/scrollHeight` (1852×4202 in the battery's window), so the
+   IHDR comparison is a real oracle and not a ritual.
+6. **`active` is scoped to the browsers this CLI DRIVES.** The user's own
+   Chrome has a visible tab in its window as well; counting it made every
+   `--tab active` refuse `tab-ambiguous` (measured). It is a RESERVED spec,
+   like `tab list` is a reserved subcommand.
+
+Battery: six new checks (activation round-trip, `:hover`, check/uncheck with
+trusted events, select by value and by label, PNG on disk vs the page,
+and the dialog naming + `tab nav` recovery). Hermetic: the six verbs' argv,
+every page expression's `JSON.stringify((() => {…})())` wrap and placeholder
+filling (a missing bracket is invisible to Python and shipped once as
+`js-error: SyntaxError`), the PNG helpers, and the dialog-mode check.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -403,6 +473,16 @@ that can, and that is the plugin tier's business (5.9).
    (5.9) is deferred.
 7. ~~**`js` reply cap**~~ — answered: REFUSE past the cap
    (`result-too-large`); do not truncate.
+8. ~~**How to answer a JavaScript dialog**~~ — answered by measurement: with
+   the Page domain enabled first, `accept`/`dismiss` answer a dialog the
+   browser is still showing and verify it by the renderer returning; a dialog
+   that was suppressed (nobody attached when it opened) has nothing left to
+   answer, and the verb says exactly that (`no-dialog`) instead of pretending.
+   `tab nav URL` is the recovery for the tab it parked (§4.9, §5.13).
+9. ~~**What `--tab active` means**~~ — answered: the tab whose page reports
+   itself visible **among the browsers this CLI drives** (managed or attached).
+   The user's own browser has visible tabs too, and including them made the
+   spec useless (§5.13).
 8. ~~**`find` scope**~~ — answered: top document + open shadow roots
    (iframes out of scope, stated and tested).
 9. **Policy gate** for code-executing verbs (`tab js`, `tab wait --for js`,

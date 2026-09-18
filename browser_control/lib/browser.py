@@ -903,6 +903,46 @@ def stop(browser: str = "") -> dict:
     return {"ok": True, "stopped": True, "pid": pid, "profile": profile}
 
 
+ACTIVE_SPEC = "active"
+
+
+def _visible(profile: str, target_id: str) -> bool | None:
+    """Does that tab's page report itself visible? None when it cannot say.
+
+    `document.visibilityState` is what makes a tab "the active one": measured
+    in this project, a hidden tab still has a viewport, layout and hit-testing,
+    so geometry cannot tell the two apart — this can.
+    """
+    try:
+        return _eval(profile, target_id, "document.visibilityState",
+                     timeout=5) == "visible"
+    except ControlError:
+        return None
+
+
+def _spec_hits(rows: list[dict], tabs_of: dict,
+               spec: str) -> list[tuple[dict, dict, int]]:
+    """Every tab of every drivable browser a spec names.
+
+    `active` is a RESERVED spec — the tab whose page answers `visible`, at most
+    one per window, among the browsers this CLI DRIVES — so a page whose title
+    merely contains the word is reached by `id:` or a longer substring, the
+    same way `tab list` can never mean a site called "list".
+    """
+    if str(spec).strip().lower() == ACTIVE_SPEC:
+        return [(row, tab, index)
+                for row in rows
+                for index, tab in enumerate(tabs_of[row["pid"]])
+                if _visible(str(row["profile"]), str(tab["id"]))]
+    hits: list[tuple[dict, dict, int]] = []
+    for row in rows:
+        tabs = tabs_of[row["pid"]]
+        positions = {str(t["id"]): index for index, t in enumerate(tabs)}
+        hits += [(row, tab, positions[str(tab["id"])])
+                 for tab in _match_spec(tabs, spec)]
+    return hits
+
+
 def _resolve_across(specs: list[str], browser: str,
                     for_write: bool) -> list[tuple[dict, dict, int]]:
     """[(browser row, tab, index)] for every spec, across the drivable ones.
@@ -922,13 +962,20 @@ def _resolve_across(specs: list[str], browser: str,
     tabs_of = {row["pid"]: _tabs_of(row)[0] for row in rows}
     found: list[tuple[dict, dict, int]] = []
     for spec in specs:
-        hits: list[tuple[dict, dict, int]] = []
-        for row in rows:
-            tabs = tabs_of[row["pid"]]
-            positions = {str(t["id"]): index
-                         for index, t in enumerate(tabs)}
-            hits += [(row, tab, positions[str(tab["id"])])
-                     for tab in _match_spec(tabs, spec)]
+        # `active` is about the browser this CLI DRIVES: the user's own Chrome
+        # has a visible tab in its own window as well, and counting it would
+        # make every `--tab active` refuse — the same reason an unqualified tab
+        # verb picks among OUR browsers instead of every browser on the machine
+        if str(spec).strip().lower() == ACTIVE_SPEC:
+            own = [row for row in rows if row["managed"] or row["attached"]]
+            hits = _spec_hits(own, tabs_of, spec)
+            if not hits:
+                fail("no-page-tab",
+                     "no tab of a browser this CLI drives reports itself "
+                     "VISIBLE — read one with `tab list`, or name it with "
+                     "`--tab SPEC`")
+        else:
+            hits = _spec_hits(rows, tabs_of, spec)
         if not hits:
             have = ", ".join(f'{t["title"][:20] or t["url"][:20]} '
                              f'({r["exe"]})'
@@ -1035,6 +1082,7 @@ NAV_TIMEOUT_S = 25.0        # a cold page; long enough, short enough to report
 NAV_MOVE_S = 10.0           # how long the tab gets to LEAVE the old document
 HISTORY_TIMEOUT_S = 10.0
 RELOAD_TIMEOUT_S = 20.0
+ACTIVATE_TIMEOUT_S = 3.0    # a tab becomes visible immediately, or it will not
 # One expression for "the document is there and parsed", read by both the
 # single read and the poll.
 READY_EXPR = "document.readyState + (document.body ? '+body' : '')"
@@ -1195,37 +1243,54 @@ def _wait_new_document(profile: str, target_id: str, before: float,
 
 
 def nav(url: str, tab: str = "", browser: str = "") -> dict:
-    """`tab nav`: navigate ONE tab, and read back where it landed.
+    """`tab nav`: navigate ONE tab with the BROWSER's own command.
 
-    The assignment returns before the document moves, so the reply carries the
-    address as OBSERVED (`url_read`) and whether the document finished
-    loading. Chromium's own error page refuses `nav-failed`; a tab that never
-    left the page it was on refuses `nav-not-verified`. A redirect is a
-    success: the test is that it MOVED, not that it arrived at the literal
-    string it was handed.
+    `Page.navigate` runs no JavaScript in the page, so a tab whose renderer is
+    parked (a suppressed dialog, a script that never yields) is still
+    navigable — the browser replaces the document AND its renderer, which makes
+    this verb the way OUT of that state (measured: the parked tab answers again
+    as soon as the new document commits).
+
+    The read-backs are unchanged: the address as OBSERVED and whether the
+    document finished loading. Chromium refuses the navigation itself for a
+    name that does not resolve (`nav-failed`), a tab that never left the page
+    it was on refuses `nav-not-verified` (a beforeunload prompt, typically),
+    and a URL the browser turns into a DOWNLOAD is named as one: no page
+    navigated, so calling it a navigation would be a lie.
     """
     target = safe_url(url)
     row, tab_row = _one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
     before = _href(profile, target_id)
     before_origin = _time_origin(profile, target_id)
-    _eval(profile, target_id,
-          f"location.href = {json.dumps(target)}; 'navigating'", timeout=10)
+    with cdp.Session(cdp.target_ws(cdp.port_of(profile), target_id)) as session:
+        try:
+            reply = session.call("Page.navigate", {"url": target})
+        except ControlError as e:
+            fail("nav-failed",
+                 f"the browser refused to navigate to {target!r}: {e.message}")
+    refused = str(reply.get("errorText") or "")
+    if reply.get("isDownload"):
+        fail("nav-failed",
+             f"the browser treated {target!r} as a DOWNLOAD, so no page "
+             "navigated and the tab is where it was")
     # FIRST the move, then the load: the document being left is already
     # complete, so "complete" alone would answer before the navigation starts
     moved = _wait_move(profile, target_id, before, before_origin)
     loaded = _wait_document(profile, target_id) if moved else _ready(profile,
                                                                      target_id)
     url_read = _href(profile, target_id)
-    if url_read.startswith("chrome-error://"):
+    if url_read.startswith("chrome-error://") or refused:
         fail("nav-failed",
-             f"the browser could not load {target!r} — the tab is on its own "
+             f"the browser could not load {target!r}"
+             f"{f' ({refused})' if refused else ''} — the tab is on its own "
              "error page (a name that does not resolve, a refused connection "
              "or a certificate problem), not the requested document")
     if not moved and not _same_page(target, before):
         fail("nav-not-verified",
              f"the tab is still at {before!r} after navigating to {target!r} "
-             "— a beforeunload prompt, or an assignment the page ignored")
+             "— a beforeunload prompt the browser is waiting on (`tab dialog "
+             "state`), or a navigation Chromium cancelled")
     return {"ok": True, "tab": f"id:{target_id}", "url": target,
             "url_read": url_read, "loaded": loaded, "moved": moved,
             "browser": _brief(row)}
@@ -1255,6 +1320,46 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
              "browser's own error page")
     return {"ok": True, "direction": direction, "tab": f"id:{target_id}",
             "url_before": before, "url_read": url_read,
+            "browser": _brief(row)}
+
+
+def activate(tab: str = "", browser: str = "") -> dict:
+    """`tab activate`: bring ONE tab to the front, verified by the page.
+
+    `Page.bringToFront` makes the tab the active one and raises its window —
+    the one thing a background tab cannot do for itself, and what a page that
+    visibility-gates (or gets throttled) needs. Chromium is not asked to
+    confirm anything, so the oracle is the page's own
+    `document.visibilityState`: read before, read after, and a tab that still
+    reports `hidden` is a refusal rather than a claim. A second window's own
+    active tab is ALSO visible, which is why `--tab active` is ambiguous with
+    two windows instead of picking one.
+    """
+    row, tab_row = _one_tab(tab, browser, for_write=True)
+    profile, target_id = str(row["profile"]), str(tab_row["id"])
+    with cdp.Session(cdp.target_ws(cdp.port_of(profile), target_id)) as session:
+        before = str(session.evaluate("document.visibilityState") or "")
+        session.call("Page.bringToFront")
+        after = before
+        deadline = time.time() + ACTIVATE_TIMEOUT_S
+        while after != "visible" and time.time() < deadline:
+            time.sleep(0.15)
+            with contextlib.suppress(ControlError):
+                after = str(session.evaluate("document.visibilityState",
+                                             timeout=4) or after)
+    if after != "visible":
+        fail("activate-not-verified",
+             f"the tab still reports visibility={after or 'unreadable'!r} "
+             "after `Page.bringToFront` — its window may be hidden entirely "
+             "(another workspace, or iconified), and this CLI drives "
+             "browsers, not the desktop")
+    return {"ok": True, "activated": True, "verified": True,
+            "tab": f"id:{target_id}", "visibility_before": before,
+            "visibility": after, "changed": before != after,
+            "url": tab_row.get("url"), "title": tab_row.get("title"),
+            "note": ("Page.bringToFront activates the tab and raises its "
+                     "window; the read-back is the page's own "
+                     "document.visibilityState"),
             "browser": _brief(row)}
 
 

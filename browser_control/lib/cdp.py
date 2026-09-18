@@ -281,6 +281,56 @@ def _value_of(result: dict) -> Any:
     return value                          # None for undefined: an answer
 
 
+PAGE_ENABLE_S = 5.0
+PARKED_BUDGET_S = 2.0       # a parked tab will not answer; do not wait long
+DIALOG_GRACE_S = 1.0        # after a dialog opens, how long the reply gets
+DIALOG_EVENT = "Page.javascriptDialogOpening"
+
+BLOCKED_HINT = ("the tab did not answer a command that asks the PAGE "
+                "nothing — its renderer is blocked (a JavaScript dialog, or "
+                "a script that does not yield); `tab dialog state` reports "
+                "what can be proven, and `tab close` ends it")
+
+
+async def _page_enable(ws: Any, rid: int) -> None:
+    """`Page.enable` on a fresh connection, before anything else runs.
+
+    Measured on Chrome 152: a JavaScript dialog a page opens is SUPPRESSED for
+    a target whose Page domain was never enabled — the browser shows nothing,
+    `Page.handleJavaScriptDialog` reports "No dialog is showing", and the
+    renderer stays parked for good. Enabling the domain first makes the page's
+    own dialog a real one: it is announced, it can be answered, the renderer
+    comes back. Enabling changes no bytes, so every session does it.
+
+    The one thing it cannot fix is a tab that was ALREADY blocked (its dialog
+    was suppressed before any client enabled the domain): that refusal says so
+    and names the way out.
+    """
+    await ws.send(json.dumps({"id": rid, "method": "Page.enable",
+                              "params": {}}))
+    deadline = time.time() + PAGE_ENABLE_S
+    while True:
+        try:
+            msg = json.loads(await asyncio.wait_for(
+                ws.recv(), timeout=max(0.1, deadline - time.time())))
+        except TimeoutError as e:
+            raise ControlError("blocked", BLOCKED_HINT) from e
+        except (ValueError, TypeError) as e:
+            raise ControlError(
+                "cdp-error",
+                f"Page.enable: a frame that is not JSON ({e})") from e
+        if msg.get("id") == rid:
+            err = msg.get("error")
+            if err:
+                raise ControlError(
+                    "cdp-error",
+                    f"Page.enable: {err.get('message')} "
+                    f"(code {err.get('code')})")
+            return
+        if time.time() >= deadline:
+            raise ControlError("blocked", BLOCKED_HINT)
+
+
 async def _sample(ws, rid: int, expression: str, budget: float) -> Any:
     """One evaluate on an ALREADY open connection, or TimeoutError."""
     await ws.send(json.dumps({"id": rid, "method": "Runtime.evaluate",
@@ -312,11 +362,12 @@ async def _evaluate(ws_url: str, expression: str, timeout: float) -> Any:
     try:
         async with websockets.connect(ws_url, max_size=2 ** 24,
                                       open_timeout=10) as ws:
+            await _page_enable(ws, 1)      # dialogs must be real, not wedges
             # one send: an expression may WRITE (a nav assignment, a form
             # submit), so there is no retry — the caller's read-back is the
             # recovery
             try:
-                return await _sample(ws, 1, expression, timeout)
+                return await _sample(ws, 2, expression, timeout)
             except TimeoutError as e:
                 raise ControlError("eval-timeout",
                                    f"Runtime.evaluate: {e}") from e
@@ -340,11 +391,13 @@ async def _evaluate_until(ws_url: str, expression: str, accept: Any,
     try:
         async with websockets.connect(ws_url, max_size=2 ** 24,
                                       open_timeout=10) as ws:
+            # a dialog the samples outlive is ANNOUNCED once the domain is on
+            await _page_enable(ws, 1)
             deadline = time.time() + timeout
             while True:
                 samples += 1
                 try:
-                    value = await _sample(ws, samples, expression,
+                    value = await _sample(ws, samples + 1, expression,
                                           max(0.5, deadline - time.time()))
                     if accept(value):
                         return value, samples
@@ -404,16 +457,28 @@ class Session:
     the recovery.
     """
 
-    def __init__(self, ws_url: str, timeout: float = 15.0) -> None:
+    def __init__(self, ws_url: str, timeout: float = 15.0,
+                 page_domain: bool = True) -> None:
+        """`page_domain=False` skips the `Page.enable` every other session
+        starts with. Exactly one verb needs that: `tab dialog` answering a
+        dialog that is ALREADY up, because enabling the domain is what blocks
+        on a parked tab while the handling command answers regardless."""
         if websockets is None:
             fail("no-websockets",
                  "the `websockets` package is required to speak CDP "
                  "(pip install websockets)")
         self._ws_url = _checked_ws(ws_url, "tab")
         self._timeout = timeout
+        self._page_domain = page_domain
+        self.page_domain_ok = True
+        self.parked = False
         self._loop: Any = None
         self._ws: Any = None
         self._rid = 0
+        # what the target PUSHED while a call was in flight (a dialog opening
+        # mid-verb is the one that matters): a refusal can name it instead of
+        # guessing, and it is the only way to know a dialog's own text
+        self.events: list[dict] = []
 
     def _connect(self) -> Any:
         if self._ws is None:
@@ -427,7 +492,56 @@ class Session:
                 raise ControlError("cdp-error",
                                    f"cannot open the tab's connection: "
                                    f"{e}") from e
+            try:
+                if self._page_domain:
+                    self._loop.run_until_complete(_page_enable(self._ws, 1))
+            except ControlError:
+                # A parked tab cannot enable the domain — and that is exactly
+                # when a BROWSER-side command (`Page.navigate`) is the way out,
+                # so the session stays usable and remembers why it is limited.
+                self.page_domain_ok = False
+                self.parked = True
+            self._rid = 1 if self._page_domain else 0    # id 1 was Page.enable
         return self._ws
+
+    def dialog(self) -> dict:
+        """The last dialog this session saw OPEN, or {} — the page's own.
+
+        Only a dialog that opened while this session was live can be here:
+        connecting later cannot see what was announced to somebody else, which
+        is exactly why `tab dialog state` may have to answer `null`.
+        """
+        for msg in reversed(self.events):
+            if msg.get("method") == DIALOG_EVENT:
+                return dict(msg.get("params") or {})
+        return {}
+
+    def _parked_now(self, parked_at: float) -> bool:
+        """Did the reply window close because a dialog parked the renderer?
+
+        Asked as a method because the answer belongs AFTER the wait: computing
+        it before would compare against a deadline we have not reached yet,
+        and the refusal would claim the full budget was spent.
+        """
+        return bool(parked_at) and time.time() >= parked_at
+
+    def _blocked_hint(self) -> str:
+        """What to add to a refusal when the renderer stopped answering."""
+        dialog = self.dialog()
+        if dialog:
+            kind = str(dialog.get("type") or "dialog")
+            message = str(dialog.get("message") or "")[:80]
+            return (f" — it opened a {kind} ({message!r}): `tab dialog accept` "
+                    "or `tab dialog dismiss` answers it while the browser is "
+                    "still showing it, and a tab that stays parked is "
+                    "replaced by `tab nav URL` or closed with `tab close`")
+        if self.parked:
+            return (" — the tab was ALREADY parked when this session opened "
+                    "(a suppressed JavaScript dialog, or a script that does "
+                    "not yield): `tab nav URL` replaces the document and its "
+                    "renderer, `tab close` ends the tab")
+        return (" — the renderer is blocked: a JavaScript dialog it opened, "
+                "or a script that does not yield (see `tab dialog state`)")
 
     async def _call(self, method: str, params: dict, budget: float) -> dict:
         ws = self._ws
@@ -436,14 +550,32 @@ class Session:
         await ws.send(json.dumps({"id": rid, "method": method,
                                   "params": params}))
         deadline = time.time() + budget
+        parked_at = 0.0
         while True:
+            wait = max(0.1, deadline - time.time())
+            if parked_at:
+                # a dialog this session SAW open parks the renderer: the reply
+                # cannot come until somebody answers it, so waiting the whole
+                # budget buys nothing but a slower refusal
+                wait = min(wait, max(0.1, parked_at - time.time()))
             try:
-                msg = json.loads(await asyncio.wait_for(
-                    ws.recv(), timeout=max(0.1, deadline - time.time())))
+                msg = json.loads(await asyncio.wait_for(ws.recv(),
+                                                        timeout=wait))
             except TimeoutError as e:
-                raise ControlError("eval-timeout" if method.startswith(
-                    "Runtime.evaluate") else "cdp-error",
-                    f"{method}: {e}") from e
+                if self._parked_now(parked_at):
+                    raise ControlError(
+                        "blocked",
+                        f"{method}: no reply — the renderer is parked by a "
+                        f"JavaScript dialog{self._blocked_hint()}") from e
+                code = ("eval-timeout" if method.startswith("Runtime.evaluate")
+                        else "cdp-error")
+                if self.parked:
+                    # the tab was parked before this session opened: one code
+                    # for "the renderer is not answering", whatever the call
+                    code = "blocked"
+                raise ControlError(
+                    code, f"{method}: no reply within {budget:g}s"
+                    f"{self._blocked_hint()}") from e
             except (ValueError, TypeError) as e:
                 raise ControlError("cdp-error",
                                    f"{method}: a frame that is not JSON "
@@ -455,18 +587,29 @@ class Session:
                         "cdp-error", f"{method}: {err.get('message')} "
                         f"(code {err.get('code')})")
                 return msg.get("result") or {}
+            if msg.get("method"):
+                self.events.append({"method": msg["method"],
+                                    "params": msg.get("params") or {}})
+                del self.events[:-20]
+                if not parked_at and msg["method"] == DIALOG_EVENT:
+                    parked_at = time.time() + DIALOG_GRACE_S
             if time.time() >= deadline:
                 raise ControlError("cdp-error",
                                    f"{method}: no reply for id {rid} within "
-                                   f"{budget:g}s")
+                                   f"{budget:g}s{self._blocked_hint()}")
 
     def call(self, method: str, params: dict | None = None,
              timeout: float = 0.0) -> dict:
         """One method call on the open connection: the protocol's `result`."""
         self._connect()
+        budget = timeout or self._timeout
+        if self.parked:
+            # nothing will answer: a browser-side command (`Page.navigate`) still
+            # works, so it gets a short budget and its own refusal
+            budget = min(budget, PARKED_BUDGET_S)
         try:
             return self._loop.run_until_complete(
-                self._call(method, params or {}, timeout or self._timeout))
+                self._call(method, params or {}, budget))
         except ControlError:
             raise
         except Exception as e:                                 # noqa: BLE001

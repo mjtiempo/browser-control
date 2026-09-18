@@ -178,6 +178,178 @@ def t_page_rows_from_a_fake_endpoint() -> None:
         server.server_close()
 
 
+def t_cli_new_verbs_grammar() -> None:
+    """`tab activate|hover|check|select|dialog|screenshot` argv — as argv."""
+    calls: list[tuple] = []
+    # argv-only paths: `dom.screenshot` is faked below, so nothing is written
+    shots = os.path.join(tempfile.gettempdir(), "browser-control-argv")
+    shot_a, shot_b, shot_c = (f"{shots}/a.png", f"{shots}/b.png",
+                              f"{shots}/c.png")
+
+    def fake_activate(tab: str = "", browser: str = "") -> dict:
+        calls.append(("activate", tab, browser))
+        return {"ok": True}
+
+    def fake_hover(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, tab: str = "",
+                   browser: str = "") -> dict:
+        calls.append(("hover", text, selector, index, tab, browser))
+        return {"ok": True}
+
+    def fake_check(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, uncheck: bool = False,
+                   tab: str = "", browser: str = "") -> dict:
+        calls.append(("check", text, selector, index, uncheck, tab, browser))
+        return {"ok": True}
+
+    def fake_select(text: str | None = None, selector: str | None = None,
+                    value: str = "", index: int | None = None, tab: str = "",
+                    browser: str = "") -> dict:
+        calls.append(("select", text, selector, value, index, tab, browser))
+        return {"ok": True}
+
+    def fake_dialog(mode: str = "state", text: str | None = None,
+                    tab: str = "", browser: str = "") -> dict:
+        calls.append(("dialog", mode, text, tab, browser))
+        return {"ok": True}
+
+    def fake_shot(path: str, full: bool = False, force: bool = False,
+                  tab: str = "", browser: str = "") -> dict:
+        calls.append(("screenshot", path, full, force, tab, browser))
+        return {"ok": True}
+
+    originals = (cli_main.activate, dom.hover, dom.check, dom.select,
+                 dom.dialog, dom.screenshot)
+    (cli_main.activate, dom.hover, dom.check, dom.select, dom.dialog,
+     dom.screenshot) = (fake_activate, fake_hover, fake_check, fake_select,
+                        fake_dialog, fake_shot)   # type: ignore[assignment]
+    try:
+        for argv in (["tab", "activate"],
+                     ["tab", "activate", "id:AB"],
+                     ["tab", "hover", "Save"],
+                     ["tab", "hover", "--selector", ".x", "--index", "1"],
+                     ["tab", "check", "Tick"],
+                     ["tab", "check", "Tick", "--uncheck",
+                      "--tab", "id:AB"],
+                     ["tab", "select", "--selector", "#pick",
+                      "--value", "green"],
+                     ["tab", "select", "Colour", "--value", "Blue",
+                      "--index", "0"],
+                     ["tab", "dialog"],
+                     ["tab", "dialog", "accept"],
+                     ["tab", "dialog", "dismiss", "--tab", "id:AB"],
+                     ["tab", "dialog", "accept", "--text", "yes"],
+                     ["tab", "screenshot", shot_a],
+                     ["tab", "screenshot", "--path", shot_b,
+                      "--full"],
+                     ["tab", "screenshot", shot_c, "--force",
+                      "--full"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [
+            ("activate", "", ""),
+            ("activate", "id:AB", ""),
+            ("hover", "Save", None, None, "", ""),
+            ("hover", None, ".x", 1, "", ""),
+            ("check", "Tick", None, None, False, "", ""),
+            ("check", "Tick", None, None, True, "id:AB", ""),
+            ("select", None, "#pick", "green", None, "", ""),
+            ("select", "Colour", None, "Blue", 0, "", ""),
+            ("dialog", "state", None, "", ""),
+            ("dialog", "accept", None, "", ""),
+            ("dialog", "dismiss", None, "id:AB", ""),
+            ("dialog", "accept", "yes", "", ""),
+            ("screenshot", shot_a, False, False, "", ""),
+            ("screenshot", shot_b, True, False, "", ""),
+            ("screenshot", shot_c, True, True, "", ""),
+        ], calls
+    finally:
+        (cli_main.activate, dom.hover, dom.check, dom.select, dom.dialog,
+         dom.screenshot) = originals               # type: ignore[assignment]
+    # these refuse in argv, before any browser is involved
+    for argv in (["tab", "activate", "a", "b"],
+                 ["tab", "hover"],
+                 ["tab", "hover", "a", "--selector", "b"],
+                 ["tab", "hover", "a", "--index", "x"],
+                 ["tab", "check"],
+                 ["tab", "check", "a", "b"],
+                 ["tab", "select", "--selector", "#pick"],
+                 ["tab", "select", "--value", "x"],
+                 ["tab", "select", "a", "--value", "x", "--index", "y"],
+                 ["tab", "dialog", "dismiss", "--text", "no"],
+                 ["tab", "screenshot"],
+                 ["tab", "screenshot", "a.png", "--path", "b.png"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
+def t_expressions_and_shot_rules() -> None:
+    """The page expressions are wrapped and filled; the PNG rules refuse.
+
+    A missing bracket in a JavaScript string is INVISIBLE to Python — one
+    shipped as `js-error: SyntaxError` from the page (measured) — and the wrap
+    is what was missing, so the shape is checked here: every expression is
+    `JSON.stringify((() => {…})())`, and every placeholder it declares is one
+    the caller actually fills.
+    """
+    placeholders = {"__MODE__": '"text"', "__NEEDLE__": '"x"',
+                    "__SELECTOR__": '"#x"', "__INDEX__": "0",
+                    "__VISIBLE__": "true", "__CAP__": "1",
+                    "__VALUE__": '"v"', "__X__": "1", "__Y__": "1",
+                    "__EXPR__": "true", "__IDLE_MS__": "100"}
+    seen = 0
+    for name in dir(dom):
+        src = getattr(dom, name)
+        if not name.isupper() or not isinstance(src, str) \
+                or not src.startswith("JSON.stringify"):
+            continue
+        seen += 1
+        assert src.rstrip().endswith(("})())", "})()")), (name, src[-12:])
+        filled = src
+        for key, value in placeholders.items():
+            filled = filled.replace(key, value)
+        left = [word for word in filled.replace("\n", " ").split()
+                if word.startswith("__")]
+        assert not left, (name, left[:3])
+    assert seen >= 10, seen
+    # the reserved spec never reaches the substring matcher
+    rows = [{"pid": 1, "profile": "/p", "managed": True}]
+    assert browser._spec_hits(rows, {1: []}, "active") == []   # noqa: SLF001
+    # a PNG is judged by its bytes, and a device size by sane arithmetic
+    assert dom._png_size(b"") == []                            # noqa: SLF001
+    assert dom._png_size(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20) == []
+    header = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
+              + (1882).to_bytes(4, "big") + (842).to_bytes(4, "big"))
+    assert dom._png_size(header) == [1882, 842]                # noqa: SLF001
+    assert dom._pixels(941, 2) == 1882                          # noqa: SLF001
+    for css, ratio in ((941, float("inf")), (941, float("nan")),
+                       (10 ** 9, 2.0), (10, 0.0), (10, -1.0)):
+        refusal(lambda css=css, ratio=ratio: dom._pixels(css, ratio),
+                "screenshot-not-verified")
+    # the screenshot path rules are pure: no browser, no file
+    with tempfile.TemporaryDirectory() as tmp:
+        refusal(lambda: dom._shot_target(f"{tmp}/x.jpg"),             # noqa: SLF001
+                "bad-args")
+        refusal(lambda: dom._shot_target(f"{tmp}/nope/x.png"),        # noqa: SLF001
+                "bad-args")
+        refusal(lambda: dom._shot_target(tmp),                         # noqa: SLF001
+                "bad-args")
+        assert dom._shot_target(f"{tmp}/ok.png") == f"{tmp}/ok.png"   # noqa: SLF001
+    # a dialog MODE is checked before any tab is resolved, and the browser's
+    # own words are what make accept/dismiss definitive
+    refusal(lambda: dom.dialog("maybe"), "bad-args")
+    assert dom._no_dialog(ControlError(                              # noqa: SLF001
+        "cdp-error", "Page.handleJavaScriptDialog: No dialog is showing "
+        "(code -32602)"))
+    assert not dom._no_dialog(ControlError("cdp-error", "something else"))  # noqa: SLF001
+    # a control that cannot be checked refuses, naming what it is
+    refusal(lambda: dom._checkable({"checkable": False, "tag": "button"},  # noqa: SLF001
+                                   {}), "not-checkable")
+    refusal(lambda: dom._checkable({"checkable": True, "disabled": True},  # noqa: SLF001
+                                   {}), "not-checkable")
+    dom._checkable({"checkable": True, "disabled": False}, {})      # noqa: SLF001
+
+
 def t_cli_dispatch() -> None:
     """One URL, several URLs, and the flags that are stripped — as argv."""
     seen: dict[str, object] = {}
@@ -977,6 +1149,10 @@ def main() -> int:
         ("nav/history/reload grammar", t_cli_nav_grammar),
         ("dom verbs' argv", t_cli_dom_grammar),
         ("click/scroll argv", t_cli_click_scroll_grammar),
+        ("activate/hover/check/select/dialog/screenshot argv",
+         t_cli_new_verbs_grammar),
+        ("page expressions parse; shot and dialog rules",
+         t_expressions_and_shot_rules),
         ("keys, verdicts and secrets", t_keys_and_verdicts),
         ("the log redacts and never fails a verb", t_audit_redaction),
         ("input verbs' argv", t_cli_input_grammar),

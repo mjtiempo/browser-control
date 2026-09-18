@@ -156,14 +156,22 @@ Page-level, under `tab`:
 `tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
 `tab reload` · `tab js EXPR` · `tab wait --for …` ·
 `tab find TEXT|--selector CSS` · `tab text` · `tab click TEXT|--selector CSS` ·
+`tab hover TEXT|--selector CSS` ·
 `tab scroll --by N|--edge top\|bottom|TEXT` ·
 `tab focus TEXT|--selector CSS` ·
 `tab press KEY` · `tab insert TEXT` · `tab type TEXT` ·
-`tab upload FILE [--selector CSS]` ·
+`tab check TEXT|--selector CSS [--uncheck]` ·
+`tab select TEXT|--selector CSS --value V` ·
+`tab upload FILE [--selector CSS]` · `tab screenshot PATH [--full] [--force]` ·
+`tab dialog [state|accept|dismiss] [--text V]` ·
 `tab media state|play|pause` · `tab ad-state` · `tab skip-ad` (the ad verbs
 are DEFERRED by decision: site-specific knowledge belongs to the plugin tier).
 
-A SPEC is a CDP target id prefix (`id:2D4BC76C`) or a title/url substring; one
+A SPEC is a CDP target id prefix (`id:2D4BC76C`), the RESERVED word `active`
+(the tab whose page reports itself visible among the browsers this CLI drives —
+at most one per window; a page whose title merely contains the word is reached
+by `id:` or a longer substring, the way `tab list` is never a site called
+“list”), or a title/url substring; one
 match is required, several refuse with the candidates named. A page verb with
 no `--tab` acts on the only page tab of a browser this CLI DRIVES (managed or
 attached) — never on a tab nobody named, and never made ambiguous by whatever
@@ -243,12 +251,18 @@ unclear oracle into a claim of absence.**
 | `tab text` | read | the page's rendered text, truncated IN the page | L2 | `no-match` |
 | `tab js` | read/write | none (returns the value) | L0 | `js-error`, `eval-timeout`, `result-too-large` |
 | `tab wait --for …` | read | the predicate itself, polled | L3 | `wait-timeout` |
-| `tab nav` · `tab back`/`forward` | mutation | the MOVE first (a new document or a changed address), then `readyState` + not an error page | L3 | `nav-failed`, `nav-not-verified` |
+| `tab nav` · `tab back`/`forward` | mutation | `Page.navigate` (browser-side, so a PARKED renderer still navigates), then the MOVE (a new document or a changed address), then `readyState` + not an error page | L3 | `nav-failed` (an error page, a refused navigation, or a download), `nav-not-verified` |
 | `tab reload` | mutation | `performance.timeOrigin` changed: a NEW document | L3 | `reload-not-verified` |
 | `tab [URL…]` | mutation | the tab row exists, the id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
 | `tab close SPEC…` | mutation | every requested id ABSENT from the re-read list | L3 | `close-tab-not-verified` (report survivors) |
-| `tab activate` | mutation | target row re-read + visibility | L2 | `verified:false` + note (a fact, not a refusal) |
+| `tab activate` | mutation | the page's own `document.visibilityState` before and after `Page.bringToFront` | L2 | `activate-not-verified` (the window may be hidden entirely) |
 | `tab click` | mutation | hit-test before, then url/title/focus/scroll before-and-after | L4 | `occluded`, `no-viewport-target`, `ambiguous-element` |
+| `tab hover` | mutation | the engine's `:hover` state at the point, and that the point still hit-tests into the element | L4 | `hover-not-verified`, `occluded`, `no-viewport-target` |
+| `tab check` | mutation | the control's own `checked`, before and after a real click (no click when it is already in that state) | L2 | `not-checkable`, `check-not-verified` |
+| `tab select` | mutation | the control's own `value`/`selectedIndex` after REAL arrow keys, by value then exact label | L2 | `not-a-select`, `ambiguous-option`, `no-match`, `select-not-verified` |
+| `tab dialog state` | read | the tab answering at all is proof no dialog blocks it; a tab that cannot answer reports `open: null, verified: false`, never a claim of absence | L2 | `blocked` (as a report, not a refusal) |
+| `tab dialog accept\|dismiss` | mutation | the renderer answering AGAIN inside a bounded poll; the browser's own “No dialog is showing” makes the refusal definitive | L3 | `no-dialog`, `dialog-not-verified` |
+| `tab screenshot` | read (+ a local file) | the PNG's own IHDR against the page's `innerWidth/Height` (or `scrollWidth/Height` with `--full`) × `devicePixelRatio`; a mismatch writes nothing | L4 | `screenshot-not-verified`, `file-exists`, `write-failed` |
 | `tab scroll` | mutation | the polled scroll position of the document and of the scroller under the point | L3 | `scroll-not-verified` |
 | `tab focus` | mutation | `document.activeElement === el` | L2 | `focus-not-verified` (the protocol's own reason) |
 | `tab press` | mutation | the strict dispatch only | L1 | `cdp-error` (the caller reads the effect) |

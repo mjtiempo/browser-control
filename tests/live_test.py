@@ -78,6 +78,19 @@ DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
 <input type="text" placeholder="search here">
 <div role="button" tabindex="0">role button</div>
 <button id="hidden-one" style="display:none">Save the thing</button>
+<div id="form-zone" style="position: absolute; left: 0; top: 210px;">
+<select id="pick" aria-label="Pick Colour">
+  <option value="red">Red</option>
+  <option value="green">Green</option>
+  <option value="blue">Blue</option>
+</select>
+<input id="tick" type="checkbox" aria-label="Tick Box">
+<input id="tick-off" type="checkbox" aria-label="Disabled Box" disabled>
+<button id="hover-me" aria-label="Hover Target">hover target</button>
+<button id="ask" aria-label="Ask Button"
+        onclick="alert('battery alert')">ask</button>
+<div id="events">events:</div>
+</div>
 <div id="host"></div>
 <iframe src="/dom-frame" width="200" height="100"></iframe>
 <p id="long-text">__FILLER__</p>
@@ -94,6 +107,13 @@ DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
 <script>
   window.__keys = 0;
   document.addEventListener('keydown', () => { window.__keys += 1; });
+  const note = (text) => {
+    document.getElementById('events').textContent += ' ' + text;
+  };
+  document.getElementById('pick').addEventListener('change', (e) =>
+    note('pick=' + e.target.value + ' trusted=' + e.isTrusted));
+  document.getElementById('tick').addEventListener('change', (e) =>
+    note('tick=' + e.target.checked + ' trusted=' + e.isTrusted));
   document.getElementById('ins-form')
     .addEventListener('submit', (e) => {
       e.preventDefault(); document.title = 'submitted';
@@ -171,21 +191,24 @@ def check(name: str, fn) -> None:                              # noqa: ANN001
         print(f"PASS  {name}  {detail}")
 
 
-def run(*argv: str, timeout: int = TIMEOUT_S) -> tuple[int, str, str]:
+def run(*argv: str, timeout: int = TIMEOUT_S,
+        env_extra: dict | None = None) -> tuple[int, str, str]:
     """One CLI call on the throwaway root: (returncode, stdout, stderr).
 
     The command is executed AS a command, so its own shebang picks the
     interpreter — a checkout script and an installed console script in some
-    other venv both work.
+    other venv both work. `env_extra` overrides entries for THIS call only.
     """
+    call_env = env()
+    call_env.update(env_extra or {})
     proc = subprocess.run([CLI, *argv], capture_output=True, text=True,
-                          timeout=timeout, env=env())
+                          timeout=timeout, env=call_env)
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
-def ok_json(*argv: str) -> dict:
+def ok_json(*argv: str, env_extra: dict | None = None) -> dict:
     """A CLI call that must succeed, as parsed JSON."""
-    rc, out, err = run(*argv)
+    rc, out, err = run(*argv, env_extra=env_extra)
     assert rc == 0, f"{' '.join(argv)} rc={rc}: {err or out}"
     try:
         return json.loads(out)
@@ -732,6 +755,138 @@ def c_dom_media_refuses_what_it_cannot_do() -> str:
     return "a source-less video and a media-less page refused, each named"
 
 
+def c_tab_activate() -> str:
+    """`tab activate` is verified by the page's own visibility, not by a call."""
+    base, fixture = base_url(), str(STATE["tab"])
+    ok_json("tab", "nav", f"{base}/dom")
+    other = str(ok_json("tab", "about:blank")["id"])
+    try:
+        # the tab just created is the active one, so the fixture is background
+        first = ok_json("tab", "activate", f"id:{fixture[:8]}")
+        assert first["visibility_before"] == "hidden", first
+        assert first["visibility"] == "visible", first
+        assert first["changed"] is True and first["verified"] is True, first
+        again = ok_json("tab", "activate", f"id:{fixture[:8]}")
+        assert again["changed"] is False, again
+        # `active` is a reserved spec, and it means OURS (the user's own
+        # browser has a visible tab too, and it must not be a candidate)
+        active = ok_json("tab", "info", "active")
+        assert active["tab"]["id"] == fixture, active
+    finally:
+        ok_json("tab", "close", f"id:{other[:8]}")
+    return "hidden -> visible, read back from the page; `active` resolves to ours"
+
+
+def c_tab_hover() -> str:
+    """`tab hover` is proven by the engine's own `:hover` state."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    reply = ok_json("tab", "hover", "--selector", "#hover-me")
+    assert reply["hovered"] is True and reply["verified"] is True, reply
+    assert reply["point"][0] > 0 and reply["point"][1] > 0, reply
+    refuses("no-match", "tab", "hover", "--selector", "#no-such-thing")
+    refuses("occluded", "tab", "hover", "Covered Button")
+    return "the element matches `:hover` at that point; hidden and covered refuse"
+
+
+def c_tab_check() -> str:
+    """`tab check` clicks for real, reads back, and never double-clicks."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    on = ok_json("tab", "check", "--selector", "#tick")
+    assert on["checked"] is True and on["changed"] is True, on
+    assert on["verified"] is True, on
+    again = ok_json("tab", "check", "--selector", "#tick")
+    assert again["changed"] is False, again          # a click would UNtick it
+    off = ok_json("tab", "check", "--selector", "#tick", "--uncheck")
+    assert off["checked"] is False and off["changed"] is True, off
+    ok_json("tab", "check", "--selector", "#tick")
+    refuses("not-checkable", "tab", "check", "--selector", "#hover-me")
+    refuses("not-checkable", "tab", "check", "--selector", "#tick-off")
+    log = ok_json("tab", "text", "--selector", "#events")
+    assert "tick=true trusted=true" in log["text"], log["text"]
+    assert "tick=false trusted=true" in log["text"], log["text"]
+    return "checked and unchecked with events the page sees as trusted"
+
+
+def c_tab_select() -> str:
+    """`tab select` chooses with REAL arrow keys, by value or by label."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    by_value = ok_json("tab", "select", "--selector", "#pick",
+                       "--value", "green")
+    assert by_value["value"] == "green", by_value
+    assert by_value["by"] == "value" and by_value["keys"] == 1, by_value
+    assert by_value["trusted"] is True, by_value
+    by_label = ok_json("tab", "select", "--selector", "#pick",
+                       "--value", "Blue")
+    assert by_label["value"] == "blue" and by_label["by"] == "label", by_label
+    assert by_label["keys"] == 1, by_label       # green -> blue is one step
+    same = ok_json("tab", "select", "--selector", "#pick", "--value", "blue")
+    assert same["changed"] is False and same["keys"] == 0, same
+    refuses("no-match", "tab", "select", "--selector", "#pick",
+            "--value", "mauve")
+    refuses("not-a-select", "tab", "select", "--selector", "#tick",
+            "--value", "green")
+    log = ok_json("tab", "text", "--selector", "#events")
+    assert "pick=green trusted=true" in log["text"], log["text"]
+    assert "pick=blue trusted=true" in log["text"], log["text"]
+    return "value then label, and the page's change handler sees isTrusted"
+
+
+def c_tab_screenshot() -> str:
+    """`tab screenshot` writes a PNG whose own header matches the page."""
+    ok_json("tab", "nav", f"{base_url()}/dom")
+    path = os.path.join(ROOT, "shot.png")
+    reply = ok_json("tab", "screenshot", path)
+    assert reply["verified"] is True and reply["bytes"] > 1000, reply
+    data = Path(path).read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", data[:8]
+    assert len(data) == reply["bytes"], (len(data), reply["bytes"])
+    assert [int.from_bytes(data[16:20], "big"),
+            int.from_bytes(data[20:24], "big")] == [reply["width"],
+                                                    reply["height"]], reply
+    refuses("file-exists", "tab", "screenshot", path)
+    forced = ok_json("tab", "screenshot", path, "--force")
+    assert forced["bytes"] == reply["bytes"], forced
+    full = ok_json("tab", "screenshot", os.path.join(ROOT, "shot-full.png"),
+                   "--full")
+    assert full["full"] is True and full["height"] >= reply["height"], full
+    refuses("bad-args", "tab", "screenshot", os.path.join(ROOT, "shot.jpg"))
+    refuses("bad-args", "tab", "screenshot", os.path.join(ROOT, "no", "x.png"))
+    return f'{reply["width"]}x{reply["height"]} on disk; --full is taller'
+
+
+def c_tab_dialog() -> str:
+    """A dialog this CLI causes is NAMED, and a parked tab is recoverable.
+
+    Measured, and the reason the verb exists: Chrome suppresses a dialog no
+    client was attached to answer, which parks the renderer for good — so
+    `accept` has to say so for certain (its refusal IS the answer) and the way
+    out is a browser-side `tab nav`, which replaces the document.
+    """
+    base = base_url()
+    ok_json("tab", "nav", f"{base}/dom")
+    quiet = ok_json("tab", "dialog")
+    assert quiet["open"] is False and quiet["verified"] is True, quiet
+    refuses("no-dialog", "tab", "dialog", "dismiss")
+    started = time.time()
+    err = refuses("blocked", "tab", "click", "--selector", "#ask")
+    took = time.time() - started
+    assert "battery alert" in err, err        # the dialog is named, not guessed
+    assert took < 8, took                     # the grace, not a 15s write-off
+    parked = ok_json("tab", "dialog")
+    assert parked["open"] is None and parked["verified"] is False, parked
+    assert parked["blocked"] is True, parked
+    refuses("no-dialog", "tab", "dialog", "accept")   # suppressed: nothing left
+    refuses("blocked", "tab", "text")                 # and every read says so
+    moved = ok_json("tab", "nav", f"{base}/dom")      # the way out
+    assert moved["moved"] is True, moved
+    back = ok_json("tab", "text", "--chars", "40")
+    assert back["length"] > 0, back
+    healthy = ok_json("tab", "dialog")
+    assert healthy["open"] is False, healthy
+    return (f"a click's alert is named in {took:.1f}s; `tab nav` recovers the "
+            "parked renderer")
+
+
 def c_ambiguous_spec_refuses() -> str:
     first = str(ok_json("tab", f"{base_url()}/four-a")["id"])
     second = str(ok_json("tab", f"{base_url()}/four-b")["id"])
@@ -1042,6 +1197,12 @@ CHECKS = (
     ("tab media reads, plays and pauses", c_dom_media_state_play_pause),
     ("tab media refuses what it cannot do",
      c_dom_media_refuses_what_it_cannot_do),
+    ("tab activate makes a background tab visible", c_tab_activate),
+    ("tab hover proves `:hover`", c_tab_hover),
+    ("tab check clicks and reads back", c_tab_check),
+    ("tab select uses real arrow keys", c_tab_select),
+    ("tab screenshot writes a verified PNG", c_tab_screenshot),
+    ("tab dialog names the dialog and recovery works", c_tab_dialog),
     ("an ambiguous spec refuses", c_ambiguous_spec_refuses),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),
