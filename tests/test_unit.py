@@ -10,10 +10,12 @@ CDP HTTP read path against a fake endpoint.
 from __future__ import annotations
 
 import contextlib
+import glob
 import http.server
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,19 +25,17 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from browser_control.cli import main as cli_main  # noqa: E402  # pyright: ignore[reportMissingImports]
-from browser_control.lib import (  # noqa: E402  # pyright: ignore[reportMissingImports]
-    audit,
-    browser,
-    cdp,
-    dom,
-)
-from browser_control.lib.errors import (  # noqa: E402  # pyright: ignore[reportMissingImports]
-    ControlError,
-)
+from browser_control.lib import audit, browser, cdp, dom  # noqa: E402  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import ControlError  # noqa: E402  # pyright: ignore[reportMissingImports]
 
-# A hermetic run must not append to the user's REAL action log: `cli.main`
-# writes one line per invocation, and this suite makes hundreds of them.
-os.environ.setdefault("BROWSER_CONTROL_LOG", "off")
+# A hermetic run must not append to the user's REAL action log — it makes
+# hundreds of invocations. Turning the log OFF was worse than it looked: it
+# hid that the default directory was never created, so every write to it was
+# silently dropped. The suite logs into its own scratch directory instead
+# (/tmp/browser-control-<timestamp>) and then CHECKS that the file has lines.
+LOG_DIR = audit.scratch_dir() or tempfile.mkdtemp(prefix="browser-control-")
+SUITE_LOG = os.path.join(LOG_DIR, "hermetic-actions.jsonl")
+os.environ.setdefault("BROWSER_CONTROL_LOG", SUITE_LOG)
 
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -916,11 +916,17 @@ def t_audit_redaction() -> None:
             size = os.path.getsize(path)
             audit.LOG.write(action="tab", args=["x"])
             assert os.path.getsize(path) == size
-            # an unwritable path is not a failure of the verb
+            # an unwritable path is not a failure of the verb — and it is no
+            # longer a LOST record: the line lands in the scratch directory
             os.environ["BROWSER_CONTROL_LOG"] = "/proc/nope/actions.jsonl"
             audit.LOG.write(action="tab", args=["x"])
+            fallback = os.path.join(audit.scratch_dir(), "actions.jsonl")
+            with open(fallback, encoding="utf-8") as handle:
+                assert json.loads(handle.read().splitlines()[-1])["action"] \
+                    == "tab", "the scratch copy is missing"
         finally:
-            os.environ.pop("BROWSER_CONTROL_LOG", None)
+            # back to the SUITE's log, never to the user's default
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
             audit.LOG.begin("")
 
 
@@ -1131,6 +1137,69 @@ def t_selftest() -> None:
         cli_main.cdp.websockets = original
 
 
+def t_a_working_log_makes_no_scratch_dirs() -> None:
+    """No scratch directory is created when the configured log works.
+
+    The fallback is a second CHANCE, not a first move. Built eagerly it made
+    one empty directory per CLI invocation — measured: 92 of them in three
+    minutes of battery runs — which is exactly the clutter a tool must not
+    make for itself.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pattern = os.path.join(tempfile.gettempdir(), "browser-control-*")
+    before = set(glob.glob(pattern))
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ,
+               "BROWSER_CONTROL_LOG": os.path.join(tmp, "actions.jsonl"),
+               "BROWSER_CONTROL_ROOT": os.path.join(tmp, "profiles")}
+        proc = subprocess.run([sys.executable,
+                               os.path.join(repo, "browser-control-cli"),
+                               "selftest"], capture_output=True, text=True,
+                              timeout=60, env=env)
+        assert proc.returncode == 0, (proc.returncode, proc.stderr)
+        log = os.path.join(tmp, "actions.jsonl")
+        assert os.path.exists(log), "a writable log must be written"
+        rows = [json.loads(line)
+                for line in Path(log).read_text(encoding="utf-8").splitlines()]
+        assert [row["action"] for row in rows] == ["selftest"], rows
+    made = sorted(set(glob.glob(pattern)) - before)
+    assert not made, f"a working log created a scratch directory: {made}"
+
+
+def t_action_log_lands_on_disk() -> None:
+    """The log really is written, and its directory is made for it.
+
+    This is the check the fail-open `off` in the suite's own env was hiding:
+    `DEFAULT_LOG`'s directory did not exist, so every write to the default path
+    was dropped without a word.
+    """
+    path = str(audit.LOG.path())
+    assert path, "this check needs the log on"
+    run_cli(["selftest"])                      # one more invocation, one line
+    with open(path, encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    assert rows, f"{path} has no lines"
+    assert any(row.get("action") == "selftest" for row in rows), rows[-2:]
+    assert all(row.get("src") == "browser-control-cli" for row in rows), \
+        rows[-1]
+    # a default path whose directory does not exist yet is created, not lost
+    with tempfile.TemporaryDirectory() as tmp:
+        deep = os.path.join(tmp, "state", "browser-control", "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = deep
+        try:
+            audit.LOG.write(action="open", ok=True, args=["about:blank"])
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+        with open(deep, encoding="utf-8") as handle:
+            line = json.loads(handle.read().splitlines()[0])
+        assert line["action"] == "open", line
+    # and the scratch directory is the tool's own name, under the temp dir
+    scratch = audit.scratch_dir()
+    assert scratch.startswith(tempfile.gettempdir() + os.sep), scratch
+    assert os.path.basename(scratch).startswith("browser-control-"), scratch
+    assert os.path.isdir(scratch), scratch
+
+
 def t_pid_alive() -> None:
     assert browser._pid_alive(os.getpid()) is True                 # noqa: SLF001
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
@@ -1155,6 +1224,9 @@ def main() -> int:
          t_expressions_and_shot_rules),
         ("keys, verdicts and secrets", t_keys_and_verdicts),
         ("the log redacts and never fails a verb", t_audit_redaction),
+        ("the action log lands on disk", t_action_log_lands_on_disk),
+        ("a working log makes no scratch directory",
+         t_a_working_log_makes_no_scratch_dirs),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),
         ("media argv", t_cli_media_grammar),

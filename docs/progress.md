@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 28 hermetic + 45 live checks passing.
+Repo `main`, worktree clean, 30 hermetic + 45 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,14 +15,14 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 806 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/cli/main.py` | 807 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
 | `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
-| `browser_control/lib/audit.py` | 100 | the JSONL action log: fail-open, and a proven secret written as a length |
+| `browser_control/lib/audit.py` | 158 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<timestamp>`, and a proven secret written as a length |
 | `browser_control/lib/browser.py` | 1386 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate` |
 | `browser_control/lib/cdp.py` | 656 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 1178 | 28 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1312 | 45 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 1250 | 30 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1340 | 45 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -169,12 +169,21 @@ multi-browser test (two live instances refuse), no CI.
 10. **Frames are still out of scope** — `find`/`text` see the top document and
     open shadow roots only (measured and tested); iframe content needs its own
     target scoping, which nothing needs yet.
-11. **The default action log never writes** — `~/.local/state/browser-control/`
-    is not created, and the log is fail-open, so every default-path write is
-    silently dropped (observed while checking that a test run had not touched
-    it: the file does not exist). Either create the directory in
-    `audit.ActionLog.write` or say that `BROWSER_CONTROL_LOG` must point at a
-    directory that exists.
+11. **`close` cannot tell whose managed browser it is** — one managed instance
+    per profile means it stops the browser whatever invocation started it, and
+    a browser started by hand (or by another agent) looks exactly like one a
+    test left behind. This bit hard during development: a managed browser with
+    a real session was closed as if it were a leftover, which the HISTORY of
+    its own profile then disproved. Before closing, read `tab list`. A
+    guard — refuse while the managed browser has tabs, unless `--force` — is a
+    candidate, and so is printing the tab count in `close`'s reply.
+
+(Fixed since it was listed here: the default action-log directory was never
+created, so the fail-open log silently dropped every write. `write` now makes
+the directory — mode 0700 — and falls back to
+`/tmp/browser-control-<timestamp>/actions.jsonl` when it cannot, and the
+hermetic suite asserts a line really lands on disk instead of turning the log
+off.)
 
 ## 5. What is next
 
@@ -508,16 +517,28 @@ Nothing here blocks 5.6.
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser
-python3 tests/live_test.py            # 12 live checks, needs a browser
+python3 tests/test_unit.py            # hermetic, no browser (29 checks)
+python3 tests/live_test.py            # the battery, needs a browser (45 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com
-browser-control-cli tabs
-browser-control-cli new-tab https://example.net
-browser-control-cli close-tab example.net
+browser-control-cli tab list
+browser-control-cli tab https://example.net
+browser-control-cli tab text --tab active
+browser-control-cli tab screenshot /tmp/page.png
 browser-control-cli close
 ```
 
 Set `BROWSER_CONTROL_ROOT` to keep a session's profiles out of
 `~/.local/share/browser-control/cdp-profiles` (the tests do), and
 `BROWSER_CONTROL_CLI` to point the battery at an installed command.
+
+**Where the logs go.** The action log is `BROWSER_CONTROL_LOG`, by default
+`~/.local/state/browser-control/actions.jsonl`; its directory is created on the
+first write, and when that cannot be written the line lands in a scratch
+directory instead — `/tmp/browser-control-<timestamp>/actions.jsonl`
+(`audit.scratch_dir()`). Both suites log into such a directory rather than
+`off`, so the log is exercised on every run and the user's own log is never
+touched: the hermetic suite at `<scratch>/hermetic-actions.jsonl`, the battery
+at `<scratch>/live-actions.jsonl` (its path is printed at the top of the run,
+as `log`). `selftest` reports the path the CLI itself would use; `off` (or
+`0`/`none`) disables the log entirely.

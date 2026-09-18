@@ -12,17 +12,51 @@ is recorded exactly like a success. Two rules make it safe to keep:
   redacts everything says nothing.
 
 `BROWSER_CONTROL_LOG` names the file, or `off` disables the log entirely.
+The file's DIRECTORY is created on the first write (mode 0700), and when it
+cannot be written the line lands in a scratch directory built for the purpose
+— `/tmp/browser-control-<timestamp>` (`scratch_dir`) — so a record is lost
+only when nothing at all can be written, never silently. `selftest` reports
+the path the log would use.
 """
 from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from typing import Any
 
 LOG_ENV = "BROWSER_CONTROL_LOG"
 DEFAULT_LOG = "~/.local/state/browser-control/actions.jsonl"
 SRC = "browser-control-cli"
+SCRATCH_PREFIX = "browser-control"
+_SCRATCH = ""
+
+
+def scratch_dir() -> str:
+    """`/tmp/browser-control-<timestamp>`, created on first use (mode 0700).
+
+    One per process, and the name carries WHEN it was made, so two runs never
+    share a directory and nothing has to be cleaned up by hand — /tmp is the
+    OS's business. This is where the action log goes when the configured path
+    cannot be written, and it is what a test run (or any caller) uses for logs
+    and artifacts. "" when even /tmp cannot be written, which every caller has
+    to read as "no scratch".
+    """
+    global _SCRATCH
+    if _SCRATCH:
+        return _SCRATCH
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = os.path.join(tempfile.gettempdir(), f"{SCRATCH_PREFIX}-{stamp}")
+    for attempt in range(8):
+        candidate = base if not attempt else f"{base}-{attempt}"
+        try:
+            os.makedirs(candidate, mode=0o700, exist_ok=True)
+            _SCRATCH = candidate
+            return candidate
+        except OSError:
+            continue
+    return ""
 
 
 def _oneline(text: object) -> str:
@@ -84,11 +118,35 @@ class ActionLog:
             row["detail"] = _oneline(detail)[:200]
         if self._secret:
             row["redacted"] = True
+        line = json.dumps(row) + "\n"
+        # the configured file first; only when THAT fails is the scratch
+        # directory built — a fallback is a second chance, not a first move
+        # (building it eagerly made one empty directory per CLI call)
+        if self._append(path, line):
+            return
+        fallback = self._scratch_copy(path)
+        if fallback:
+            self._append(fallback, line)
+
+    @staticmethod
+    def _append(path: str, line: str) -> bool:
+        """One line to one file, making its directory first. False on failure."""
         try:
-            with open(path, "a") as handle:
-                handle.write(json.dumps(row) + "\n")
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(line)
+            return True
         except OSError:
-            return          # a log that cannot be written is not a failure
+            return False
+
+    def _scratch_copy(self, path: str) -> str:
+        """Where the record goes when the configured file cannot be written."""
+        scratch = scratch_dir()
+        if not scratch or os.path.dirname(os.path.abspath(path)) == scratch:
+            return ""
+        return os.path.join(scratch, "actions.jsonl")
 
 
 # One instance: the command marks a secret, the command writes the line.

@@ -43,6 +43,7 @@ sys.path.insert(0, str(REPO))
 # path insert above must come first.
 browser_lib: Any = import_module("browser_control.lib.browser")
 cdp: Any = import_module("browser_control.lib.cdp")
+audit: Any = import_module("browser_control.lib.audit")
 
 CLI = os.environ.get("BROWSER_CONTROL_CLI") or str(REPO / "browser-control-cli")
 # Created in `main()`, NOT here: this file is a module like any other, and a
@@ -50,6 +51,10 @@ CLI = os.environ.get("BROWSER_CONTROL_CLI") or str(REPO / "browser-control-cli")
 # start browsers or sweep anything. It did — that is where the orphan roots
 # these tests kept finding came from.
 ROOT = ""
+# The run's own log, in its scratch directory (/tmp/browser-control-<ts>),
+# created in `main()` for the same reason ROOT is.
+LOG_DIR = ""
+SUITE_LOG = ""
 TIMEOUT_S = 90
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -173,10 +178,11 @@ BARE_MEDIA_PAGE = ("<!doctype html><meta charset=\"utf-8\">"
 
 def env() -> dict[str, str]:
     """The environment every CLI call gets: the throwaway root, and an action
-    log INSIDE it — so redaction can be asserted and the user's real log is
-    never touched."""
+    log in the run's scratch directory — so redaction can be asserted, the log
+    is really exercised, and the user's real log is never touched."""
     return {**os.environ, "BROWSER_CONTROL_ROOT": ROOT,
-            "BROWSER_CONTROL_LOG": os.path.join(ROOT, "actions.jsonl")}
+            "BROWSER_CONTROL_LOG": SUITE_LOG or os.path.join(ROOT,
+                                                            "actions.jsonl")}
 
 
 # ------------------------------------------------------------------- harness
@@ -223,6 +229,20 @@ def refuses(code: str, *argv: str) -> str:
     assert rc == 2, f"{' '.join(argv)} rc={rc} (wanted 2): {err or out}"
     assert f"ERR[{code}]" in err, \
         f"{' '.join(argv)}: wanted ERR[{code}], got {err!r}"
+    return err
+
+
+def refuses_any(codes: tuple[str, ...], *argv: str) -> str:
+    """A CLI call that must refuse with ONE of `codes`, and exit 2.
+
+    For a property two honest codes can prove — "that tab is no longer
+    addressable" arrives as `no-page-tab` or as `cdp-unreachable`, depending on
+    whether anything else drivable is up.
+    """
+    rc, out, err = run(*argv)
+    assert rc == 2, f"{' '.join(argv)} rc={rc} (wanted 2): {err or out}"
+    assert any(f"ERR[{code}]" in err for code in codes), \
+        f"{' '.join(argv)}: wanted one of {codes}, got {err!r}"
     return err
 
 
@@ -694,7 +714,7 @@ def c_dom_password_never_reaches_the_log() -> str:
     ok_json("tab", "focus", "Password Field")
     inserted = ok_json("tab", "insert", secret)
     assert inserted["verified"] is True, inserted
-    log = Path(ROOT, "actions.jsonl")
+    log = Path(SUITE_LOG)
     assert log.exists(), "the battery's own action log was not written"
     text = log.read_text(encoding="utf-8")
     rows = [json.loads(line) for line in text.splitlines()]
@@ -934,12 +954,17 @@ def c_close_stops_the_browser() -> str:
     while time.time() < deadline and listening(port):
         time.sleep(0.2)
     assert not listening(port), f"port {port} still accepts connections"
-    refuses("no-page-tab", "tab", "info", f"id:{STATE['tab'][:8]}")
+    # the tab id is no longer addressable: `no-page-tab` when some other
+    # drivable browser is up, `cdp-unreachable` when this closed browser was
+    # the only one — both prove the tab is gone, and which one arrives depends
+    # on what else is running on the machine (measured)
+    err = refuses_any(("no-page-tab", "cdp-unreachable"),
+                      "tab", "info", f"id:{STATE['tab'][:8]}")
     data = ok_json("tab", "list")
     assert all(g["pid"] != pid for g in data["browsers"]), data
     info = ok_json("info")
     assert info["running"] is False, info
-    return f"pid {pid} gone, port {port} closed, tab info refuses"
+    return f"pid {pid} gone, port {port} closed, tab info refuses ({err.split(']')[0]}])"
 
 
 def c_close_is_idempotent() -> str:
@@ -1278,8 +1303,10 @@ def cleanup() -> None:
 
 
 def main() -> int:
-    global ROOT
+    global ROOT, LOG_DIR, SUITE_LOG
     ROOT = tempfile.mkdtemp(prefix="browser-control-live-")
+    LOG_DIR = audit.scratch_dir() or ROOT
+    SUITE_LOG = os.path.join(LOG_DIR, "live-actions.jsonl")
     reason = prereq()
     try:
         if reason:
@@ -1289,7 +1316,8 @@ def main() -> int:
         else:
             start_server()
             swept = sweep_stale_roots()
-            print(f"root {ROOT}\npage {base_url()}\ncli  {CLI}\n")
+            print(f"root {ROOT}\nlog  {SUITE_LOG}\npage {base_url()}\ncli  "
+                  f"{CLI}\n")
             if swept:
                 print(f"(swept {len(swept)} temp root(s) a killed run left: "
                       f"{', '.join(swept)})\n")

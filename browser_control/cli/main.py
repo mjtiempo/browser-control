@@ -292,6 +292,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
              "python_version": platform.python_version(),
              "websockets": getattr(cdp.websockets, "__version__", "unknown"),
              "profile_root": browser_lib.root(),
+             "action_log": audit.LOG.path() or "off",
              "verbs": sorted(HANDLERS),
              "browsers": found}
     if browser:
