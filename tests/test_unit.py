@@ -179,12 +179,14 @@ def t_page_rows_from_a_fake_endpoint() -> None:
 
 
 def t_cli_dispatch() -> None:
-    """One URL, several URLs, and the flags that are stripped — as argv."""
+    """One URL, several URLs, `--windowless`, and the flags that are stripped."""
     seen: dict[str, object] = {}
 
-    def fake_launch(urls: list[str] | None = None, browser: str = "") -> dict:
+    def fake_launch(urls: list[str] | None = None, browser: str = "",
+                    windowless: bool = False) -> dict:
         seen["urls"] = list(urls or [])
         seen["browser"] = browser
+        seen["windowless"] = windowless
         return {"ok": True, "opened": list(urls or [])}
 
     original = cli_main.launch
@@ -198,11 +200,20 @@ def t_cli_dispatch() -> None:
         assert json.loads(out)["opened"] == ["https://a.example",
                                               "https://b.example"]
         assert seen == {"urls": ["https://a.example", "https://b.example"],
-                        "browser": "brave-browser"}, seen
+                        "browser": "brave-browser",
+                        "windowless": False}, seen
         rc, out, err = run_cli(["open"])          # no URL is allowed
         assert rc == 0 and json.loads(out)["opened"] == [], (rc, out, err)
+        rc, out, err = run_cli(["open", "--windowless"])
+        assert rc == 0, (rc, err)
+        assert seen["windowless"] and seen["urls"] == [], seen
     finally:
         cli_main.launch = original         # type: ignore[assignment]
+    # the flag takes no URL: Chromium opens a window for a tab, so a windowless
+    # start with a page cannot be honoured — and this refuses before any
+    # browser is touched
+    rc, _out, err = run_cli(["open", "--windowless", "https://a.example"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
 
 
 def t_cli_tab_grammar() -> None:

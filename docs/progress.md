@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 26 hermetic + 39 live checks passing.
+Repo `main`, worktree clean, 26 hermetic + 40 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -15,14 +15,14 @@ it and puts one console script on PATH.
 | --- | --- | --- |
 | `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 677 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/cli/main.py` | 686 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
 | `browser_control/lib/dom.py` | 1336 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `media` |
 | `browser_control/lib/audit.py` | 108 | the JSONL action log: fail-open, and a proven secret written as a length |
-| `browser_control/lib/browser.py` | 1281 | managed profile, launch, stop, discovery, attach records, tabs, page verbs |
+| `browser_control/lib/browser.py` | 1314 | managed profile, launch (windowless included), stop, discovery, attach records, tabs, page verbs |
 | `browser_control/lib/cdp.py` | 513 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `tests/test_unit.py` | 1002 | 26 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1151 | 39 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 1013 | 26 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1193 | 40 live checks on a throwaway root, skip ≠ pass |
 
 Five verbs, browser-only:
 
@@ -31,7 +31,7 @@ the other verbs own the browser.
 
 | Verb | Does | Verified by (the read-back) |
 | --- | --- | --- |
-| `open [URL...]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs | the endpoint must **answer**, then every opened tab must be in the tab list |
+| `open [URL…] [--windowless]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs; `--windowless` starts it with `--no-startup-window`, so CDP comes up and **nothing is on screen** | the endpoint must **answer**, then every opened tab must be in the tab list; with `--windowless` the page count is allowed to be zero (it is the point), and the first tab later makes a window (Chromium's doing, not this verb's) |
 | `close` | stops the browser this CLI started | the pid dies **and** the endpoint stops answering; never SIGKILLs |
 | `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, and whether CDP answers (+ its tab count) | one `/proc` pass, plus a CDP probe on the port each one names |
 | `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
@@ -161,12 +161,12 @@ multi-browser test (two live instances refuse), no CI.
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6 and
-5.7 have landed** (§1, §2), **5.3 and the ad functions are deferred by
-decision** — the next actionable step is 5.8 (headless search: `search QUERY
-[--engine …]`) — and every later verb is expected to add its check to
-`tests/live_test.py`. The CLI grammar is settled (§1): page work lives under
-`tab`, browser work stays top-level.
+Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7
+and 5.11 have landed** (§1, §2), **5.3, the ad functions and the plugin tier
+are deferred by decision** — so what is left in the CORE is **5.10**: the
+launch/sync lock, the `/proc` ownership guard, and (optional) a `tab activate`
+plus `--tab active`. Every later verb is expected to add its check to
+`tests/live_test.py`; the CLI grammar is settled (§1).
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -373,19 +373,28 @@ passes its own live check through the contract.
 Launch/sync lock; the `/proc` ownership guard so a forwarded endpoint refuses
 `cdp-not-local`; a `--profile`/instance selector; richer `stop` identity.
 
-### 5.11 `open --windowless` (decided, not built)
-A windowless start (no page tab) as an OPTION, never the default: a scripted
-caller that wants CDP up and no window on screen asks for it. It is
-`launch(..., windowless=True)` — the flags already carry `--no-startup-window`
-the last time it was needed — plus the CLI flag and a battery check that no
-page tab exists afterwards.
+### 5.11 `open --windowless` — done
+`open --windowless` starts the browser with `--no-startup-window`: CDP comes up
+and **nothing is on screen**. It is an option, never the default, and it takes
+no URL — Chromium opens a WINDOW for the first tab, so a URL could not be
+honoured, and that refusal says so. On an already-running browser it is a
+no-op that reports what is really there (`tabs`): this verb starts browsers,
+it does not close windows (`close`, then `open --windowless`, is how a window
+leaves the screen). The reply carries `windowless` beside `started`, and
+`tab list` shows the instance as drivable with zero tabs.
+
+The battery proves it on a profile root of its own (the flag is only
+meaningful where nothing runs yet), asserts the empty tab list, and then makes
+the first tab — which opens a window, the honest behaviour rather than a
+promise.
 
 ## 6. Decisions needed
 
 1. ~~**Seeding policy**~~ — deferred with the feature (5.3); the managed
    browser stays login-less until then.
-2. ~~**`open` semantics**~~ — answered: a **windowless** start is available
-   but NOT the default (`open` keeps making a page). Not built yet — see 5.11.
+2. ~~**`open` semantics**~~ — answered AND built: a **windowless** start is
+   available (`open --windowless`) but NOT the default (`open` keeps making a
+   page). See 5.11.
 3. ~~**Install story**~~ — answered: `pyproject.toml` installs a console
    script, `browser-control-cli`. The checkout script stays for running
    without an install; note that the `~/.local/bin` symlink will shadow an
