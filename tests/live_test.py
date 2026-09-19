@@ -145,6 +145,9 @@ DOM_FRAME = ("<!doctype html><title>frame</title>"
 # of its own) and two CROSS-ORIGIN ones. They are cross-origin by ORIGIN, not
 # by path: the server binds 127.0.0.1 and the frames ask for `localhost`, which
 # Chromium treats as a different site and gives its own process and target.
+EDGES_PAGE = """<!doctype html><meta charset="utf-8"><title>edges</title>
+<button id="ask" onclick="window.__prompt = prompt('name', '')">ask</button>
+<a id="dl" href="/attachment">download</a>"""
 FRAME_TOP = """<!doctype html><meta charset="utf-8"><title>frames</title>
 <p>TOP_MARKER</p>
 <button id="at-target" style="padding:14px"
@@ -384,6 +387,21 @@ def start_server() -> None:
                 self.send_response(302)
                 self.send_header("Location", "/eight-b")
                 self.end_headers()
+                return
+            if self.path.startswith("/edges"):
+                self._send(EDGES_PAGE.encode())
+                return
+            if self.path.startswith("/attachment"):
+                # a URL the browser turns into a DOWNLOAD: no page navigates, and
+                # the refusal has to say so rather than call it a navigation
+                body = b"attachment body"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition",
+                                 "attachment; filename=thing.bin")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             if self.path.startswith("/media-bare"):
                 self._send(BARE_MEDIA_PAGE.encode())
@@ -629,6 +647,7 @@ def c_reload_makes_a_new_document() -> str:
     old check (a review named it). A value set in the window is gone only when
     the document is new, and that is an oracle the CLI cannot fake.
     """
+    ok_json("tab", "nav", f"{base_url()}/nine-b")   # not whatever ran before
     ok_json("tab", "js", "window.__bc_mark = 1")
     reply = ok_json("tab", "reload")
     assert reply["reloaded"] is True, reply
@@ -936,7 +955,15 @@ def c_tab_activate() -> str:
 def c_tab_hover() -> str:
     """`tab hover` is proven by the engine's own `:hover` state."""
     ok_json("tab", "nav", f"{base_url()}/dom")
-    reply = ok_json("tab", "hover", "--selector", "#hover-me")
+    try:
+        reply = ok_json("tab", "hover", "--selector", "#hover-me")
+    except AssertionError:
+        # the pointer may ALREADY be at that point (a previous check's click can
+        # leave it there), and a move to where you already are is not a hover
+        # transition — measured once in ~20 runs of this battery. Moving the
+        # pointer somewhere else first makes the next move real.
+        ok_json("tab", "hover", "--at", "2,2")
+        reply = ok_json("tab", "hover", "--selector", "#hover-me")
     assert reply["hovered"] is True and reply["verified"] is True, reply
     assert reply["point"][0] > 0 and reply["point"][1] > 0, reply
     refuses("no-match", "tab", "hover", "--selector", "#no-such-thing")
@@ -1996,6 +2023,42 @@ def c_attach_grants_writes() -> str:
     return f"foreign pid {proc.pid}: read, refused, attached, written, detached"
 
 
+def c_edges_the_review_named() -> str:
+    """The branch-y inputs a review listed as never tried, one line each.
+
+    A selector that is not CSS, an index past the end of the matches, a key with
+    nothing focused, a URL the browser turns into a DOWNLOAD — and the one whose
+    live half this harness cannot show: a dialog opened by a CLI-dispatched click
+    is SUPPRESSED (which `c_tab_dialog` measures too), so the prompt's `--text`
+    is pinned at the argv layer and what is asserted here is that the refusal
+    says so. A parked renderer must not leak into the next check, hence the
+    `finally`.
+    """
+    base = base_url()
+    try:
+        ok_json("tab", "nav", f"{base}/edges")
+        # a selector that is not CSS at all: the PAGE throws, and that is named
+        refuses("js-error", "tab", "find", "--selector", "<<")
+        # an index past the end of the matches
+        err = refuses("bad-args", "tab", "click", "--selector", "#dl",
+                      "--index", "9")
+        assert "out of range" in err, err
+        # a key with nothing focused is a silent no-op, and says so
+        quiet = ok_json("tab", "press", "Enter")
+        assert quiet["verified"] is False, quiet
+        # the PROMPT: the click parks the renderer and the dialog is suppressed,
+        # so there is nothing left to answer — and the refusal says which
+        refuses("blocked", "tab", "click", "--selector", "#ask")
+        refuses("no-dialog", "tab", "dialog", "accept", "--text", "hello")
+        # a DOWNLOAD is not a navigation, and the refusal says which it was
+        err = refuses("nav-failed", "tab", "nav", f"{base}/attachment")
+        assert "DOWNLOAD" in err, err
+    finally:
+        ok_json("tab", "nav", f"{base}/dom")
+    return ("invalid CSS named, an index past the end refused, an unfocused key "
+            "declared unverified, a suppressed prompt refused, a download named")
+
+
 CHECKS = (
     ("selftest answers without a browser", c_selftest),
     ("open starts a managed browser", c_open_starts_a_browser),
@@ -2016,6 +2079,7 @@ CHECKS = (
     ("tab nav reads the address back", c_nav_reads_the_address_back),
     ("tab nav refuses a dead end", c_nav_refuses_a_dead_end),
     ("tab back/forward move the address", c_history_moves_the_address),
+    ("the edges a review named", c_edges_the_review_named),
     ("tab reload makes a new document", c_reload_makes_a_new_document),
     ("tab nav names the tab", c_nav_names_the_tab),
     ("tab text reads the page", c_dom_text_reads_the_page),

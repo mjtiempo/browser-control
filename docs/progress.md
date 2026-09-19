@@ -933,9 +933,19 @@ were refuted that way, and one was downgraded after measurement.
   could not see four of its five throwaway prefixes, and three live oracles
   would have passed with the feature broken.
 
-Every fix carries its own check, and two claims that could NOT be proved are
-written down where they live instead of being smoothed over: §5.24's click
-anomaly, and the DOM tier's page-owned oracle (README).
+Every fix carries its own check, and what could NOT be proved is written down
+where it lives instead of being smoothed over: §5.24's click anomaly on the
+`/frames` fixture (the identical sequence navigates in isolation, five ways
+over), the DOM tier's page-owned oracle (README), and the two branches this
+harness cannot exercise at all —
+
+* a **prompt's** `--text`: a dialog opened by a CLI-dispatched click is
+  suppressed before any client can answer it (`c_tab_dialog` measures that for
+  an alert too), so the live check asserts the suppression and the `--text`
+  argv is pinned hermetically;
+* a screenshot at **devicePixelRatio ≠ 1**: the ratio belongs to the display,
+  and the CLI exposes no launcher flag for it, so the arithmetic is only
+  exercised at dpr 1 (the PNG's own IHDR is still what proves every shot).
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
