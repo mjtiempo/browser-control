@@ -1,11 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "browser-control"
 dynamic = ["version"]
 description = "Drive this machine's Chromium over CDP, on a managed profile of its own"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = ["websockets>=12"]
 keywords = ["chromium", "cdp", "devtools", "headless", "cli"]

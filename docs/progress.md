@@ -13,7 +13,9 @@ it and puts one console script on PATH.
 
 | File | Lines | Owns |
 | --- | --- | --- |
-| `pyproject.toml` | 28 | distribution `browser-control`, console script, `websockets` |
+| `pyproject.toml` | 31 | distribution `browser-control`, console script, `websockets`, MIT (SPDX) + `license-files` |
+| `README.md` | 190 | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
+| `LICENSE` | 21 | MIT, `Copyright (c) 2026 Mark Tiempo` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
 | `browser_control/cli/main.py` | 893 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
 | `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
@@ -158,8 +160,9 @@ multi-browser test (two live instances refuse), no CI.
    instance selector on EVERY verb (it feeds one process scope that every
    `--browser` path already funnelled through), so two instances of the same
    browser under one root are addressable instead of refusing.
-5. **Not published** — the wheel builds and installs locally, but there is no
-   README, no declared license, and no index to publish to.
+5. ~~**Not published**~~ — MIT + README + declared metadata DONE (§5.21);
+   what remains is an INDEX to publish to, and a distribution name that does
+   not collide with the public `browser-control` project (the CLI name stays).
 6. **No CI** — both suites run by hand; nothing runs them on a push.
 7. **No human output** — every verb prints JSON; there is no `--json` switch
    because there is no alternative format yet.
@@ -197,7 +200,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.20 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.21 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -724,6 +727,40 @@ Three details that are policy, not plumbing:
 Hermetic: `--profile` + `--pid` refuses as two selectors, and the argv still
 reaches `attach`/`detach`/`close` through the scope. Battery: two instances of
 one browser, addressed, read, one of them stopped, the other still answering.
+
+### 5.21 MIT, a README, and declared metadata — done
+
+The repository was `all rights reserved` by default (no `LICENSE`) and its
+packaging said `License: UNKNOWN`. Both are fixed, and the choice was argued
+from this project's own shape rather than habit:
+
+* the **plugin tier** is deferred, not dropped — copyleft in the core would
+  infect every plugin author, so permissive keeps that door open;
+* nothing here is patentable (it drives a documented protocol), so Apache's
+  grant buys little for the NOTICE machinery it brings;
+* **MIT** it is, which is also what a Python CLI's readers expect.
+
+`pyproject.toml` now declares `license = "MIT"` (an SPDX expression, PEP 639)
+with `license-files = ["LICENSE"]` and `readme = "README.md"`, and the build
+requirement went to `setuptools>=77` for the metadata version that supports it.
+Verified on the ARTIFACT, not on the source: the built wheel reports
+`Metadata-Version: 2.4`, `License-Expression: MIT`, `License-File: LICENSE`,
+carries `browser_control-0.1.0.dist-info/licenses/LICENSE`, and embeds the
+README as the description — so a redistributor has the notice without asking.
+
+The README is written for the person who has never seen this: what it is, the
+three rules of the stance (**a mutation is never `ok: true` on a bare ack**; an
+unclear oracle is not proof of absence; a refusal names the cause and the fix),
+install and the two suites, the verbs, the handles (`--tab SPEC`/`active`,
+`--browser`, `--profile`), **what it will and will not do to your browser**
+(its own profile; `attach` is the consent; `close` asks before taking tabs and
+never `SIGKILL`s; every drive checked against `/proc`; `tab js` runs caller
+code; the log redacts proven secrets), the capability table `selftest` reports,
+and how to write a caller. It also states the honest limit up front: `find` and
+`text` do not see iframes.
+
+Not done, and named in §4.5: an index to publish to, and a distribution name
+that does not collide with the public `browser-control` project.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
