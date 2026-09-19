@@ -196,14 +196,22 @@ def policy(allow: str | None = None, deny: str | None = None) -> dict:
     (a denial by either holds). A flag given with an empty value, or one that
     names no class, is refused.
     """
-    env_allow, env_deny = os.environ.get(ALLOW_ENV, ""), \
-        os.environ.get(DENY_ENV, "")
+    env_allow, env_deny = os.environ.get(ALLOW_ENV), os.environ.get(DENY_ENV)
+    # a value that names NO class is refused on the flag AND on the environment:
+    # a blank one used to read as "no policy", so `BROWSER_CONTROL_ALLOW=" "`
+    # switched the gate off while the same value on `--allow` was refused (a
+    # review flagged the asymmetry). Presence is what tells "unset" from
+    # "blank", and a blank value is a mistake in either place.
     for value, what, spell in ((allow, "--allow", "--deny *"),
-                               (deny, "--deny", "--deny *")):
+                               (deny, "--deny", "--deny *"),
+                               (env_allow, ALLOW_ENV, "--deny *"),
+                               (env_deny, DENY_ENV, "--deny *")):
         if value is not None and not str(value).strip():
             fail("bad-args",
-                 f"{what}: needs at least one class — name them, use * for "
-                 f"every class, or `{spell}` to allow nothing")
+                 f"{what}: names no class — name them, use * for every class, "
+                 f"or `{spell}` to allow nothing (unset it for no policy)")
+    env_allow = env_allow or ""
+    env_deny = env_deny or ""
     flag_allow = _classes_of(allow, "--allow") if allow is not None else ()
     flag_deny = _classes_of(deny, "--deny") if deny is not None else ()
     env_allow_classes = _classes_of(env_allow, ALLOW_ENV)

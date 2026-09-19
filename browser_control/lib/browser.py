@@ -590,6 +590,18 @@ def _writable_profile(browser: str = "") -> str:
     because "write into whatever answered" is the bug this rule exists for.
     """
     if SCOPE["profile"]:
+        # the scope is a write target only when it is one this CLI manages or
+        # was handed: `--profile /tmp/stranger` used to come straight back and
+        # `tab about:blank` then ran `Target.createTarget` in a stranger's
+        # browser (a review measured it). `instance_dir` refuses that path for
+        # `open`; a write has to refuse it too — the two halves of the gate
+        # disagreed about the same argv.
+        if not _is_managed(SCOPE["profile"]) \
+                and not is_attached(SCOPE["profile"]):
+            fail("not-managed",
+                 f"--profile {SCOPE['profile']} is not a profile this CLI "
+                 "manages or has attached — `open --profile DIR` starts one "
+                 "under the root, or `attach --port N` hands one over")
         return SCOPE["profile"]
     rows = _writable(browser)
     if len(rows) > 1:
@@ -674,6 +686,13 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
         fail("cdp-unreachable",
              f"pid {row['pid']} does not answer CDP on port "
              f"{row['cdp']['port']} — attach needs a live endpoint")
+    if not row["cdp"].get("verified"):
+        # an endpoint that ANSWERS is not proof of WHOSE it is, and this record
+        # is what opens the tab-write gate: `_named_browser` refuses an
+        # unverified endpoint, and so must this (a review measured the gap —
+        # a stale port was enough to authorise a write path)
+        not_local_refusal(str(row["profile"]), _to_int(row["cdp"]["port"]),
+                          str(row["cdp"].get("reason") or "unknown"))
     record = {"profile": _norm(row["profile"]), "pid": row["pid"],
               "port": _to_int(row["cdp"]["port"]), "exe": row["exe"],
               "managed": row["managed"],
@@ -1046,14 +1065,34 @@ def _wait_ids_gone(profile: str, ids: list[str],
         time.sleep(0.2)
 
 
+def _verify_profile_endpoint(profile: str) -> None:
+    """Refuse when the endpoint on that profile is not the browser we think.
+
+    `ensure_up` proves only that something ANSWERS; the port comes from a FILE,
+    so it is the kernel that says who owns it (`endpoint_owner`). The drive path
+    asks this before every verb, and a tab-creating call is a write: measured by
+    a review, `Target.createTarget` went wherever a stale port file pointed.
+    """
+    port = _to_int(cdp.port_of(profile))
+    if not port:
+        fail("cdp-unreachable",
+             f"no port file in {profile} — nothing to drive there")
+    owner = endpoint_owner(profile, port)
+    if not owner.get("verified"):
+        not_local_refusal(profile, port, str(owner.get("reason") or "unknown"))
+
+
 def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
     """One new tab per URL: every id from CDP, all verified together.
 
     `Target.createTarget` answers with the id it made and ONE poll loop then
     proves every id is in the tab list. A partial result refuses and names
     what is missing — and the tabs that did open stay open, because a refusal
-    is not a reason to destroy work.
+    is not a reason to destroy work. The endpoint is checked against the kernel
+    FIRST: creating a tab is a write, and a write does not go to whoever holds
+    the port (a review measured that this one had no owner check at all).
     """
+    _verify_profile_endpoint(profile)
     ids: list[str] = []
     for url in urls:
         result = cdp.browser_call(profile, "Target.createTarget", {"url": url})

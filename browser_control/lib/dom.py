@@ -126,11 +126,15 @@ def mode_of(mode: str | None) -> str:
 # The verbs `--frame` can be ABOUT: the CLI adds a `frame` note to their replies
 # and nowhere else. A verb that drives the tab rather than its document —
 # `tab nav`, `tab list`, `tab activate` — has no frame scope, and saying it did
-# would be a lie about what that call touched.
+# would be a lie about what that call touched. `tab dialog` is NOT here either:
+# a JavaScript dialog belongs to the TAB (`Page.handleJavaScriptDialog` goes to
+# the tab's own socket, and `dialog state` asks the tab, not a document), so
+# claiming a frame for it was a claim the code did not keep (a review measured
+# it: the reply said `frame: 1` while the page target was driven).
 FRAME_VERBS = frozenset({
     "js", "wait", "find", "text", "click", "hover", "check", "select",
     "scroll", "focus", "press", "insert", "type", "upload", "media",
-    "dialog", "screenshot",
+    "screenshot",
 })
 CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
 DIALOG_PROBE_S = 1.5        # how long the tab is given to prove it is awake
@@ -656,8 +660,9 @@ def _session(row: dict, tab_row: dict) -> cdp.Session:
     return cdp.Session(_document_ws(port, str(tab_row["id"])))
 
 
-def frames_of(port: int, page_target: str) -> list[dict]:
-    """Every frame of THAT page: the DOM's view, plus its own CDP target.
+def frames_of(port: int, page_target: str,
+              census: list | None = None) -> list[dict]:
+    """Every TOP-LEVEL frame of THAT page: the DOM's view, plus its own target.
 
     The DOM knows the geometry and whether a frame shares the page's process
     (`contentDocument` readable — a same-process frame has no target of its
@@ -668,18 +673,37 @@ def frames_of(port: int, page_target: str) -> list[dict]:
     another tab's frame: measured with two tabs embedding the same widget, both
     resolved to ONE target.
 
-    `candidates` is how many targets in the whole browser share that URL when
-    the browser cannot say who owns them. More than one is a frame nobody can
-    attribute, and `_frame_target` refuses it rather than guessing.
+    Two facts a URL cannot settle are REFUSED rather than guessed:
+
+    * two frames in this tab with the same URL (`candidates` > 0) — target ids
+      are random, so pairing them by id order can bind the sibling (a review
+      flagged it);
+    * in the fallback for a browser that reports no parents, only a URL that
+      appears ONCE in the whole browser is trusted, and a frame the page says
+      shares its process never takes a target at all — it provably has none in
+      this tab (a review measured that it could otherwise inherit another
+      tab's).
+
+    `census` lets a caller that already evaluated it (a read that wants the
+    counts) skip a second evaluation. `committed` is the URL the browser
+    actually committed, which can differ from the `src` attribute the page
+    shows.
     """
-    census = cdp.evaluate(cdp.target_ws(port, page_target), FRAME_CENSUS) or []
+    if census is None:
+        census = cdp.evaluate(cdp.target_ws(port, page_target), FRAME_CENSUS) \
+            or []
     owned = cdp.frame_targets(port)
     shared: dict[str, int] = {}
-    if owned:
+    if any(str(row.get("parent")) for row in owned):
         pool = [r for r in owned if r["parent"] == page_target]
+        counted: dict[str, int] = {}
+        for row in pool:
+            key = str(row.get("url"))
+            counted[key] = counted.get(key, 0) + 1
+        shared = {url: count for url, count in counted.items() if count > 1}
     else:
-        # this browser does not report a parent, so only a URL that appears ONCE
-        # in the whole browser is unambiguous
+        # no parents reported anywhere: a URL unique in the whole browser is
+        # the only thing left that can be attributed
         from_json = cdp.frame_rows(port)
         counts: dict[str, int] = {}
         for row in from_json:
@@ -694,12 +718,14 @@ def frames_of(port: int, page_target: str) -> list[dict]:
         if not isinstance(entry, dict):
             continue
         url = str(entry.get("url") or "")
-        match = next((r for r in pool
-                      if url and str(r.get("url")) == url
-                      and str(r.get("id")) not in used), None)
+        match = None
+        if url and not entry.get("same_process") and not shared.get(url):
+            match = next((r for r in pool if str(r.get("url")) == url
+                          and str(r.get("id")) not in used), None)
         if match is not None:
             used.add(str(match["id"]))
         rows.append({"index": _int(entry.get("index")), "url": url,
+                     "committed": str((match or {}).get("url") or ""),
                      "name": str(entry.get("name") or ""),
                      "box": [_int(v) for v in (entry.get("box") or [])],
                      "visible": bool(entry.get("visible")),
@@ -710,7 +736,7 @@ def frames_of(port: int, page_target: str) -> list[dict]:
 
 
 def frames(row: dict, tab_row: dict) -> dict:
-    """`tab frames`: what this page has, and which of them can be driven."""
+    """`tab frames`: the page's own TOP-LEVEL frames, and which can be driven."""
     port = cdp.port_of(str(row["profile"]))
     rows = frames_of(port, str(tab_row["id"]))
     reply = {"ok": True, "count": len(rows), "frames": rows,
@@ -771,8 +797,9 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
     return found
 
 
-def _frame_summary(row: dict, tab_row: dict) -> dict:
-    """What a read is NOT showing: the frames on this page, by kind.
+def _frame_summary(row: dict, tab_row: dict,
+                   session: cdp.Session | None = None) -> dict:
+    """What a read is NOT showing: the page's TOP-LEVEL frames, by kind.
 
     A `tab text` that silently omits everything inside an iframe is the one
     place this tool could read as "there is nothing there". The census makes it
@@ -784,17 +811,43 @@ def _frame_summary(row: dict, tab_row: dict) -> dict:
     two different facts that used to share one number. An UNREADABLE census is
     an error, not an empty page: `{}` means "no frames", and a page that breaks
     the census expression must not be able to look like a page without frames.
+
+    A caller already holding a session hands it in: then a page with NO frames
+    costs one evaluation on that connection, and the second connection (the
+    browser target list) is only opened when there is something to attribute —
+    every `find`/`text` used to pay for both, framed or not (a review measured
+    it). `separate` is null, never 0, when the target list could not be read.
     """
+    page = str(tab_row["id"])
+    port = cdp.port_of(str(row["profile"]))
     try:
-        rows = frames_of(cdp.port_of(str(row["profile"])), str(tab_row["id"]))
+        if session is not None and not FRAME["wanted"]:
+            census = session.evaluate(FRAME_CENSUS)
+        else:
+            census = cdp.evaluate(cdp.target_ws(port, page), FRAME_CENSUS)
     except ControlError as e:
         return {"error": f"{e.code}: {e.message}", "total": None,
                 "separate": None, "cross_origin": None, "visible": None,
                 "note": ("the frame census could not be read, so framed "
                          "content may exist that this read does not show — "
                          "that is NOT the same as a page without frames")}
-    if not rows:
+    raw = census if isinstance(census, list) else []
+    if not raw:
         return {}
+    try:
+        rows = frames_of(port, page, census=raw)
+    except ControlError:
+        rows = []
+    if not rows:
+        # the DOM census answered but the target list did not: report what is
+        # known and leave `separate` NULL rather than claiming "no targets"
+        return {"total": len(raw), "separate": None,
+                "cross_origin": sum(1 for r in raw if isinstance(r, dict)
+                                    and not r.get("same_process")),
+                "same_process": sum(1 for r in raw if isinstance(r, dict)
+                                    and r.get("same_process")),
+                "visible": sum(1 for r in raw if isinstance(r, dict)
+                               and r.get("visible"))}
     return {"total": len(rows),
             "separate": sum(1 for r in rows if r["target"]),
             "cross_origin": sum(1 for r in rows if not r["same_process"]),
@@ -1106,9 +1159,10 @@ def find(text: str | None = None, selector: str | None = None,
     row, tab_row = _resolve(tab, browser, for_write=False)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, limit)
-    # the census over the PAGE (never over a frame-scoped session) and after the
-    # session is closed, so a read reports the page it is a frame of
-    frames_here = _frame_summary(row, tab_row)
+        # the census rides the session already open for the cheap case (a page
+        # with no frames needs no second connection), and goes to the PAGE when
+        # `--frame` scoped that session to a frame
+        frames_here = _frame_summary(row, tab_row, session)
     viewport = _viewport(data, str(tab_row["id"]))
     matches = [dict(m, box=[_int(v) for v in m["box"]],
                     center=[_int(v) for v in (m.get("center") or [])],
@@ -2028,7 +2082,7 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
         data = session.evaluate(TEXT_EXPR.replace("__SELECTOR__",
                                                   json.dumps(css))
                                 .replace("__CAP__", str(limit)))
-    frames_here = _frame_summary(row, tab_row)
+        frames_here = _frame_summary(row, tab_row, session)
     if not isinstance(data, dict):
         fail("cdp-error", "tab text: the page did not answer with an object")
     if not data.get("found"):

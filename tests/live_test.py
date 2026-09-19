@@ -1310,6 +1310,30 @@ def c_frames() -> str:
     assert waited["ok"] is True, waited
     assert str((waited.get("frame_resolved") or {}).get("url", "")).endswith(
         "/frames-inner"), waited.get("frame_resolved")
+    # TWO tabs, the SAME embedded widget: each tab must resolve to its OWN
+    # frame target. Before the fix both resolved to ONE target, so a scoped verb
+    # acted in the other tab — the regression the fake-target hermetic check
+    # cannot see (found by review, measured live when it was fixed)
+    twin = ok_json("tab", f"{base}/frames")["id"]
+    try:
+        twin_tid = f"id:{twin[:8]}"
+        mine = [f for f in ok_json("tab", "frames", "--tab", tid)["frames"]
+                if f["target"]]
+        theirs = [f for f in ok_json("tab", "frames", "--tab",
+                                     twin_tid)["frames"] if f["target"]]
+        assert mine and theirs, (mine, theirs)
+        assert {f["target"] for f in mine}.isdisjoint(
+            {f["target"] for f in theirs}), (mine, theirs)
+        again = ok_json("tab", "click", "--frame", "1", "--selector", "#go",
+                        "--tab", tid)
+        resolved = str((again.get("frame_resolved") or {}).get("target"))
+        assert resolved in {f["target"] for f in mine}, again.get(
+            "frame_resolved")
+        untouched = ok_json("tab", "text", "--frame", "1", "--chars", "120",
+                            "--tab", twin_tid)["text"]
+        assert "FRAME_CLICKED" not in untouched, untouched
+    finally:
+        ok_json("tab", "close", f"id:{twin[:8]}")
     # ambiguity is named, not guessed; a frame without a target says so
     err = refuses("frame-ambiguous", "tab", "text", "--frame", "localhost",
                   "--chars", "40", "--tab", tid)
@@ -1647,7 +1671,11 @@ def c_profile_verbs() -> str:
         assert reply["copied_files"] == 2, reply
         assert reply["verified"] is True, reply
         assert {"Cache", "SingletonLock"} <= set(reply["skipped"]), reply
-        landed = sorted(os.listdir(target))
+        # our OWN bookkeeping does not count as profile content (the lock lives
+        # inside the profile, and `seed` does not overwrite it)
+        bookkeeping = (".browser-control.lock", ".pid")
+        landed = sorted(name for name in os.listdir(target)
+                        if name not in bookkeeping)
         assert landed == ["Cookies", "Preferences"], landed
         # an existing profile is only overwritten on purpose
         refuses("profile-exists", "profile", "seed", "--from", source,
@@ -1656,7 +1684,9 @@ def c_profile_verbs() -> str:
                           "--dry", "--profile", target)
         assert preview["dry"] is True and preview["verified"] is False, preview
         assert preview["copied_files"] == 2, preview
-        assert sorted(os.listdir(target)) == landed, "--dry wrote something"
+        assert sorted(name for name in os.listdir(target)
+                      if name not in bookkeeping) == landed, \
+            "--dry wrote something"
         # a running profile is never seeded or wiped
         refuses("profile-live", "profile", "reset", "--profile",
                 str(ours["path"]))

@@ -736,6 +736,26 @@ def t_one_tab_addressing() -> None:
             _row, stranger = browser._one_tab("", "", for_write=False)  # noqa: SLF001
             assert stranger["id"] == "EF56", stranger
             browser.browsers = rows                      # type: ignore[assignment]
+            # a SCOPED write is refused too when the scope is outside the root:
+            # `--profile /tmp/stranger` was returned as-is, so `tab about:blank`
+            # ran `Target.createTarget` in a stranger's browser
+            browser.scope(tempfile.gettempdir())
+            try:
+                refusal(lambda: browser._writable_profile(""),  # noqa: SLF001
+                        "not-managed")
+            finally:
+                browser.scope("")
+            # `attach` must not RECORD an endpoint that answered but did not
+            # verify: that record is what opens the tab-write gate
+            unverified = dict(rows()[1])
+            unverified["cdp"] = {"port": 1515, "reachable": True,
+                                 "verified": False,
+                                 "reason": "a stranger holds that port"}
+            browser.browsers = lambda: [unverified]      # type: ignore[assignment]
+            try:
+                refusal(lambda: browser.attach(port=1515), "cdp-not-local")
+            finally:
+                browser.browsers = rows                  # type: ignore[assignment]
         finally:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
@@ -1664,8 +1684,23 @@ def t_gate_and_argv_hardening() -> None:
         os.environ[capabilities.DENY_ENV] = "code"
         rc, _out, err = run_cli(["tab", "js", "1", "--deny", "egress"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
-        # a flag may NARROW the session allow-list, never widen it
+        # an ENVIRONMENT value that names no class is refused exactly like the
+        # flag (it used to read as "no policy" and switch the gate OFF)
+        for blank in (" ", "\t"):
+            os.environ[capabilities.ALLOW_ENV] = blank
+            rc, _out, err = run_cli(["list"])
+            assert rc == 2 and "ERR[bad-args]" in err, (blank, rc, err)
+        # …and the allow side INTERSECTS. `tab wait --for js` is `code` ONLY, so
+        # a flag that REPLACED the environment would let it through; the
+        # environment's `read` is what refuses it, and the refusal names both
+        # sources (a review showed the earlier assertion could not tell the two
+        # behaviours apart)
         os.environ[capabilities.ALLOW_ENV] = "read"
+        rc, _out, err = run_cli(["tab", "wait", "--for", "js", "--expr", "1",
+                                 "--allow", "code"])
+        assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+        assert "--allow" in err and capabilities.ALLOW_ENV in err, err
+        # a flag may NARROW the session allow-list, never widen it
         rc, _out, err = run_cli(["tab", "js", "1", "--allow", "code"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
         # …and when the two allow-lists share no class, NOTHING is allowed: an
@@ -1757,6 +1792,17 @@ def t_frames_bind_to_their_tab() -> None:
         assert dom.frames_of(1234, "PAGE_B")[0]["target"] == "BBB"
         assert dom._frame_target(1234, "PAGE_A", "widget")["target"] == \
             "AAA"                                        # noqa: SLF001
+        # …and a duplicate URL in ONE tab cannot be told apart by URL at all:
+        # target ids are random, so pairing by id order can bind the sibling
+        cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
+            {"id": "AAA", "url": "http://localhost:9/widget.html",
+             "parent": "PAGE_A"},
+            {"id": "CCC", "url": "http://localhost:9/widget.html",
+             "parent": "PAGE_A"}]
+        rows = dom.frames_of(1234, "PAGE_A")
+        assert rows[0]["target"] == "" and rows[0]["candidates"] == 2, rows
+        refusal(lambda: dom._frame_target(1234, "PAGE_A", "widget"),  # noqa: SLF001
+                "frame-ambiguous")
         # 2. a browser that does NOT say: only a URL unique in the whole
         #    browser is unambiguous, and a shared one is refused, not guessed
         cdp.frame_targets = lambda port: []                 # type: ignore[assignment]
@@ -1769,11 +1815,29 @@ def t_frames_bind_to_their_tab() -> None:
                 "frame-ambiguous")
         cdp.frame_rows = lambda port: [                     # type: ignore[assignment]
             {"id": "SOLO", "url": "http://localhost:9/widget.html"}]
-        assert dom.frames_of(1234, "PAGE_A")[0]["target"] == "SOLO"
+        # …a target list that carries NO parent still takes the fallback (it
+        # used to leave the pool empty and call every frame "not separate")
+        cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
+            {"id": "SOLO", "url": "http://localhost:9/widget.html",
+             "parent": ""}]
+        rows = dom.frames_of(1234, "PAGE_A")
+        assert rows[0]["target"] == "SOLO", rows
+        assert rows[0]["committed"].endswith("/widget.html"), rows
+        # …but a frame the PAGE says SHARES its process has no target of its
+        # own, so a unique-URL row must not be handed to it: a review measured
+        # that it could otherwise inherit another tab's target
+        census.append({"index": 1, "url": "http://localhost:9/widget.html",
+                       "name": "", "box": [], "visible": True,
+                       "same_process": True})
+        rows = dom.frames_of(1234, "PAGE_A")
+        assert rows[1]["target"] == "" and rows[1]["candidates"] == 0, rows
+        refusal(lambda: dom._frame_target(1234, "PAGE_A", "1"),  # noqa: SLF001
+                "frame-not-separate")
+        census.pop()
         # 3. the census names its facts apart, and an unreadable one is an
         #    ERROR — never an empty page (`{}` is "no frames")
         row, tab_row = {"profile": "/nonexistent/profile"}, {"id": "PAGE_A"}
-        dom.frames_of = lambda port, page: [                # type: ignore[assignment]
+        two = [
             # a same-process frame: its document is readable, no target of its own
             {"index": 0, "url": "about:srcdoc", "name": "", "box": [],
              "visible": True, "same_process": True, "target": "",
@@ -1781,6 +1845,7 @@ def t_frames_bind_to_their_tab() -> None:
             # a cross-origin one: a target of its own, and an unreadable document
             {"index": 1, "url": "u", "name": "", "box": [], "visible": True,
              "same_process": False, "target": "AAA", "candidates": 0}]
+        dom.frames_of = lambda port, page, census=None: two  # type: ignore[assignment]
         summary = dom._frame_summary(row, tab_row)           # noqa: SLF001
         assert summary["total"] == 2, summary
         assert summary["separate"] == 1, summary        # has a CDP target
@@ -1788,16 +1853,41 @@ def t_frames_bind_to_their_tab() -> None:
         assert summary["same_process"] == 1, summary
         assert "frame(s)" in dom._frames_note(row, tab_row)  # noqa: SLF001
 
-        def explode(port: int, page: str) -> list[dict]:
+        def explode(port: int, page: str,
+                    census: list | None = None) -> list[dict]:
             raise ControlError("cdp-error", "boom")
 
         dom.frames_of = explode                             # type: ignore[assignment]
-        broken = dom._frame_summary(row, tab_row)            # noqa: SLF001
-        assert broken["total"] is None and "boom" in broken["error"], broken
-        assert "could not be read" in dom._frames_note(row, tab_row)  # noqa: SLF001
-        dom.frames_of = lambda port, page: []               # type: ignore[assignment]
-        assert dom._frame_summary(row, tab_row) == {}        # noqa: SLF001
-        assert dom._frames_note(row, tab_row) == ""          # noqa: SLF001
+        partial = dom._frame_summary(row, tab_row)           # noqa: SLF001
+        # the DOM census answered and the TARGET list did not: the frames are
+        # reported and `separate` is NULL — never 0, which would claim that none
+        # of them can be driven
+        assert partial["total"] == 1 and partial["separate"] is None, partial
+        assert "error" not in partial, partial
+        # an unreadable CENSUS is an error instead — never an empty page
+        patched = cdp.evaluate
+
+        def no_census(ws: str, expression: str,
+                      timeout: float = 15.0) -> object:
+            raise ControlError("cdp-error", "no census")
+
+        cdp.evaluate = no_census                            # type: ignore[assignment]
+        try:
+            broken = dom._frame_summary(row, tab_row)        # noqa: SLF001
+            assert broken["total"] is None and "no census" in broken["error"], \
+                broken
+            # the note says it too — and it is asserted while the census is
+            # still failing, which is the only time that message is the truth
+            assert "could not be read" in dom._frames_note(row, tab_row)  # noqa: SLF001
+        finally:
+            cdp.evaluate = patched                          # type: ignore[assignment]
+        # a page with no frames says NOTHING (`{}`), not a zeroed census
+        cdp.evaluate = lambda ws, expr, timeout=15.0: []     # type: ignore[assignment]
+        try:
+            assert dom._frame_summary(row, tab_row) == {}     # noqa: SLF001
+            assert dom._frames_note(row, tab_row) == ""       # noqa: SLF001
+        finally:
+            cdp.evaluate = patched                          # type: ignore[assignment]
     finally:
         dom.frames_of = real_frames_of
         for name, fn in real.items():
