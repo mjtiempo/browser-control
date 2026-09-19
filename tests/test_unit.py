@@ -1418,9 +1418,13 @@ def t_capability_surface() -> None:
     read: the check and the runtime answer come from the same function, so a
     verb added without a class fails here AND shows up in the reply.
     """
-    assert capabilities.unclassified(cli_main.HANDLERS,
-                                    cli_main.TAB_SUBCOMMANDS) == [], \
-        capabilities.unclassified(cli_main.HANDLERS, cli_main.TAB_SUBCOMMANDS)
+    assert capabilities.unclassified(
+        cli_main.HANDLERS,
+        {"tab": cli_main.TAB_SUBCOMMANDS,
+         "profile": cli_main.PROFILE_SUBCOMMANDS}) == [], \
+        capabilities.unclassified(cli_main.HANDLERS,
+                                  {"tab": cli_main.TAB_SUBCOMMANDS,
+                                   "profile": cli_main.PROFILE_SUBCOMMANDS})
     for action, classes in capabilities.ACTIONS.items():
         assert classes, f"{action} has no class"
         for name in classes:
@@ -1435,6 +1439,9 @@ def t_capability_surface() -> None:
     assert capabilities.ACTIONS["tab text"] == ("read",)
     assert capabilities.ACTIONS["tab screenshot"] == ("read", "file")
     assert capabilities.ACTIONS["tab upload"] == ("write", "file")
+    assert capabilities.ACTIONS["profile info"] == ("read",)
+    assert capabilities.ACTIONS["profile seed"] == ("write", "file")
+    assert capabilities.ACTIONS["profile reset"] == ("write",)
     assert capabilities.ACTIONS["tab dialog state"] == ("read",)
     assert capabilities.ACTIONS["tab dialog accept"] == ("write",)
     assert capabilities.ACTIONS["tab wait"] == ("read",)
@@ -1448,8 +1455,11 @@ def t_capability_surface() -> None:
     assert caps["unclassified"] == [], caps
     assert caps["by_class"]["code"] == ["tab js", "tab wait --for js"], \
         caps["by_class"]["code"]
-    assert caps["by_class"]["file"] == ["tab screenshot", "tab upload"], \
-        caps["by_class"]["file"]
+    assert caps["by_class"]["write"] == sorted(
+        action for action, classes in capabilities.ACTIONS.items()
+        if "write" in classes), caps["by_class"]["write"]
+    assert caps["by_class"]["file"] == ["profile seed", "tab screenshot",
+                                        "tab upload"], caps["by_class"]["file"]
     assert caps["by_class"]["egress"] == [], caps["by_class"]["egress"]
 
 

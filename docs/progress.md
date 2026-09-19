@@ -17,15 +17,16 @@ it and puts one console script on PATH.
 | `README.md` | 190 | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
 | `LICENSE` | 21 | MIT, `Copyright (c) 2026 Mark Tiempo` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 893 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/cli/main.py` | 948 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
 | `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
 | `browser_control/lib/audit.py` | 158 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<timestamp>`, and a proven secret written as a length |
 | `browser_control/lib/browser.py` | 2165 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
 | `browser_control/lib/cdp.py` | 656 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `browser_control/lib/capabilities.py` | 108 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
-| `tests/test_unit.py` | 1537 | 34 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1764 | 54 live checks on a throwaway root, skip ≠ pass |
+| `browser_control/lib/capabilities.py` | 120 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
+| `tests/test_unit.py` | 1547 | 34 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1829 | 55 live checks on a throwaway root, skip ≠ pass |
+| `browser_control/lib/profile.py` | 360 | **the `profile` noun**: `info` (weight, age, liveness), `seed` (logins copied in, caches skipped, read back), `reset` (wipe, on purpose) |
 
 Five verbs, browser-only:
 
@@ -147,7 +148,10 @@ multi-browser test (two live instances refuse), no CI.
 
 ## 4. Known gaps and debt
 
-1. **No seeding** — the managed browser has none of the user's logins.
+1. ~~**No seeding**~~ — DONE (§5.22): `profile seed --from DIR` copies a
+   source profile's logins INTO a managed instance (caches and lock files
+   skipped, read back, `--dry` first). The caveat is in the verb's reply: the
+   OS keyring holds the key, so it decrypts on this machine and this user.
 2. ~~**No lock/serialization**~~ — DONE (§5.18): `open`/`close` hold a
    per-profile `flock` across their check-then-act and `attach`/`detach` hold
    one for the root's records, so `started: true` happens exactly once and no
@@ -200,7 +204,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.21 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.22 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -240,15 +244,15 @@ Three lessons the battery taught by leaking or flaking, all now fixed:
    battery's own foreign browsers are 30–40s now, and the "dead endpoint" the
    `nav-failed` check uses is verified closed rather than assumed free.
 
-### 5.3 Profile seeding — deferred
-Deliberately not being built yet, so the managed browser starts with none of
-the user's logins: `open`, `tabs` and the verbs above them all work, but a
-page that wants a session renders logged out. When it lands it is still the
-plan's design — reflink-first copy of the user's own profile, atomic swap,
-Chrome singleton files dropped, honest `copied: reflink|copy|empty`, and
-`--status`/`--source DIR`/`--browser NAME`/`--force` (stopping only the
-instance this CLI started). The policy question (auto-seed on first `open`
-vs explicit only) is deferred with it.
+### 5.3 Profile seeding — done (as `profile seed`, §5.22)
+Built as one of three verbs under a new browser-level noun, and with the
+environment's rules rather than the old plan's: an explicit `--from DIR` (no
+guessing which of your profiles to read), a copy that skips lock files and
+caches by name, a read-back of what landed, and `--dry` to weigh it first. The
+policy question is answered too: seeding is **explicit only** — `open` never
+seeds behind your back. Not done from the old sketch: reflink and the atomic
+swap (a copy plus a refusal to run on a live profile is what the verification
+actually needs).
 
 ### 5.4 `tab nav` + history — done
 `tab nav URL [--tab SPEC]`, `tab back`, `tab forward`, `tab reload`. The
@@ -761,6 +765,53 @@ and how to write a caller. It also states the honest limit up front: `find` and
 
 Not done, and named in §4.5: an index to publish to, and a distribution name
 that does not collide with the public `browser-control` project.
+
+### 5.22 `profile info|seed|reset` — the profiles, managed — done
+
+A new browser-level noun, the way `tab` is a page-level one, with the three
+verbs a caller needs before `open`:
+
+| verb | classes | what it does |
+| --- | --- | --- |
+| `profile info [--profile DIR]` | `read` | every managed profile: weight, files, last change, whether a browser is on it (pid/port/exe/verified), whether it is attached, and whether it is the DEFAULT instance for a browser binary |
+| `profile seed --from DIR [--force] [--dry]` | `write`, `file` | copies a source profile's LOGINS into a managed instance |
+| `profile reset [--force]` | `write` | wipes one, so the next `open` starts clean |
+
+Three rules, and they are why this is not a `copytree` call:
+
+1. **A running profile is never written.** Both destructive verbs refuse
+   `profile-live`, naming the pid, because copying under a live browser is how a
+   profile gets corrupted — the thing Chrome's own singleton warning is about.
+2. **Only this CLI's root is touchable.** `profile reset --profile
+   /home/you/.config/google-chrome` refuses `not-managed`: reading a source
+   profile is just a copy, but wiping one is destroying somebody's real browser.
+3. **What landed is read back.** Every file the source has (minus the skips) is
+   checked for in the target by size; a mismatch refuses `seed-not-verified`
+   rather than reporting a login that is not there. `--dry` counts first, so
+   `--force` can be a decision instead of a hope.
+
+The engine's details are the honest ones: the skip list is by NAME at any depth
+(lock files, `DevToolsActivePort`, our own records, and the caches that are
+hundreds of megabytes of nothing) so a future Chrome that adds a login store
+still gets seeded; symlinks are counted and NOT followed, because a profile can
+contain links into the filesystem; and the reply says what it is worth — bytes,
+files, dirs, what it skipped, how many links it left alone, and the caveat that
+matters: the cookie and password keys live in the OS keyring, so the copy
+decrypts **on this machine, for this user**, and the verb does not pretend
+otherwise.
+
+Also: `profile seed` answers the deferred policy question from the old plan —
+seeding is **explicit only**; `open` never seeds behind your back. Not carried
+over from that sketch: reflink and the atomic swap (a copy plus "refuse to run
+on a live profile" is what the verification actually needs).
+
+Hermetic (34): the surface check now covers `profile <sub>` through one
+`unclassified(HANDLERS, {"tab": …, "profile": …})` call, so a noun added without
+classes fails the same way a verb does. Battery (55): a source fixture of two
+"login" files plus a lock file and a cache dir — seeded in, the two land and the
+other two are skipped, reseeding refuses `profile-exists`, `--dry` writes
+nothing, a live profile refuses `profile-live`, a wipe needs `--force` and then
+really wipes — and a profile outside the root refuses `not-managed`.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,

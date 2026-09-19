@@ -23,6 +23,7 @@ from browser_control.lib import browser as browser_lib
 from browser_control.lib import capabilities
 from browser_control.lib import cdp
 from browser_control.lib import dom
+from browser_control.lib import profile as profile_lib
 from browser_control.lib.browser import (
     activate,
     attach,
@@ -59,6 +60,14 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   attach --list      what is attached, and whether it is still up
   detach [--port N|--pid N|--profile DIR|--all]
                      revoke that authorization
+  profile info [--profile DIR]
+                     the profiles this CLI manages: weight, age, whether a
+                     browser is on one, whether it is attached
+  profile seed --from DIR [--force] [--dry]
+                     copy a source profile's LOGINS into a managed one (no
+                     caches, no lock files, read back; --dry counts first)
+  profile reset --force
+                     wipe a managed profile, logins included
   tab [URL...]       open one tab per URL (about:blank when none)
   tab list           every drivable browser's page tabs, by browser
   tab info SPEC      one tab: `id:<prefix>` or a title/url substring
@@ -313,8 +322,9 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
                  # asked from the SAME function the hermetic test uses, so a
                  # verb added without a class shows up in this reply instead of
                  # being quietly missing from a table nobody re-reads
-                 "unclassified": capabilities.unclassified(HANDLERS,
-                                                           TAB_SUBCOMMANDS)},
+                 "unclassified": capabilities.unclassified(
+                     HANDLERS, {"tab": TAB_SUBCOMMANDS,
+                                "profile": PROFILE_SUBCOMMANDS})},
              "browsers": found}
     if browser:
         reply["requested"] = {"name": browser,
@@ -776,6 +786,43 @@ def cmd_tab_media(rest: list[str], browser: str) -> dict:
                      tab=spec, browser=browser)
 
 
+def cmd_profile_info(rest: list[str], browser: str) -> dict:
+    """`profile info [--profile DIR]`."""
+    _none(rest, "profile info")
+    return profile_lib.info()
+
+
+def cmd_profile_seed(rest: list[str], browser: str) -> dict:
+    """`profile seed --from DIR [--force] [--dry]`."""
+    rest, source = _pop(rest, "--from", "profile seed")
+    rest, force = _switch(rest, "--force")
+    rest, dry = _switch(rest, "--dry")
+    _none(rest, "profile seed")
+    return profile_lib.seed(source or "", browser=browser, force=force,
+                            dry=dry)
+
+
+def cmd_profile_reset(rest: list[str], browser: str) -> dict:
+    """`profile reset [--force]`."""
+    rest, force = _switch(rest, "--force")
+    _none(rest, "profile reset")
+    return profile_lib.reset(browser=browser, force=force)
+
+
+def cmd_profile(rest: list[str], browser: str) -> dict:
+    """`profile info|seed|reset` — the browser-level noun for profiles.
+
+    `tab` owns everything about a page tab, the way this owns the profiles the
+    CLI manages: seeing them, giving one a source profile's logins, and wiping
+    one. The instance itself is named with the global `--profile DIR`.
+    """
+    handler = PROFILE_SUBCOMMANDS.get(str(rest[0]) if rest else "")
+    if handler is None:
+        fail("bad-args",
+             "profile: a subcommand is required (info, seed, reset)")
+    return handler(rest[1:], browser)
+
+
 # `tab`'s subcommands: a reserved first word, so a URL can never be mistaken
 # for one (and vice versa).
 TAB_SUBCOMMANDS: dict[str, Handler] = {
@@ -806,6 +853,13 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
     "media": cmd_tab_media,
 }
 
+# `profile`'s subcommands, the way `tab` has its own: a reserved first word.
+PROFILE_SUBCOMMANDS: dict[str, Handler] = {
+    "info": cmd_profile_info,
+    "seed": cmd_profile_seed,
+    "reset": cmd_profile_reset,
+}
+
 HANDLERS: dict[str, Handler] = {
     "open": cmd_open,
     "close": cmd_close,
@@ -813,6 +867,7 @@ HANDLERS: dict[str, Handler] = {
     "info": cmd_info,
     "attach": cmd_attach,
     "detach": cmd_detach,
+    "profile": cmd_profile,
     "tab": cmd_tab,
     "selftest": cmd_selftest,
 }

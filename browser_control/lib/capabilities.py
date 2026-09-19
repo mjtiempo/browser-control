@@ -78,11 +78,22 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "tab wait": ("read",),
     "tab wait --for js": ("code",),
     "tab js": ("code", "write"),
+    # profiles
+    "profile info": ("read",),
+    "profile seed": ("write", "file"),
+    "profile reset": ("write",),
 }
 
 
-def unclassified(handlers: dict, subcommands: dict) -> list[str]:
-    """The verbs with NO entry — a top-level verb, or a `tab` subcommand.
+def unclassified(handlers: dict,
+                 subcommands: dict[str, dict] | None = None) -> list[str]:
+    """The verbs with NO entry — a top-level verb, or a subcommand of one.
+
+    `subcommands` maps a noun to its subcommand table, so one call covers every
+    noun the CLI has:
+
+        unclassified(HANDLERS, {"tab": TAB_SUBCOMMANDS,
+                               "profile": PROFILE_SUBCOMMANDS})
 
     Asked at runtime (`selftest` prints the answer) and by the hermetic test,
     from this one function, so a new verb cannot exist in one place and be
@@ -91,11 +102,12 @@ def unclassified(handlers: dict, subcommands: dict) -> list[str]:
     missing = [verb for verb in handlers
                if verb not in ACTIONS
                and not any(key.startswith(f"{verb} ") for key in ACTIONS)]
-    for sub in subcommands:
-        key = f"tab {sub}"
-        if not any(action == key or action.startswith(key + " ")
-                   for action in ACTIONS):
-            missing.append(key)
+    for noun, table in (subcommands or {}).items():
+        for sub in table:
+            key = f"{noun} {sub}"
+            if not any(action == key or action.startswith(key + " ")
+                       for action in ACTIONS):
+                missing.append(key)
     return sorted(missing)
 
 

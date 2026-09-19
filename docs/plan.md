@@ -144,11 +144,11 @@ Browser-level:
 
 `open URL…` · `close [--force]` · `list` · `info` · `attach [--port N|--pid N|--profile
 DIR]` · `attach --list` · `detach [--port N|--pid N|--profile DIR|--all]` ·
-`selftest` · `help` · `cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the
+`selftest` · `profile info` · `profile seed --from DIR [--force] [--dry]` ·
+`profile reset [--force]` · `help` · `cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the
 raw escape hatch) · `search QUERY [--engine E] [--limit N]` (headless, in a
 browser of its own) — and later `ensure [URL] [--relaunch] [--no-seed]` ·
-`restart` · `profile-status` · `profile-sync [--source DIR] [--browser NAME]
-[--force]`.
+`restart` · profile snapshots (`profile save`/`profile load`, if they ever earn it).
 
 Page-level, under `tab`:
 
@@ -284,6 +284,9 @@ unclear oracle into a claim of absence.**
 | `tab nav` · `tab back`/`forward` | mutation | `Page.navigate` (browser-side, so a PARKED renderer still navigates), then the MOVE (a new document or a changed address), then `readyState` + not an error page | L3 | `nav-failed` (an error page, a refused navigation, or a download), `nav-not-verified` |
 | `tab reload` | mutation | `performance.timeOrigin` changed: a NEW document | L3 | `reload-not-verified` |
 | `tab [URL…]` | mutation | the tab row exists, the id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
+| `profile info` | read | each managed profile's own numbers from a walk of it | L2 | `not-managed` (outside the root) |
+| `profile seed --from DIR` | mutation (+ `file`) | every source file the skips allow, re-found in the target by size | L3 | `bad-args` (no `--from`, or the same tree), `profile-live`, `profile-exists` (without `--force`), `seed-not-verified`, `seed-failed` |
+| `profile reset` | mutation | the path is GONE afterwards | L2 | `profile-live`, `profile-exists` (without `--force`), `not-managed`, `reset-not-verified` |
 | `tab close SPEC… / --like / --title / --url / --all / --except / --dry` | mutation | every requested id ABSENT from the re-read list, over the UNION of the matches, all resolved before anything closes | L3 | `no-page-tab` (naming the value and suggesting `--like`, or the exception that kept nothing), `not-managed` (every match foreign), `close-tab-not-verified` (report survivors); foreign matches are REPORTED in `skipped`, never closed silently. A SPEC names a tab exactly (`id:` with no prefix refuses); `--like` is the declared sweep; `--dry` resolves and returns `would_close` without closing anything. Closing the LAST tab stops the browser with its last window |
 | `tab activate` | mutation | the page's own `document.visibilityState` before and after `Page.bringToFront` | L2 | `activate-not-verified` (the window may be hidden entirely) |
 | `tab click` | mutation | hit-test before, then url/title/focus/scroll before-and-after | L4 | `occluded`, `no-viewport-target`, `ambiguous-element` |

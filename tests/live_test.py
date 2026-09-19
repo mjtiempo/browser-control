@@ -1449,6 +1449,70 @@ def c_concurrent_open_is_serialized() -> str:
             f"the same browser, {len(refused)} refused")
 
 
+def c_profile_verbs() -> str:
+    """`profile info|seed|reset`: seen, seeded from a source, wiped.
+
+    The source profile is a fixture of this check's own making — two files a
+    login would live in, plus a lock file and a cache dir that must NOT be
+    copied — so the copy, the skips and the read-back are all proven without
+    touching anybody's real browser data.
+    """
+    target = os.path.join(ROOT, "instance-seeded")
+    source = tempfile.mkdtemp(prefix="browser-control-source-")
+    try:
+        os.makedirs(Path(source, "Cache"))
+        Path(source, "Cookies").write_text("cookie-bytes" * 8, encoding="utf-8")
+        Path(source, "Preferences").write_text("{}", encoding="utf-8")
+        Path(source, "SingletonLock").write_text("lock", encoding="utf-8")
+        Path(source, "Cache", "data").write_text("junk" * 64,
+                                                  encoding="utf-8")
+        # `profile info` sees the browser the battery is driving, live
+        listed = ok_json("profile", "info")
+        assert listed["root"] == ROOT, listed
+        ours = next((row for row in listed["profiles"]
+                     if row.get("live", {}).get("pid") == STATE["pid"]), None)
+        assert ours is not None, listed
+        assert ours["managed"] is True and ours["files"] > 0, ours
+        # seed: the two login files land, the lock and the cache do not
+        reply = ok_json("profile", "seed", "--from", source,
+                        "--profile", target)
+        assert reply["copied_files"] == 2, reply
+        assert reply["verified"] is True, reply
+        assert {"Cache", "SingletonLock"} <= set(reply["skipped"]), reply
+        landed = sorted(os.listdir(target))
+        assert landed == ["Cookies", "Preferences"], landed
+        # an existing profile is only overwritten on purpose
+        refuses("profile-exists", "profile", "seed", "--from", source,
+                "--profile", target)
+        preview = ok_json("profile", "seed", "--from", source, "--force",
+                          "--dry", "--profile", target)
+        assert preview["dry"] is True and preview["verified"] is False, preview
+        assert preview["copied_files"] == 2, preview
+        assert sorted(os.listdir(target)) == landed, "--dry wrote something"
+        # a running profile is never seeded or wiped
+        refuses("profile-live", "profile", "reset", "--profile",
+                str(ours["path"]))
+        assert listening(int(STATE["port"])), "the refusal stopped a browser"
+        # wiping takes the explicit word too, and then really wipes
+        refuses("profile-exists", "profile", "reset", "--profile", target)
+        assert os.path.isdir(target), "the refused reset removed it"
+        gone = ok_json("profile", "reset", "--force", "--profile", target)
+        assert gone["reset"] is True and gone["verified"] is True, gone
+        assert gone["files"] == 2 and gone["bytes_freed"] > 0, gone
+        assert not os.path.exists(target), "the profile survived the wipe"
+        # somebody's real profile is not one of ours to touch
+        outside = tempfile.mkdtemp(prefix="browser-control-outside-")
+        try:
+            refuses("not-managed", "profile", "reset", "--force",
+                    "--profile", outside)
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
+        shutil.rmtree(target, ignore_errors=True)
+    return "seen live, seeded (2 files, lock and cache skipped), wiped"
+
+
 def c_list_shows_a_browser_outside_cdp() -> str:
     """A browser with no debugging port is LISTED, and never driven.
 
@@ -1647,6 +1711,7 @@ CHECKS = (
     ("list names the listener that owns each port",
      c_list_reports_the_listener),
     ("a port a stranger holds is refused", c_cdp_not_local),
+    ("profile info/seed/reset", c_profile_verbs),
     ("close ignores a recycled pid", c_close_ignores_a_recycled_pid),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),
