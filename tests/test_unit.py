@@ -1534,10 +1534,11 @@ def t_policy_gate() -> None:
         # something nobody classified is refused rather than waved through
         blocked, why = capabilities.allowed("tab frobnicate")
         assert blocked is False and "declared surface" in why, why
-        # the environment is the default source, and a flag names ONE side:
-        # the other still comes from the environment (the bug this replaced:
-        # `--deny X` voided a host's `BROWSER_CONTROL_ALLOW=read` whitelist and
-        # let `tab js` run)
+        # the environment is the default source; a flag names ONE side, and it
+        # may only NARROW what the environment set for the session (the bugs
+        # this replaced: `--deny X` voided a host's `BROWSER_CONTROL_ALLOW=read`
+        # whitelist, and — mirrored — `--deny egress` replaced a host's deny-list
+        # so `tab js` ran while `BROWSER_CONTROL_DENY=code` stood)
         os.environ[capabilities.DENY_ENV] = "code"
         assert capabilities.policy()["source"] == capabilities.DENY_ENV
         both = capabilities.policy("read", None)
@@ -1549,8 +1550,9 @@ def t_policy_gate() -> None:
         rc, out, _err = run_cli(["selftest", "--deny", "read"])
         assert rc == 0, (rc, out)
         policy = json.loads(out)["policy"]
-        assert policy["deny"] == ["read"] and policy["enforced"] is True, \
-            policy
+        # the flag ADDS to the environment's list rather than replacing it
+        assert policy["deny"] == ["read", "code"], policy
+        assert policy["enforced"] is True, policy
         rc, _out, err = run_cli(["tab", "text", "--allow", "nonsense"])
         assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
     finally:
@@ -1597,6 +1599,16 @@ def t_gate_and_argv_hardening() -> None:
     #    and a `--tab` whose VALUE is literally `--for` is not the mode
     assert cli_main.action("tab", ["wait", "--tab", "--for", "--for", "js"]) \
         == "tab wait --for js"
+    # …and a `--tab` whose VALUE is a mode flag must not be read as the mode: the
+    # handler pops `--tab` FIRST, so the gate has to as well (a review measured
+    # this argv running `js` while the gate had authorised `tab wait`, a read)
+    assert cli_main.action("tab", ["wait", "--for", "js", "--expr", "1",
+                                    "--tab", "--for=load", "--tab", "id:0"]) \
+        == "tab wait --for js"
+    rc, _out, err = run_cli(["tab", "wait", "--for", "js", "--expr", "1",
+                             "--tab", "--for=load", "--tab", "id:0",
+                             "--allow", "read"])
+    assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
     assert cli_main.action("tab", ["wait", "--for", " js "]) == \
         "tab wait --for js"
     assert cli_main.action("tab", ["wait", "--for", "load", "--for", "js"]) \
@@ -1645,6 +1657,26 @@ def t_gate_and_argv_hardening() -> None:
         assert described["source"] == f"{capabilities.ALLOW_ENV} + --deny", \
             described
         assert described["enforced"] is True, described
+        # …and the MIRROR: the env-DENY side survives a `--deny` naming something
+        # else. The first version of this fix still let that through (a review
+        # measured `BROWSER_CONTROL_DENY=code` + `--deny egress` running js)
+        os.environ.pop(capabilities.ALLOW_ENV, None)
+        os.environ[capabilities.DENY_ENV] = "code"
+        rc, _out, err = run_cli(["tab", "js", "1", "--deny", "egress"])
+        assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+        # a flag may NARROW the session allow-list, never widen it
+        os.environ[capabilities.ALLOW_ENV] = "read"
+        rc, _out, err = run_cli(["tab", "js", "1", "--allow", "code"])
+        assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+        # …and when the two allow-lists share no class, NOTHING is allowed: an
+        # empty allow-list is not "no policy"
+        capabilities.policy("write", None)
+        assert capabilities.allowed("list")[0] is False, capabilities.describe()
+        # a value that NAMES NO CLASS must not switch the gate off
+        for argv in (["tab", "js", "1", "--allow", ","],
+                     ["list", "--deny", ","]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     finally:
         for name, value in saved.items():
             if value is None:

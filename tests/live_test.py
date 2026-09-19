@@ -1235,12 +1235,27 @@ def c_policy_gate() -> str:
     # the gate does not block its own explanation, and reports itself
     caps = ok_json("selftest", env_extra={"BROWSER_CONTROL_DENY": "read"})
     assert caps["policy"] == {"allow": [], "deny": ["read"],
+                              "allow_set": False, "deny_set": True,
                               "source": "BROWSER_CONTROL_DENY",
                               "enforced": True}, caps["policy"]
     # a typo in a policy refuses instead of quietly allowing everything
     refuses("bad-args", "tab", "text",
             env_extra={"BROWSER_CONTROL_ALLOW": "reed"})
-    return "an allowed read worked; a denied write refused `not-allowed`"
+    # a flag may only NARROW the session policy, never widen or replace it — so
+    # a `--deny` naming something else leaves the host's deny-list standing
+    # (measured: it replaced it, and `tab js` ran), and the mirror on the allow
+    # side, and a value that NAMES NO CLASS must not switch the gate off
+    err = refuses("not-allowed", "tab", "js", "1", "--deny", "egress",
+                  env_extra={"BROWSER_CONTROL_DENY": "code"})
+    assert "code" in err and "denied" in err, err
+    err = refuses("not-allowed", "tab", "js", "1", "--allow", "code",
+                  env_extra=read_only)
+    assert "not allowed" in err, err
+    for argv in (("tab", "js", "1", "--allow", ","),
+                 ("list", "--deny", ",")):
+        refuses("bad-args", *argv, env_extra=read_only)
+    return ("an allowed read worked; a denied write refused `not-allowed`; "
+            "a flag could only narrow the session policy")
 
 
 def c_frames() -> str:
@@ -1264,7 +1279,7 @@ def c_frames() -> str:
     assert "TOP_MARKER" in top["text"], top
     assert "INNER_MARKER" not in top["text"], top
     assert top["frames"] == {"total": 3, "separate": 2, "same_process": 1,
-                             "visible": 3}, top["frames"]
+                             "cross_origin": 2, "visible": 3}, top["frames"]
     # `--frame` by index and by URL, with the verbs working inside it
     inner = ok_json("tab", "text", "--frame", "1", "--chars", "120",
                     "--tab", tid)
@@ -1279,6 +1294,22 @@ def c_frames() -> str:
     after = ok_json("tab", "text", "--frame", "1", "--chars", "120",
                     "--tab", tid)
     assert "FRAME_CLICKED" in after["text"], after   # the frame's own handler
+    assert str((clicked.get("frame_resolved") or {}).get("url", "")).endswith(
+        "/frames-inner"), clicked.get("frame_resolved")
+    # `wait` drives its OWN connection, so it is the verb most likely to forget
+    # the scope. A predicate true only INSIDE the frame proves that it does not:
+    # in the page it times out, and with `--frame 1` it passes (measured before
+    # the fix: it timed out there too, while the reply claimed `frame: 1`)
+    missed = refuses("wait-timeout", "tab", "wait", "--for", "js", "--expr",
+                     "!!document.querySelector('#go')", "--timeout", "3",
+                     "--tab", tid)
+    assert "did not pass within" in missed, missed
+    waited = ok_json("tab", "wait", "--for", "js", "--expr",
+                     "!!document.querySelector('#go')", "--frame", "1",
+                     "--timeout", "10", "--tab", tid)
+    assert waited["ok"] is True, waited
+    assert str((waited.get("frame_resolved") or {}).get("url", "")).endswith(
+        "/frames-inner"), waited.get("frame_resolved")
     # ambiguity is named, not guessed; a frame without a target says so
     err = refuses("frame-ambiguous", "tab", "text", "--frame", "localhost",
                   "--chars", "40", "--tab", tid)

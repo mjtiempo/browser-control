@@ -140,7 +140,8 @@ ALLOW_ENV = "BROWSER_CONTROL_ALLOW"
 DENY_ENV = "BROWSER_CONTROL_DENY"
 EVERY = ("*", "all")
 
-POLICY: dict = {"allow": (), "deny": (), "source": "", "enforced": False}
+POLICY: dict = {"allow": (), "deny": (), "allow_set": False,
+                "deny_set": False, "source": "", "enforced": False}
 
 
 def _classes(text: str, what: str) -> tuple[str, ...]:
@@ -164,78 +165,103 @@ def _classes(text: str, what: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _side(value: str | None, env_name: str, what: str) -> str:
-    """One side of the policy: the flag if it was given, else the environment.
+def _classes_of(value: str, what: str) -> tuple[str, ...]:
+    """The classes a policy value names — refusing one that names NONE.
 
-    The sides are resolved INDEPENDENTLY, and that is the point: a flag naming
-    one side must not void the other, or a narrow-sounding `--deny egress`
-    would quietly drop a host's `BROWSER_CONTROL_ALLOW=read` whitelist and
-    authorise what the host forbade (measured: it did). A flag given with an
-    EMPTY value is refused rather than read as "no policy" — "allow nothing"
-    is spelled `--deny '*'` — while an environment variable that is set but
-    empty is not a policy at all (that is how a shell spells "unset").
+    `--allow ,` names nothing, and a policy that names nothing used to read as
+    "no policy", turning the gate off (measured by a review: `--allow ,` let
+    `tab js` run while `BROWSER_CONTROL_ALLOW=read` was set). "Nothing is
+    allowed" has a spelling — `--deny '*'` — and a value that says nothing is
+    a mistake, not a policy.
     """
-    if value is None:
-        return os.environ.get(env_name, "")
-    if not str(value).strip():
+    text = str(value or "").strip()
+    if not text:
+        return ()
+    if not [part for part in text.replace(" ", "").split(",") if part]:
         fail("bad-args",
-             f"{what}: needs at least one class — name them, use * for all, "
-             "or use `--deny *` to allow nothing")
-    return str(value)
+             f"{what}: names no class — name them, use * for every class, or "
+             "`--deny *` to allow nothing")
+    return _classes(text, what)
 
 
 def policy(allow: str | None = None, deny: str | None = None) -> dict:
-    """Replace the policy in force, from flags or from the environment.
+    """Replace the policy in force, from flags AND the environment.
 
-    `None` means "not given on this CALL": that side falls back to the
-    environment, and to no policy when the environment is silent too. The reply
-    of `selftest` names every source in force.
+    A flag may NARROW what the environment set for the session, never widen or
+    replace it. Measured by a review, and the reason this is not "flags win":
+    with `BROWSER_CONTROL_DENY=code`, a call passing `--deny egress` replaced
+    the host's deny list and `tab js` ran; with `BROWSER_CONTROL_ALLOW=read`, a
+    call passing `--allow code` did the same. So both sets are kept — the allow
+    side INTERSECTS (a class must be allowed by both) and the deny side UNIONS
+    (a denial by either holds). A flag given with an empty value, or one that
+    names no class, is refused.
     """
-    chosen_allow = _side(allow, ALLOW_ENV, "--allow")
-    chosen_deny = _side(deny, DENY_ENV, "--deny")
+    env_allow, env_deny = os.environ.get(ALLOW_ENV, ""), \
+        os.environ.get(DENY_ENV, "")
+    for value, what, spell in ((allow, "--allow", "--deny *"),
+                               (deny, "--deny", "--deny *")):
+        if value is not None and not str(value).strip():
+            fail("bad-args",
+                 f"{what}: needs at least one class — name them, use * for "
+                 f"every class, or `{spell}` to allow nothing")
+    flag_allow = _classes_of(allow, "--allow") if allow is not None else ()
+    flag_deny = _classes_of(deny, "--deny") if deny is not None else ()
+    env_allow_classes = _classes_of(env_allow, ALLOW_ENV)
+    env_deny_classes = _classes_of(env_deny, DENY_ENV)
+    if allow is None:
+        allow_classes = env_allow_classes
+    elif env_allow.strip():
+        allow_classes = tuple(name for name in flag_allow
+                              if name in env_allow_classes)
+    else:
+        allow_classes = flag_allow
+    deny_classes = tuple(dict.fromkeys(flag_deny + env_deny_classes))
+    allow_set = allow is not None or bool(env_allow.strip())
+    deny_set = deny is not None or bool(env_deny.strip())
     sources = []
     if allow is not None:
         sources.append("--allow")
-    elif chosen_allow.strip():
+    if env_allow.strip():
         sources.append(ALLOW_ENV)
     if deny is not None:
         sources.append("--deny")
-    elif chosen_deny.strip():
+    if env_deny.strip():
         sources.append(DENY_ENV)
-    allow_classes = _classes(chosen_allow, "--allow")
-    deny_classes = _classes(chosen_deny, "--deny")
     POLICY.update({"allow": allow_classes, "deny": deny_classes,
+                   "allow_set": allow_set, "deny_set": deny_set,
                    "source": " + ".join(sources),
-                   # a policy with no classes is still a policy: `enforced` is
-                   # what `allowed` consults, so "nothing is allowed" can never
-                   # read as "no policy at all"
-                   "enforced": bool(allow_classes or deny_classes)})
+                   # a policy is in force when one was ASKED for, even if the
+                   # resolved sets are empty: an empty allow-list means nothing
+                   # is allowed, which is not the same as no policy at all
+                   "enforced": bool(allow_set or deny_set)})
     return dict(POLICY)
 
 
 def describe() -> dict:
     """The policy in force, for `selftest` to report."""
     return {"allow": list(POLICY["allow"]), "deny": list(POLICY["deny"]),
+            "allow_set": POLICY["allow_set"], "deny_set": POLICY["deny_set"],
             "source": POLICY["source"],
             "enforced": bool(POLICY["enforced"])}
 
 
 def allowed(action: str) -> tuple[bool, str]:
     """May that action run under the policy in force? (yes, or why not)."""
-    allow = tuple(POLICY["allow"])
-    deny = tuple(POLICY["deny"])
     if not POLICY["enforced"]:
         return True, ""
     classes = ACTIONS.get(action)
     if not classes:
         return False, (f"{action} is not in the declared surface (see "
                        "`selftest`), and an unclassified verb is refused")
-    blocked = [name for name in classes if name in deny]
+    blocked = [name for name in classes if name in POLICY["deny"]]
     if blocked:
         return False, (f"{action} is {'+'.join(classes)}, and "
                        f"{blocked[0]!r} is denied by {POLICY['source']}")
-    if allow:
-        missing = [name for name in classes if name not in allow]
+    if POLICY["allow_set"]:
+        # an ALLOW-SET with no class in it allows NOTHING: `if allow:` would
+        # read that as "no allow-list", which is how an empty policy turned the
+        # gate off (measured)
+        missing = [name for name in classes if name not in POLICY["allow"]]
         if missing:
             return False, (f"{action} is {'+'.join(classes)}, and "
                            f"{missing[0]!r} is not allowed by "

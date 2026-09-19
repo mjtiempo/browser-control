@@ -624,6 +624,26 @@ def _resolve(tab: str, browser: str, for_write: bool) -> tuple[dict, dict]:
     return tabs._one_tab(tab, browser, for_write)  # noqa: SLF001
 
 
+def _document_ws(port: int, page_target: str) -> str:
+    """The websocket of the DOCUMENT a content verb acts on.
+
+    The page itself, or the FRAME `--frame` names — and the scope is applied
+    HERE, in one place, so a verb that drives its own connection cannot be the
+    one that forgets it. That gap was real: `tab wait` opens its own connection
+    for many samples, and `tab wait --frame 1` evaluated the predicate in the
+    top document while its reply said `frame: 1`.
+    """
+    if FRAME["wanted"]:
+        target = _frame_target(port, page_target, FRAME["wanted"])
+        # WHICH frame that was: an index is the page's live iframe order, so the
+        # reply says what was resolved, not only what was asked for
+        FRAME["resolved"] = {"index": _int(target["index"]),
+                             "url": str(target["url"]),
+                             "target": str(target["target"])}
+        return cdp.target_ws(port, str(target["target"]), "iframe")
+    return cdp.target_ws(port, page_target)
+
+
 def _session(row: dict, tab_row: dict) -> cdp.Session:
     """ONE connection for the whole verb — or for the FRAME it is scoped to.
 
@@ -633,16 +653,7 @@ def _session(row: dict, tab_row: dict) -> cdp.Session:
     frame's own handler and the frame reports the new state.
     """
     port = cdp.port_of(str(row["profile"]))
-    if FRAME["wanted"]:
-        target = _frame_target(port, str(tab_row["id"]), FRAME["wanted"])
-        # WHICH frame that was: an index is the page's live iframe order, so the
-        # reply says what was resolved, not only what was asked for
-        FRAME["resolved"] = {"index": _int(target["index"]),
-                             "url": str(target["url"]),
-                             "target": str(target["target"])}
-        return cdp.Session(cdp.target_ws(port, str(target["target"]),
-                                        "iframe"))
-    return cdp.Session(cdp.target_ws(port, str(tab_row["id"])))
+    return cdp.Session(_document_ws(port, str(tab_row["id"])))
 
 
 def frames_of(port: int, page_target: str) -> list[dict]:
@@ -1052,7 +1063,7 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
                   .replace("__IDLE_MS__", str(_int(idle_ms, IDLE_DEFAULT_MS))))
     started = time.time()
     value, samples = cdp.evaluate_until(
-        cdp.target_ws(cdp.port_of(profile), target_id), expression, bool,
+        _document_ws(cdp.port_of(profile), target_id), expression, bool,
         seconds, WAIT_POLL_S)
     if not value:
         what = selector or expr or ""
