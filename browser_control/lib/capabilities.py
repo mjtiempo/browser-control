@@ -51,6 +51,7 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     # tabs
     "tab": ("write",),
     "tab list": ("read",),
+    "tab frames": ("read",),
     "tab info": ("read",),
     "tab close": ("write",),
     "tab nav": ("write",),

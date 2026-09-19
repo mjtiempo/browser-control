@@ -221,34 +221,54 @@ def page_rows_at(port: int) -> list[dict]:
     return _pages(_get_port(port, "/json"))
 
 
-def _pages(rows: Any) -> list[dict]:
-    """A `/json` reply -> its PAGE targets, id-sorted.
+def frame_rows(port: int) -> list[dict]:
+    """The IFRAME targets of the browser on this port, id-sorted.
+
+    A CROSS-ORIGIN frame is a target of its own: its own websocket, its own
+    coordinate space, its own execution. That is what makes every page verb
+    work inside it unchanged (measured: a real click dispatched on that session
+    fires the frame's own handler). A same-process frame has no such target, and
+    the DOM layer says so rather than pretending (`tab frames`).
+    """
+    return _of_kind(_get_port(port, "/json"), "iframe")
+
+
+def _of_kind(rows: Any, kind: str) -> list[dict]:
+    """A `/json` reply -> the targets of one kind, id-sorted.
 
     Sorted by target id locally: CDP does not document `/json` order, so "the
     tabs" would otherwise follow an external array's order.
     """
     if not isinstance(rows, list):
         fail("cdp-error", "/json answered a shape this tool cannot read")
-    pages = [r for r in rows
-             if isinstance(r, dict) and r.get("type") == "page" and r.get("id")]
-    return sorted(pages, key=lambda r: str(r["id"]))
+    found = [r for r in rows
+             if isinstance(r, dict) and r.get("type") == kind and r.get("id")]
+    return sorted(found, key=lambda r: str(r["id"]))
 
 
-def target_ws(port: int, target_id: str) -> str:
-    """The websocket of ONE page target on `port`, host-checked.
+def _pages(rows: Any) -> list[dict]:
+    """A `/json` reply -> its PAGE targets, id-sorted."""
+    return _of_kind(rows, "page")
 
-    Read from `/json` — whose rows carry it — so the connection is that tab's
-    own, not a re-resolution of a spec that may have moved since.
+
+def target_ws(port: int, target_id: str, kind: str = "page") -> str:
+    """The websocket of ONE target on `port`, host-checked.
+
+    `kind="page"` is a tab; `kind="iframe"` is a cross-origin frame, which is
+    a target of its own. Read from `/json` — whose rows carry it — so the
+    connection is that target's own, not a re-resolution of a spec that may
+    have moved since.
     """
-    row = next((r for r in _pages(_get_port(port, "/json"))
-                if str(r.get("id")) == str(target_id)), None)
+    rows = _of_kind(_get_port(port, "/json"), kind)
+    row = next((r for r in rows if str(r.get("id")) == str(target_id)), None)
+    what = "tab" if kind == "page" else "frame"
+    code = "no-page-tab" if kind == "page" else "no-frame"
     if row is None:
-        fail("no-page-tab", f"tab {str(target_id)[:10]}… left the tab list")
+        fail(code, f"{what} {str(target_id)[:10]}… left the {what} list")
     ws = str(row.get("webSocketDebuggerUrl") or "")
     if not ws:
-        fail("no-page-tab",
-             f"tab {str(target_id)[:10]}… has no websocket endpoint")
-    return _checked_ws(ws, "tab")
+        fail(code, f"{what} {str(target_id)[:10]}… has no websocket endpoint")
+    return _checked_ws(ws, what)
 
 
 def rows_to_tabs(rows: list[dict]) -> list[dict]:

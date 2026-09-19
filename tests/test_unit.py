@@ -1561,6 +1561,59 @@ def t_policy_gate() -> None:
     assert cli_main.action("open", []) == "open"
 
 
+def t_frames_and_points() -> None:
+    """`--frame`/`--at`: the scope, the point syntax, the verb list.
+
+    Resolving a frame needs a browser (it reads the DOM and `/json`), so that
+    oracle is the battery. What is hermetic: the scope is SET AND CLEARED per
+    invocation like `--profile`, a point is two numbers with a refusal that
+    names the verb that asked, and only the verbs that can be scoped say so.
+    """
+    rc, _out, _err = run_cli(["selftest", "--frame", "localhost"])
+    assert rc == 0 and dom.frame() == "localhost", dom.frame()
+    rc, _out, _err = run_cli(["selftest"])          # no flag: CLEARED again
+    assert rc == 0 and dom.frame() == "", dom.frame()
+    assert dom._at_point("10,20") == (10, 20)          # noqa: SLF001
+    assert dom._at_point(" 10, 20 ") == (10, 20)       # noqa: SLF001
+    assert dom._at_point("-5,3") == (-5, 3)            # noqa: SLF001
+    for bad in ("10", "x,y", "10,", ",20", ""):
+        refusal(lambda bad=bad: dom._at_point(bad, "tab click"),  # noqa: SLF001
+                "bad-args")
+    calls: list[tuple] = []
+
+    def fake_click(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, tab: str = "",
+                   browser: str = "", at: str | None = None) -> dict:
+        calls.append((text, selector, at))
+        return {"ok": True}
+
+    original = cli_main.dom.click
+    cli_main.dom.click = fake_click                   # type: ignore[assignment]
+    try:
+        rc, _out, err = run_cli(["tab", "click", "--at", "10,20"])
+        assert rc == 0 and calls == [(None, None, "10,20")], (rc, calls, err)
+        for argv in (["tab", "click", "--at", "10,20", "--selector", "#x"],
+                     ["tab", "click", "Save", "--at", "10,20"],
+                     ["tab", "click"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+        assert calls == [(None, None, "10,20")], calls
+    finally:
+        cli_main.dom.click = original                 # type: ignore[assignment]
+    # a point that is not two numbers refuses BEFORE any browser is touched
+    # (the real `dom.click`, so the real `_at_point` judgement runs)
+    rc, _out, err = run_cli(["tab", "click", "--at", "10"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    rc, _out, err = run_cli(["tab", "hover", "--at", "x,y"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    # the verbs that CLAIM a frame have to be tab subcommands, and the ones that
+    # drive the TAB must not claim one
+    for name in sorted(dom.FRAME_VERBS):
+        assert name in cli_main.TAB_SUBCOMMANDS, name
+    for name in ("nav", "list", "info", "close", "frames", "activate"):
+        assert name not in dom.FRAME_VERBS, name
+
+
 def t_pid_alive() -> None:
     assert browser._pid_alive(os.getpid()) is True                 # noqa: SLF001
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
@@ -1592,6 +1645,7 @@ def main() -> int:
         ("the port is checked against the kernel", t_endpoint_ownership),
         ("the lock serializes a check-then-act", t_lock_serializes_a_check_then_act),
         ("the policy gate fails closed", t_policy_gate),
+        ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("every verb is classified", t_capability_surface),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),

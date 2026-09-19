@@ -152,7 +152,7 @@ browser of its own) — and later `ensure [URL] [--relaunch] [--no-seed]` ·
 
 Page-level, under `tab`:
 
-`tab [URL…]` · `tab list` · `tab info SPEC` ·
+`tab [URL…]` · `tab list` · `tab frames` · `tab info SPEC` ·
 `tab close SPEC… | --like VALUE | --title VALUE | --url VALUE |
 `--all [--except SPEC…] | --dry` ·
 `tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
@@ -168,6 +168,13 @@ Page-level, under `tab`:
 `tab dialog [state|accept|dismiss] [--text V]` ·
 `tab media state|play|pause` · `tab ad-state` · `tab skip-ad` (the ad verbs
 are DEFERRED by decision: site-specific knowledge belongs to the plugin tier).
+
+`--frame VALUE` is the FRAME a page verb acts in: a URL substring or an index
+from `tab frames`. A cross-origin frame is a target of its own, so the verbs run
+unchanged inside it; a frame sharing the page's process has none, and refuses
+`frame-not-separate` saying what to do instead. A point (`--at X,Y`) exists for
+what no selector can reach, and reports what it reached rather than claiming it
+worked.
 
 `--profile DIR` is the INSTANCE selector, on every verb: a profile directory
 under the root, which is how two instances of ONE browser (or two sessions) are
@@ -280,6 +287,7 @@ unclear oracle into a claim of absence.**
 
 | Verb | Kind | Oracle | Level | On failure |
 | --- | --- | --- | --- | --- |
+| `tab frames` | read | the DOM's own iframe census, correlated with the `/json` iframe targets that can drive them | L2 | `no-frame` (naming what exists), `frame-ambiguous` (naming indices) |
 | `tab list` | read | `/json` shape + the socket's OWNER from `/proc` (an unverified endpoint is reported under `unverified`, never driven) | L2 | `cdp-unreachable`, `no-page-tab` |
 | `tab info` | read | the spec resolves to exactly one tab | L2 | `no-page-tab`, `tab-ambiguous` |
 | `tab find` | read | rect + visibility + a real hit-test | L2 | `no-match`, `no-viewport` |

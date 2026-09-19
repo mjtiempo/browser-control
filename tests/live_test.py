@@ -138,6 +138,22 @@ DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
 </script>"""
 DOM_FRAME = ("<!doctype html><title>frame</title>"
              "<button aria-label=\"Frame Button\">in frame</button>")
+# A page with THREE frames: one that shares its process (`srcdoc` — no target
+# of its own) and two CROSS-ORIGIN ones. They are cross-origin by ORIGIN, not
+# by path: the server binds 127.0.0.1 and the frames ask for `localhost`, which
+# Chromium treats as a different site and gives its own process and target.
+FRAME_TOP = """<!doctype html><meta charset="utf-8"><title>frames</title>
+<p>TOP_MARKER</p>
+<button id="at-target" style="padding:14px"
+        onclick="this.textContent='AT_CLICKED'">at press</button>
+<iframe srcdoc="<p>SAME_PROCESS_MARKER</p>" width="300" height="80"></iframe>
+<iframe src="http://localhost:__PORT__/frames-inner" width="320" height="80"></iframe>
+<iframe src="http://localhost:__PORT__/frames-inner-two" width="320" height="80"></iframe>"""
+
+FRAME_INNER = """<!doctype html><meta charset="utf-8"><title>inner</title>
+<p>INNER_MARKER __MARKER__</p>
+<button id="go" style="padding:18px"
+        onclick="this.textContent='FRAME_CLICKED'">press</button>"""
 # A page with REAL playable media, made offline: a canvas is recorded to a
 # blob and handed to a muted, looping <video> — so `media play` has something
 # the browser will actually start without a gesture.
@@ -310,6 +326,16 @@ def start_server() -> None:
                 return
             if self.path.startswith("/media"):
                 self._send(MEDIA_PAGE.encode())
+                return
+            if self.path.startswith("/frames-inner-two"):
+                self._send(FRAME_INNER.replace("__MARKER__", "TWO").encode())
+                return
+            if self.path.startswith("/frames-inner"):
+                self._send(FRAME_INNER.replace("__MARKER__", "ONE").encode())
+                return
+            if self.path.startswith("/frames"):
+                port = SERVER.server_address[1] if SERVER else 0
+                self._send(FRAME_TOP.replace("__PORT__", str(port)).encode())
                 return
             if self.path.startswith("/dom-frame"):
                 self._send(DOM_FRAME.encode())
@@ -649,11 +675,16 @@ def c_dom_scroll_moves_the_document_and_nested() -> str:
     by = ok_json("tab", "scroll", "--by", "600")
     assert by["document"]["after"] >= 500, by
     ok_json("tab", "scroll", "--edge", "top")
+    # reveal it first: its CENTRE can be below the fold, and a wheel outside the
+    # viewport is refused (the window is however big the window manager made it,
+    # which measured shorter than the fixture assumed)
+    ok_json("tab", "scroll", "--selector", "#nested")
     point = ok_json("tab", "find", "--selector", "#nested")["matches"][0]["point"]
     nested = ok_json("tab", "scroll", "--by", "240", "--at",
                      f"{point[0]},{point[1]}")
     assert nested["nested"]["after"][1] == 240, nested
-    assert nested["document"]["after"] == 0, nested     # the page did not move
+    assert nested["document"]["after"] == nested["document"]["before"], \
+        nested                     # the reveal scrolled the page; the wheel did not
     return "a wheel scrolled the document, and one scrolled a nested div"
 
 
@@ -1212,6 +1243,74 @@ def c_policy_gate() -> str:
     return "an allowed read worked; a denied write refused `not-allowed`"
 
 
+def c_frames() -> str:
+    """Frames: seen, named, driven — and never silently skipped.
+
+    Three frames on the fixture: one shares the page's process (no target of
+    its own), two are cross-origin (each its own target, its own coordinate
+    space). The census makes a read say what it is NOT showing; `--frame`
+    drives a separate frame with the same verbs; a point covers what no
+    selector can reach.
+    """
+    base = base_url()
+    tid = f"id:{STATE['tab'][:8]}"      # the battery has a second tab open
+    ok_json("tab", "nav", f"{base}/frames", "--tab", tid)
+    listed = ok_json("tab", "frames", "--tab", tid)
+    assert listed["count"] == 3 and listed["separate"] == 2, listed
+    same = [f for f in listed["frames"] if f["same_process"]]
+    assert len(same) == 1 and same[0]["target"] == "", listed
+    # a read says what it is not showing
+    top = ok_json("tab", "text", "--chars", "200", "--tab", tid)
+    assert "TOP_MARKER" in top["text"], top
+    assert "INNER_MARKER" not in top["text"], top
+    assert top["frames"] == {"total": 3, "separate": 2, "same_process": 1,
+                             "visible": 3}, top["frames"]
+    # `--frame` by index and by URL, with the verbs working inside it
+    inner = ok_json("tab", "text", "--frame", "1", "--chars", "120",
+                    "--tab", tid)
+    assert "INNER_MARKER ONE" in inner["text"], inner
+    assert inner["frame"] == "1", inner
+    other = ok_json("tab", "text", "--frame", "frames-inner-two",
+                    "--chars", "120", "--tab", tid)
+    assert "INNER_MARKER TWO" in other["text"], other
+    clicked = ok_json("tab", "click", "--frame", "1", "--selector", "#go",
+                      "--tab", tid)
+    assert clicked["frame"] == "1" and clicked["changed"] is True, clicked
+    after = ok_json("tab", "text", "--frame", "1", "--chars", "120",
+                    "--tab", tid)
+    assert "FRAME_CLICKED" in after["text"], after   # the frame's own handler
+    # ambiguity is named, not guessed; a frame without a target says so
+    err = refuses("frame-ambiguous", "tab", "text", "--frame", "localhost",
+                  "--chars", "40", "--tab", tid)
+    assert "pick one by index" in err and "[1]" in err, err
+    err = refuses("frame-not-separate", "tab", "text", "--frame", "0",
+                  "--chars", "40", "--tab", tid)
+    assert "tab js" in err, err
+    refuses("no-frame", "tab", "text", "--frame", "no-such-frame",
+            "--chars", "40", "--tab", tid)
+    # a POINT: real input where a selector cannot reach, and honestly judged.
+    # A FRESH document for this part: the frame steps above leave the page in a
+    # state the point test is not about, and a point is a moment anyway.
+    ok_json("tab", "nav", f"{base}/frames", "--tab", tid)
+    ok_json("tab", "wait", "--for", "idle", "--idle-ms", "700",
+            "--tab", tid)
+    point = ok_json("tab", "find", "--selector", "#at-target",
+                    "--tab", tid)["matches"][0]
+    assert point["in_viewport"] is True and point["hit"] is True, point
+    hit = ok_json("tab", "click", "--at", f"{point['point'][0]},"
+                  f"{point['point'][1]}", "--tab", tid)
+    assert hit["verified"] is False, hit
+    assert "at-target" in str(hit["under"]), hit
+    # NOT asserted here: that the page's handler FIRES. Twice measured, on this
+    # fixture inside the battery, it did not — while the same page, the same
+    # order, live cross-origin frames, a background tab and the same commands
+    # all fire in isolation (five reproductions). The dispatch and the point's
+    # reach are what this check can stand behind; the anomaly is logged in
+    # docs/progress.md §5.24 rather than asserted either way.
+    return ("3 frames (2 separate): named by index and URL, driven inside; a "
+            "point dispatched through to the control")
+
+
 def c_close_ignores_a_recycled_pid() -> str:
     """A stale pid file must not aim SIGTERM at an unrelated process.
 
@@ -1756,6 +1855,7 @@ CHECKS = (
     ("a port a stranger holds is refused", c_cdp_not_local),
     ("profile info/seed/reset", c_profile_verbs),
     ("the policy gate blocks 'not-allowed'", c_policy_gate),
+    ("frames are seen, named and driven", c_frames),
     ("close ignores a recycled pid", c_close_ignores_a_recycled_pid),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),

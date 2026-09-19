@@ -60,7 +60,8 @@ by the binary's name.
 Browser level — `open`, `close`, `list`, `info`, `attach`, `detach`, `selftest`.
 
 Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
-`reload`, `activate`, `find`, `text`, `js`, `wait`, `click`, `hover`, `check`,
+`reload`, `activate`, `frames`, `find`, `text`, `js`, `wait`, `click`,
+`hover`, `check`,
 `select`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`,
 `screenshot`, `dialog`, `media`.
 

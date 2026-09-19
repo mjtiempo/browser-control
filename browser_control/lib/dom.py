@@ -54,13 +54,13 @@ from typing import Any
 # The private helpers below are this layer's contract with lib.browser: the
 # tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
-from browser_control.lib import audit  # pyright: ignore[reportMissingImports]
-from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
-from browser_control.lib import browser as tabs  # pyright: ignore[reportMissingImports]
+from browser_control.lib import audit
+from browser_control.lib import cdp
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ControlError,
     fail,
 )
+from browser_control.lib import browser as tabs
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
@@ -71,6 +71,37 @@ EVAL_TIMEOUT_S = 15.0
 SCROLL_EDGE_STEP = 2500     # one wheel notch when scrolling to an edge
 SCROLL_EDGE_STEPS = 12      # and how many of them an edge is worth
 SCROLL_MOVE_S = 4.0         # how long one wheel is given to move something
+
+# Which FRAME a verb is about, set once per process by the CLI from `--frame`:
+# a URL substring or an index from `tab frames`. Empty means the page itself.
+# It is a SCOPE, exactly like `--profile`, and the CLI clears it on every
+# invocation that does not pass the flag.
+FRAME: dict[str, str] = {"wanted": ""}
+
+
+def frame(wanted: str | None = None) -> str:
+    """Set, clear or read the frame this process's verbs are about.
+
+    `None` READS it; `""` clears it (the CLI clears a call that passes no
+    `--frame`, so no verb inherits another's scope); anything else sets it.
+    The read form matters: making "no argument" clear the scope as well meant
+    every lookup wiped what it was looking at (which is exactly the bug this
+    docstring exists to prevent).
+    """
+    if wanted is not None:
+        FRAME["wanted"] = str(wanted).strip()
+    return FRAME["wanted"]
+
+
+# The verbs `--frame` can be ABOUT: the CLI adds a `frame` note to their replies
+# and nowhere else. A verb that drives the tab rather than its document —
+# `tab nav`, `tab list`, `tab activate` — has no frame scope, and saying it did
+# would be a lie about what that call touched.
+FRAME_VERBS = frozenset({
+    "js", "wait", "find", "text", "click", "hover", "check", "select",
+    "scroll", "focus", "press", "insert", "type", "upload", "media",
+    "dialog", "screenshot",
+})
 CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
 DIALOG_PROBE_S = 1.5        # how long the tab is given to prove it is awake
 DIALOG_CLEAR_S = 3.0        # how long the renderer is given to come back
@@ -492,6 +523,22 @@ SHOT_METRICS = ("JSON.stringify((() => {" + PRELUDE + r"""
           visibility: document.visibilityState};
 })())""")
 
+# Every frame of the page, as the DOM sees it. `contentDocument` readable means
+# the frame shares this page's PROCESS — such a frame has no CDP target of its
+# own, which is the difference `--frame` has to know about.
+FRAME_CENSUS = ("JSON.stringify((() => {" + PRELUDE + r"""
+  return Array.from(document.querySelectorAll('iframe')).map((f, index) => {
+    const r = f.getBoundingClientRect();
+    let reads = false;
+    try { reads = !!f.contentDocument } catch (e) { reads = false }
+    return {index: index, url: String(f.src || ''), name: String(f.name || ''),
+            same_process: reads,
+            box: [Math.round(r.x), Math.round(r.y), Math.round(r.width),
+                  Math.round(r.height)],
+            visible: r.width > 20 && r.height > 20};
+  });
+})())""")
+
 WAIT_EXPRS = {
     "load": "Boolean(document.readyState === 'complete' && !!document.body)",
     "idle": ("(() => { if (document.readyState !== 'complete' || "
@@ -548,9 +595,126 @@ def _resolve(tab: str, browser: str, for_write: bool) -> tuple[dict, dict]:
 
 
 def _session(row: dict, tab_row: dict) -> cdp.Session:
-    """ONE connection for the whole verb (see `cdp.Session`)."""
-    return cdp.Session(cdp.target_ws(cdp.port_of(str(row["profile"])),
-                                     str(tab_row["id"])))
+    """ONE connection for the whole verb — or for the FRAME it is scoped to.
+
+    `--frame` attaches to that frame's OWN target. A cross-origin frame is a
+    target with its own coordinate space, so every verb below works unchanged
+    inside it — measured: a real click dispatched on that session fires the
+    frame's own handler and the frame reports the new state.
+    """
+    port = cdp.port_of(str(row["profile"]))
+    if FRAME["wanted"]:
+        target = _frame_target(port, str(tab_row["id"]), FRAME["wanted"])
+        return cdp.Session(cdp.target_ws(port, str(target["target"]),
+                                        "iframe"))
+    return cdp.Session(cdp.target_ws(port, str(tab_row["id"])))
+
+
+def frames_of(port: int, page_target: str) -> list[dict]:
+    """Every frame of that page: the DOM's view, plus its CDP target.
+
+    The DOM knows the geometry and whether a frame shares the page's process
+    (`contentDocument` readable); `/json` knows which frames are separate
+    TARGETS. A frame with `target: ""` has none, and `--frame` says so rather
+    than pretending it can drive it.
+    """
+    census = cdp.evaluate(cdp.target_ws(port, page_target), FRAME_CENSUS) or []
+    separate = cdp.frame_rows(port)
+    used: set[str] = set()
+    rows: list[dict] = []
+    for entry in census if isinstance(census, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "")
+        match = next((r for r in separate
+                      if url and str(r.get("url")) == url
+                      and str(r.get("id")) not in used), None)
+        if match is not None:
+            used.add(str(match["id"]))
+        rows.append({"index": _int(entry.get("index")), "url": url,
+                     "name": str(entry.get("name") or ""),
+                     "box": [_int(v) for v in (entry.get("box") or [])],
+                     "visible": bool(entry.get("visible")),
+                     "same_process": bool(entry.get("same_process")),
+                     "target": str((match or {}).get("id") or "")})
+    return rows
+
+
+def frames(row: dict, tab_row: dict) -> dict:
+    """`tab frames`: what this page has, and which of them can be driven."""
+    port = cdp.port_of(str(row["profile"]))
+    rows = frames_of(port, str(tab_row["id"]))
+    reply = {"ok": True, "count": len(rows), "frames": rows,
+             "separate": sum(1 for r in rows if r["target"]),
+             "note": ("a cross-origin frame is a target of its own: name it "
+                      "with `--frame <url substring|index>` and every page "
+                      "verb works inside it")}
+    if not rows:
+        reply["note"] = ("this page has no iframes — nothing for `--frame` to "
+                          "name")
+    reply["tab"] = f"id:{tab_row['id']}"
+    reply["browser"] = tabs._brief(row)          # noqa: SLF001
+    return reply
+
+
+def _frame_target(port: int, page_target: str, wanted: str) -> dict:
+    """The frame a `--frame` value names, or a refusal.
+
+    An integer is the index `tab frames` prints; anything else is a
+    case-insensitive substring of the frame's URL. Several matches refuse
+    `frame-ambiguous` and name the index to use instead — the rule every other
+    selector follows. A frame that shares the page's PROCESS has no target to
+    drive, and refuses `frame-not-separate` with what to do instead.
+    """
+    rows = frames_of(port, page_target)
+    if not rows:
+        fail("no-frame", "this page has no iframes — `tab frames` lists them")
+    text_ = str(wanted or "").strip()
+    if text_.isdigit():
+        hits = [r for r in rows if _int(r["index"]) == _int(text_)]
+    else:
+        hits = [r for r in rows
+                if text_.lower() in str(r.get("url") or "").lower()]
+    if not hits:
+        have = "; ".join(f"[{r['index']}] {str(r['url'])[:52] or 'srcdoc'}"
+                         for r in rows[:4])
+        fail("no-frame", f"no frame matches {wanted!r} (have: {have})")
+    if len(hits) > 1:
+        where = "; ".join(f"[{r['index']}] {str(r['url'])[:52]}" for r in hits[:4])
+        fail("frame-ambiguous",
+             f"{len(hits)} frames match {wanted!r} — pick one by index "
+             f"(`--frame 0` … `--frame {len(rows) - 1}`): {where}")
+    found = hits[0]
+    if not found["target"]:
+        fail("frame-not-separate",
+             f"frame [{found['index']}] "
+             f"{str(found['url'])[:60] or 'srcdoc'!r} shares this page's "
+             "process, so it is not a target this CLI can drive: `tab js` can "
+             "read it (its contentDocument is reachable), and "
+             "`tab click --at X,Y` hits it by coordinate")
+    return found
+
+
+def _frame_summary(session: cdp.Session) -> dict:
+    """What a read is NOT showing: the frames on this page, by kind.
+
+    A `tab text` that silently omits everything inside an iframe is the one
+    place this tool could read as "there is nothing there". The census makes it
+    say so instead, and costs one evaluation on the session already open.
+    """
+    try:
+        census = session.evaluate(FRAME_CENSUS)
+    except Exception:                                          # noqa: BLE001
+        return {}
+    rows = census if isinstance(census, list) else []
+    if not rows:
+        return {}
+    separate = sum(1 for r in rows if isinstance(r, dict)
+                   and not r.get("same_process"))
+    return {"total": len(rows), "separate": separate,
+            "same_process": len(rows) - separate,
+            "visible": sum(1 for r in rows if isinstance(r, dict)
+                           and r.get("visible"))}
 
 
 def _query_args(text: str | None, selector: str | None,
@@ -809,6 +973,7 @@ def find(text: str | None = None, selector: str | None = None,
     row, tab_row = _resolve(tab, browser, for_write=False)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, limit)
+        frames_here = _frame_summary(session)
     viewport = _viewport(data, str(tab_row["id"]))
     matches = [dict(m, box=[_int(v) for v in m["box"]],
                     center=[_int(v) for v in (m.get("center") or [])],
@@ -829,11 +994,100 @@ def find(text: str | None = None, selector: str | None = None,
                   "offscreen": _int(data.get("offscreen")),
                   "truncated": bool(data.get("truncated")),
                   "matches": matches})
+    if frames_here:
+        reply["frames"] = frames_here
+    return _with_frame(reply)
+
+
+def _at_point_click(session: cdp.Session, x: int, y: int) -> dict:
+    """A move, a press and a release at a viewport point, and what is there."""
+    for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
+                          ("mouseReleased", 0)):
+        session.call("Input.dispatchMouseEvent",
+                     {"type": kind, "x": x, "y": y, "button": "left",
+                      "buttons": buttons, "clickCount": 1})
+    under = session.evaluate(
+        "(() => { const el = document.elementFromPoint("
+        f"{x}, {y}); return el ? el.tagName.toLowerCase()"
+        " + (el.id ? '#' + el.id : '') : null })()")
+    return {"under": under}
+
+
+def _click_at(row: dict, tab_row: dict, at: str) -> dict:
+    """`tab click --at X,Y`: real input at a POINT, for what a selector cannot
+    name — a canvas, or a widget inside a frame that shares this page's process.
+
+    There is no element to verify against, so this says `verified: false` and
+    reports what the point actually REACHES: the input did land, and whether it
+    was the right control is the caller's to judge from `changed` and
+    `under`.
+    """
+    _at_point(at, "tab click")
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, "", "", 1)     # page facts, no matching
+        x, y = _point(at, _viewport(data, str(tab_row["id"])))
+        before = session.evaluate(STATE_EXPR)
+        probe = _at_point_click(session, x, y)
+        after = session.evaluate(STATE_EXPR)
+    before = before if isinstance(before, dict) else {}
+    after = after if isinstance(after, dict) else {}
+    changed = (after.get("url") != before.get("url")
+               or after.get("title") != before.get("title")
+               or after.get("active") != before.get("active")
+               or [after.get("x"), after.get("y")]
+               != [before.get("x"), before.get("y")])
+    reply = {"ok": True, "clicked": True, "point": [x, y],
+             "under": probe.get("under"), "changed": changed,
+             "verified": False,
+             "note": ("real input (CDP) at a point: the hit-test can only say "
+                      "what the point reaches, so read `changed` and the "
+                      "page yourself. A point is also a MOMENT: read it, and a "
+                      "page that reflows can move the control out from under "
+                      "the click (so `under` says what is there afterwards)"),
+             "tab": f"id:{tab_row['id']}",
+             "browser": tabs._brief(row)}         # noqa: SLF001
+    return _with_frame(reply)
+
+
+def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
+    """`tab hover --at X,Y`: a move to a point, verified by `:hover` on it."""
+    _at_point(at, "tab hover")
+    with _session(row, tab_row) as session:
+        data = _matches_in(session, "", "", 1)
+        x, y = _point(at, _viewport(data, str(tab_row["id"])))
+        session.call("Input.dispatchMouseEvent",
+                     {"type": "mouseMoved", "x": x, "y": y,
+                      "button": "none", "buttons": 0})
+        probe = session.evaluate(
+            "(() => { const el = document.elementFromPoint("
+            f"{x}, {y}); return "
+            "JSON.stringify({under: el ? el.tagName.toLowerCase() + "
+            "(el.id ? '#' + el.id : '') : null, hovered: !!el && "
+            "el.matches(':hover')}) })()")
+    probe = probe if isinstance(probe, dict) else {}
+    if not probe.get("hovered"):
+        fail("hover-not-verified",
+             f"nothing at viewport {[x, y]} matches `:hover` after the pointer "
+             f"moved there ({probe.get('under') or 'nothing'} is at that point)")
+    reply = {"ok": True, "hovered": True, "verified": True,
+             "point": [x, y], "under": probe.get("under"),
+             "note": ("real input (CDP): one mouseMoved at a point; the "
+                      "read-back is the engine's own `:hover` there"),
+             "tab": f"id:{tab_row['id']}",
+             "browser": tabs._brief(row)}         # noqa: SLF001
+    return _with_frame(reply)
+
+
+def _with_frame(reply: dict) -> dict:
+    """Say which frame the verb acted in, when it was scoped to one."""
+    if FRAME["wanted"]:
+        reply["frame"] = FRAME["wanted"]
     return reply
 
 
 def click(text: str | None = None, selector: str | None = None,
-          index: int | None = None, tab: str = "", browser: str = "") -> dict:
+          index: int | None = None, tab: str = "", browser: str = "",
+          at: str | None = None) -> dict:
     """`tab click`: press the element a spec resolves to, with REAL input.
 
     `Input.dispatchMouseEvent` — a move, a press, a release at the element's
@@ -843,7 +1097,16 @@ def click(text: str | None = None, selector: str | None = None,
     changed afterwards: `changed: false` is a fact about a click that had no
     visible effect, not a failure, because the input DID land.
     """
-    needle, css = _query_args(text, selector, "tab click")
+    needle, css = _query_args(text, selector, "tab click") if at is None \
+        else ("", "")
+    if at is not None:
+        if text or selector:
+            fail("bad-args",
+                 "tab click: --at is a POINT — give that or a TEXT/--selector, "
+                 "not both")
+        _at_point(at, "tab click")     # the POINT first: no browser needed
+        row, tab_row = _resolve(tab, browser, for_write=True)
+        return _click_at(row, tab_row, at)
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, FIND_CAP)
@@ -886,7 +1149,8 @@ def click(text: str | None = None, selector: str | None = None,
 
 
 def hover(text: str | None = None, selector: str | None = None,
-          index: int | None = None, tab: str = "", browser: str = "") -> dict:
+          index: int | None = None, tab: str = "", browser: str = "",
+          at: str | None = None) -> dict:
     """`tab hover`: put the pointer ON one element, verified by `:hover`.
 
     Menus, tooltips and CSS-only UI open on a MOVE, not a click, and
@@ -898,6 +1162,14 @@ def hover(text: str | None = None, selector: str | None = None,
     `click` — and the pointer stays where it was put, so a caller that needs
     another position asks for it.
     """
+    if at is not None:
+        if text or selector:
+            fail("bad-args",
+                 "tab hover: --at is a POINT — give that or a TEXT/--selector, "
+                 "not both")
+        _at_point(at, "tab hover")     # the POINT first: no browser needed
+        row, tab_row = _resolve(tab, browser, for_write=True)
+        return _hover_at(row, tab_row, at)
     needle, css = _query_args(text, selector, "tab hover")
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
@@ -1449,11 +1721,16 @@ def scroll(by: int | None = None, edge: str | None = None,
                       data=data)
 
 
-def _at_point(at: str) -> tuple[int, int]:
-    """`--at X,Y` as two numbers — the SYNTAX, which needs no browser."""
+def _at_point(at: str, verb: str = "tab scroll") -> tuple[int, int]:
+    """`--at X,Y` as two numbers — the SYNTAX, which needs no browser.
+
+    `verb` is only for the refusal: three verbs take a point now (scroll,
+    click, hover), and a message naming the wrong one is a message about the
+    wrong verb.
+    """
     parts = str(at).replace(" ", "").split(",")
     if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
-        fail("bad-args", f"tab scroll: --at needs X,Y numbers, got {at!r}")
+        fail("bad-args", f"{verb}: --at needs X,Y numbers, got {at!r}")
     return _int(parts[0], -1), _int(parts[1], -1)
 
 
@@ -1602,6 +1879,7 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
         data = session.evaluate(TEXT_EXPR.replace("__SELECTOR__",
                                                   json.dumps(css))
                                 .replace("__CAP__", str(limit)))
+        frames_here = _frame_summary(session)
     if not isinstance(data, dict):
         fail("cdp-error", "tab text: the page did not answer with an object")
     if not data.get("found"):
@@ -1612,7 +1890,9 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
                   "text": str(data.get("text") or ""),
                   "length": _int(data.get("length")),
                   "truncated": bool(data.get("truncated"))})
-    return reply
+    if frames_here:
+        reply["frames"] = frames_here
+    return _with_frame(reply)
 
 
 def focus(text: str | None = None, selector: str | None = None,

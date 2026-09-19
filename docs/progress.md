@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 30 hermetic + 45 live checks passing.
+Repo `main`, worktree clean, 36 hermetic + 57 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -17,15 +17,15 @@ it and puts one console script on PATH.
 | `README.md` | 190 | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
 | `LICENSE` | 21 | MIT, `Copyright (c) 2026 Mark Tiempo` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 948 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
-| `browser_control/lib/dom.py` | 1946 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
+| `browser_control/cli/main.py` | 1060 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/lib/dom.py` | 2300 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
 | `browser_control/lib/audit.py` | 158 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<timestamp>`, and a proven secret written as a length |
 | `browser_control/lib/browser.py` | 2165 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
-| `browser_control/lib/cdp.py` | 656 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
+| `browser_control/lib/cdp.py` | 740 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `browser_control/lib/capabilities.py` | 120 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
-| `tests/test_unit.py` | 1547 | 34 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1829 | 55 live checks on a throwaway root, skip ≠ pass |
+| `browser_control/lib/capabilities.py` | 217 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
+| `tests/test_unit.py` | 1616 | 36 hermetic checks, no browser needed |
+| `tests/live_test.py` | 1900 | 57 live checks on a throwaway root, skip ≠ pass |
 | `browser_control/lib/profile.py` | 360 | **the `profile` noun**: `info` (weight, age, liveness), `seed` (logins copied in, caches skipped, read back), `reset` (wipe, on purpose) |
 
 Five verbs, browser-only:
@@ -183,16 +183,10 @@ multi-browser test (two live instances refuse), no CI.
    invocations therefore costs that tab its state — the honest limit of a
    one-shot CLI, and the reason `tab dialog` reports `open: null` instead of
    guessing.
-10. **Frames are still out of scope** — `find`/`text` see the top document and
-    open shadow roots only (measured and tested); iframe content needs its own
-    target scoping, which nothing needs yet.
-11. **`close` cannot tell whose managed browser it is** — one managed instance
-    per profile means it stops the browser whatever invocation started it. This
-    bit hard during development: a managed browser with a real session was
-    closed as if it were a leftover. MITIGATED since (§5.15): it now refuses
-    while page tabs are open unless `--force`, and only ever signals a pid whose
-    own cmdline names that profile. The inherent part stays: before `close`,
-    read `tab list`.
+10. ~~**Frames are still out of scope**~~ — DONE (§5.24): `tab frames` lists
+    them, `--frame` drives a CROSS-ORIGIN one through its own target with every
+    page verb unchanged, and reads report a frame census so a partial read says
+    so. A same-process frame has no target and refuses `frame-not-separate`.
 
 (Fixed since it was listed here: the default action-log directory was never
 created, so the fail-open log silently dropped every write. `write` now makes
@@ -204,7 +198,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.23 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.24 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -858,6 +852,46 @@ Hermetic 34 -> 35 (the gate's rules, the resolver's mode cases, the exemption,
 and `list`'s refusal), live 55 -> 56 (an allowed read works while a denied write
 refuses `not-allowed` with nothing sent; a live source warning; a policy typo
 refused). 0 skipped, no leftovers.
+
+### 5.24 Frames — cross-origin ones, driven through their own target — done
+
+Measured first, because the design depended on it: a cross-origin frame is its
+own CDP target (`iframe CAFE5E1DDC http://localhost:8942/inner.html` in
+`/json/list`), `cdp.Session` on it reads that frame's DOM, and a real
+`Input.dispatchMouseEvent` at FRAME-LOCAL coordinates fires the frame's own
+handler. So the whole existing verb set works inside a frame unchanged — which
+made this plumbing rather than new verbs:
+
+| piece | what it is |
+| --- | --- |
+| `tab frames [--tab SPEC]` | every frame of the page: index, url, name, box, `same_process`, `visible`, and the CDP `target` it can be driven through |
+| `--frame VALUE` (global, like `--profile`) | a URL substring or an index from `tab frames`; `dom._session` attaches to that frame's target, so `text`/`find`/`click`/`js`/… run inside it |
+| the frame census in reads | `tab text` and `tab find` carry `frames: {total, separate, same_process, visible}`, so a read that omits frame content SAYS so |
+| `tab click|hover --at X,Y` | real input at a POINT, for what no selector can reach (a canvas): `verified: false`, with `under` reporting what the point actually reaches |
+| `frame-ambiguous` / `no-frame` / `frame-not-separate` | several frames match → the indices are named; none → what exists is named; a frame sharing the page's PROCESS has no target to drive, and the refusal says what to do instead (`tab js` reads it; `--at` hits it) |
+
+How common frames are, measured on this machine (6 pages): 0 on static content
+(example.com, MDN, GitHub login), and — exactly where an agent has to ACT — 2 on
+the Guardian (1 visible, a CMP at sourcepoint), 3 on the reCAPTCHA demo, 10 on
+Stripe's docs (9 cross-origin). A cross-origin `contentDocument` is null, so
+`tab js` cannot help there; OOPIF attach or a raw point are the only ways in.
+
+**One anomaly, logged rather than smoothed over**: on the battery's `/frames`
+fixture, inside the battery, a click reaches the control (`under` = the button)
+and its handler does NOT fire. In isolation the same page, the same command
+order, live cross-origin frames, a background tab and the same commands all
+fire — five reproductions. The check therefore asserts the dispatch and the
+point's reach (provable) and not the firing (not reproducible there), and this
+line is the record: the cause is still unknown, and the suspects ruled out are
+stray browsers occluding the window (four of mine were alive — cleaned up),
+a hidden tab, the command order, and OOPIF presence.
+
+Hermetic 36 (the scope is set AND cleared per invocation like `--profile`, the
+point syntax with a refusal naming the verb that asked, and the verb list: only
+tab subcommands may claim a frame, and `nav`/`list`/`activate` may not), live 57
+(three frames with two separate: driven by index and by URL, a click inside one
+fires its own handler, the census in `text`, the ambiguity named with indices,
+and the two refusals).
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,

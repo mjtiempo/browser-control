@@ -70,6 +70,10 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                      wipe a managed profile, logins included
   tab [URL...]       open one tab per URL (about:blank when none)
   tab list           every drivable browser's page tabs, by browser
+  tab frames [--tab SPEC]
+                     this page's iframes, and which of them can be driven (a
+                     cross-origin frame is a target of its own: name one with
+                     the global --frame and the page verbs work inside)
   tab info SPEC      one tab: `id:<prefix>` or a title/url substring
   tab close SPEC... | --like V | --title V | --url V | --all [--except S...]
                      close every tab named, verified as a set; a SPEC names a
@@ -100,6 +104,12 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  poll a predicate to a wall-clock deadline
   tab click TEXT|--selector CSS [--index N] [--tab SPEC]
                                  real input (CDP) at the element's centre
+  tab click --at X,Y [--tab SPEC]
+                                 real input at a POINT, for what a selector
+                                 cannot name (a canvas); `verified: false`
+                                 with what the point actually reaches
+  tab hover TEXT|--selector CSS [--index N] [--at X,Y] [--tab SPEC]
+                                 put the pointer on an element (`:hover`)
   tab scroll --by N [--at X,Y] [--tab SPEC]
                                  one wheel event; nested scrollers included
   tab scroll --edge top|bottom [--tab SPEC]
@@ -127,6 +137,9 @@ flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
        --profile DIR    the INSTANCE to drive: a profile directory under the
                         root, which is how two instances of ONE browser are
                         told apart (`open --profile <root>/work`)
+       --frame VALUE    the FRAME inside the tab: a URL substring, or an index
+                        from `tab frames` (a cross-origin frame is a target of
+                        its own, so every page verb works inside it)
        --allow CLASSES  the capability classes this call may use (read, write,
                         code, file, egress, or * for all)
        --deny CLASSES   classes it may not; a verb is refused `not-allowed`
@@ -513,14 +526,21 @@ def cmd_tab_hover(rest: list[str], browser: str) -> dict:
     rest, spec = _tab_flag(rest, "tab hover")
     rest, selector = _pop(rest, "--selector", "tab hover")
     rest, index = _pop(rest, "--index", "tab hover")
+    rest, at = _pop(rest, "--at", "tab hover")
     for arg in rest:
         if str(arg).startswith("-"):
             fail("bad-args", f"tab hover: unknown flag {arg!r}")
     if len(rest) > 1:
         fail("bad-args", f"tab hover: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
+    if at is not None:
+        if needle is not None or selector is not None:
+            fail("bad-args",
+                 "tab hover: --at is a POINT — give that or a TEXT/"
+                 "--selector, not both")
+        return dom.hover(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab hover: give TEXT or --selector CSS, not both")
+        fail("bad-args", "tab hover: give TEXT, --selector CSS, or --at X,Y")
     return dom.hover(needle, selector=selector,
                      index=_int(index, "tab hover --index")
                      if index is not None else None,
@@ -621,6 +641,14 @@ def cmd_tab_js(rest: list[str], browser: str) -> dict:
     return dom.js(rest[0], tab=spec, browser=browser)
 
 
+def cmd_tab_frames(rest: list[str], browser: str) -> dict:
+    """`tab frames [--tab SPEC]` — this page's iframes, and which are drivable."""
+    rest, spec = _tab_flag(rest, "tab frames")
+    _none(rest, "tab frames")
+    row, tab_row = dom._resolve(spec, browser, for_write=False)  # noqa: SLF001
+    return dom.frames(row, tab_row)
+
+
 def cmd_tab_find(rest: list[str], browser: str) -> dict:
     """`tab find TEXT | --selector CSS [--cap N] [--tab SPEC]`."""
     rest, spec = _tab_flag(rest, "tab find")
@@ -676,14 +704,22 @@ def cmd_tab_click(rest: list[str], browser: str) -> dict:
     rest, spec = _tab_flag(rest, "tab click")
     rest, selector = _pop(rest, "--selector", "tab click")
     rest, index = _pop(rest, "--index", "tab click")
+    rest, at = _pop(rest, "--at", "tab click")
     for arg in rest:
         if str(arg).startswith("-"):
             fail("bad-args", f"tab click: unknown flag {arg!r}")
     if len(rest) > 1:
         fail("bad-args", f"tab click: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
+    # `--at X,Y` is a POINT: it replaces the spec instead of joining it
+    if at is not None:
+        if needle is not None or selector is not None:
+            fail("bad-args",
+                 "tab click: --at is a POINT — give that or a TEXT/"
+                 "--selector, not both")
+        return dom.click(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab click: give TEXT or --selector CSS, not both")
+        fail("bad-args", "tab click: give TEXT, --selector CSS, or --at X,Y")
     return dom.click(needle, selector=selector,
                      index=_int(index, "tab click --index")
                      if index is not None else None,
@@ -847,6 +883,7 @@ def cmd_profile(rest: list[str], browser: str) -> dict:
 # for one (and vice versa).
 TAB_SUBCOMMANDS: dict[str, Handler] = {
     "list": cmd_tab_list,
+    "frames": cmd_tab_frames,
     "info": cmd_tab_info,
     "close": cmd_tab_close,
     "nav": cmd_tab_nav,
@@ -896,16 +933,16 @@ HANDLERS: dict[str, Handler] = {
 # The GLOBAL flags, and what each one sets: pulled out of argv in one place so
 # every verb sees the same globals, and none can quietly not know about one.
 FLAG_KEY = {"--browser": "browser", "--profile": "profile",
-            "--allow": "allow", "--deny": "deny"}
+            "--frame": "frame", "--allow": "allow", "--deny": "deny"}
 
 
-def _flags(args: list[str]) -> tuple[list[str], str, str, str, str]:
+def _flags(args: list[str]) -> tuple[list[str], dict[str, str]]:
     """Pull the GLOBAL flags out of argv, anywhere.
 
     `--browser NAME` picks the browser, `--profile DIR` the instance,
-    `--allow`/`--deny` the capability classes this call may use. One place, so
-    every verb sees the same globals and none of them can quietly not know
-    about one.
+    `--frame VALUE` the frame inside the tab (a URL substring or an index from
+    `tab frames`), `--allow`/`--deny` the capability classes this call may use.
+    One place, so every verb sees the same globals.
     """
     found = dict.fromkeys(FLAG_KEY.values(), "")
     rest: list[str] = []
@@ -926,8 +963,7 @@ def _flags(args: list[str]) -> tuple[list[str], str, str, str, str]:
             continue
         rest.append(arg)
         index += 1
-    return (rest, found["browser"], found["profile"], found["allow"],
-            found["deny"])
+    return rest, found
 
 
 def _flag_value(rest: list[str], flag: str) -> str:
@@ -986,16 +1022,21 @@ def main(argv: list[str] | None = None) -> int:
     ok = False
     code: str | None = None
     try:
-        rest, browser, profile, allow, deny = _flags(args)
+        rest, flags = _flags(args)
         verb, rest = rest[0], rest[1:]
-        # the globals, in the order they matter: the instance, then the policy
-        browser_lib.scope(profile or "")
-        capabilities.policy(allow or None, deny or None)
+        # the globals, in the order they matter: the instance, the frame, the
+        # policy. Each is SET OR CLEARED per invocation, so no verb inherits
+        # another call's scope.
+        browser = flags["browser"]
+        browser_lib.scope(flags["profile"] or "")
+        dom.frame(flags["frame"] or "")
+        capabilities.policy(flags["allow"] or None, flags["deny"] or None)
         audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:
             raise ControlError("unknown-command",
                                f"{verb} (have: {', '.join(HANDLERS)})")
+        head = str(rest[0]) if rest else ""
         if verb != "selftest":
             # `selftest` is never gated: it is the verb that REPORTS the policy,
             # and a gate that blocks its own explanation is a trap. Everything
@@ -1003,7 +1044,13 @@ def main(argv: list[str] | None = None) -> int:
             permitted, why = capabilities.allowed(action(verb, rest))
             if not permitted:
                 fail("not-allowed", why)
-        print(json.dumps(handler(rest, browser)))
+        reply = handler(rest, browser)
+        scoped_frame = dom.frame()
+        if verb == "tab" and head in dom.FRAME_VERBS and scoped_frame:
+            # one place says which frame a scoped call acted in, so no verb has
+            # to remember to (and none can forget to)
+            reply["frame"] = scoped_frame
+        print(json.dumps(reply))
         ok = True
         return 0
     except ControlError as e:
