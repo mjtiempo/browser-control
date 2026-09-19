@@ -285,6 +285,10 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              f"profile seed: the source and the target are the same tree "
              f"({src})")
     _refuse_live(target, "seeding")
+    # the SOURCE may be running: that is a legitimate snapshot, so it is a
+    # warning and not a refusal — Chrome flushes cookies to disk lazily, so what
+    # is copied can lag the live state by a few seconds
+    source_pid = _live_pid(src)
     held = True
     with browser_lib._lock(browser_lib._lock_path(root()),   # noqa: SLF001
                            "profile seed") as lock:
@@ -314,6 +318,11 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                       "and only here")}
     if lock["warning"]:
         reply["warning"] = lock["warning"]
+    if source_pid:
+        lag = (f"the source profile is in use (pid {source_pid}): what is on "
+               "disk may lag its live state by a few seconds")
+        reply["warning"] = f"{reply['warning']}; {lag}" if "warning" in reply \
+            else lag
     return reply
 
 

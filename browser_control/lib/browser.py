@@ -1455,10 +1455,7 @@ def _resolve_across(specs: list[str], browser: str,
     """
     rows = _drivable(browser)
     if not rows:
-        fail("cdp-unreachable",
-             "no drivable browser"
-             + (f" matching {browser!r}" if browser else "")
-             + " — run `browser-control-cli open`")
+        _no_drive(browser)
     tabs_of = {row["pid"]: _tabs_of(row)[0] for row in rows}
     found: list[tuple[dict, dict, int]] = []
     for spec in specs:
@@ -1528,10 +1525,7 @@ def _closeable(browser: str) -> list[dict]:
     """The drivable browser rows, or a refusal naming what to do about it."""
     rows = _drivable(browser)
     if not rows:
-        fail("cdp-unreachable",
-             "no drivable browser"
-             + (f" matching {browser!r}" if browser else "")
-             + " — run `browser-control-cli open`")
+        _no_drive(browser)
     return rows
 
 
@@ -1868,6 +1862,27 @@ ACTIVATE_TIMEOUT_S = 3.0    # a tab becomes visible immediately, or it will not
 READY_EXPR = "document.readyState + (document.body ? '+body' : '')"
 
 
+def _no_drive(browser: str = "", reason: str = "") -> None:
+    """Refuse a drive with nothing to drive — and say WHICH thing is missing.
+
+    "No drivable browser" is honest for an unscoped call. A scoped one asked
+    about ONE instance, so the refusal names that instance and the command that
+    would start it; a call narrowed by name gets the name. An endpoint that
+    ANSWERED but did not verify is a different refusal (`cdp-not-local`), which
+    the callers check first — this one is for nothing being there at all.
+    """
+    scoped = SCOPE["profile"]
+    asked = [part for part in ((f"on {scoped}" if scoped else ""),
+                               (f"matching {browser!r}" if browser else ""))
+             if part]
+    where = f" {' '.join(asked)}" if asked else ""
+    fix = (f"`open --profile {scoped}` starts it" if scoped
+           else "run `browser-control-cli open`")
+    fail("cdp-unreachable",
+         f"no drivable browser{where} — {fix}"
+         + (f" ({reason})" if reason else ""))
+
+
 def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
     """(browser row, tab row) for the ONE tab a page verb acts on.
 
@@ -1886,10 +1901,13 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
         return row, tab
     rows = _writable(browser)
     if not rows:
-        fail("cdp-not-local",
-             "the only endpoint this CLI could drive is not the browser it "
-             "claims to be — nothing was sent to it (`tab list` names the "
-             "process holding the port)")
+        # ask `_drivable` in its STRICT form first: an endpoint that answered
+        # but did not verify has to refuse `cdp-not-local`. Only when nothing
+        # answered at all is the answer "there is nothing to drive" — the
+        # first version blamed the endpoint for both, which is a lie when no
+        # browser is running.
+        _drivable(browser)
+        _no_drive(browser)
     pairs = [(row, tab) for row in rows for tab in _tabs_of(row)[0]]
     if not pairs:
         fail("no-page-tab",

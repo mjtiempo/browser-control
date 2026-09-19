@@ -223,23 +223,24 @@ def ok_json(*argv: str, env_extra: dict | None = None) -> dict:
             f"{' '.join(argv)} printed no JSON: {out[:200]}") from e
 
 
-def refuses(code: str, *argv: str) -> str:
+def refuses(code: str, *argv: str, env_extra: dict | None = None) -> str:
     """A CLI call that must refuse with `code`, and exit 2."""
-    rc, out, err = run(*argv)
+    rc, out, err = run(*argv, env_extra=env_extra)
     assert rc == 2, f"{' '.join(argv)} rc={rc} (wanted 2): {err or out}"
     assert f"ERR[{code}]" in err, \
         f"{' '.join(argv)}: wanted ERR[{code}], got {err!r}"
     return err
 
 
-def refuses_any(codes: tuple[str, ...], *argv: str) -> str:
+def refuses_any(codes: tuple[str, ...], *argv: str,
+                env_extra: dict | None = None) -> str:
     """A CLI call that must refuse with ONE of `codes`, and exit 2.
 
     For a property two honest codes can prove — "that tab is no longer
     addressable" arrives as `no-page-tab` or as `cdp-unreachable`, depending on
     whether anything else drivable is up.
     """
-    rc, out, err = run(*argv)
+    rc, out, err = run(*argv, env_extra=env_extra)
     assert rc == 2, f"{' '.join(argv)} rc={rc} (wanted 2): {err or out}"
     assert any(f"ERR[{code}]" in err for code in codes), \
         f"{' '.join(argv)}: wanted one of {codes}, got {err!r}"
@@ -1174,6 +1175,43 @@ def _quiet_handler() -> type:
     return Quiet
 
 
+def c_policy_gate() -> str:
+    """`--allow`/`--deny` and their env vars gate a call BEFORE it acts.
+
+    The session browser is up here, so the allowed read in this check is a real
+    one; the denied write is refused `not-allowed` with nothing sent. The gate
+    never blocks `selftest` — the verb that reports the policy — and a typo in a
+    policy is refused rather than ignored.
+    """
+    read_only = {"BROWSER_CONTROL_ALLOW": "read"}
+    target = f"id:{STATE['tab'][:8]}"
+    before = ok_json("tab", "info", target, env_extra=read_only)
+    assert before["tab"]["id"] == STATE["tab"], before
+    # a write is refused, and the refusal names the class and the rule
+    err = refuses("not-allowed", "tab", "nav", f"{base_url()}/nine-a",
+                  env_extra=read_only)
+    assert "write" in err and "allowed" in err, err
+    after = ok_json("tab", "info", target, env_extra=read_only)
+    assert after["tab"]["url"] == before["tab"]["url"], (before, after)
+    # a deny-list blocks one class out of everything else
+    err = refuses("not-allowed", "tab", "js", "1",
+                  env_extra={"BROWSER_CONTROL_DENY": "code"})
+    assert "code" in err and "denied" in err, err
+    # the MODE decides: `read` is enough for --for load, not for --for js
+    err = refuses("not-allowed", "tab", "wait", "--for", "js",
+                  "--timeout", "1", env_extra=read_only)
+    assert "tab wait --for js" in err, err
+    # the gate does not block its own explanation, and reports itself
+    caps = ok_json("selftest", env_extra={"BROWSER_CONTROL_DENY": "read"})
+    assert caps["policy"] == {"allow": [], "deny": ["read"],
+                              "source": "BROWSER_CONTROL_DENY",
+                              "enforced": True}, caps["policy"]
+    # a typo in a policy refuses instead of quietly allowing everything
+    refuses("bad-args", "tab", "text",
+            env_extra={"BROWSER_CONTROL_ALLOW": "reed"})
+    return "an allowed read worked; a denied write refused `not-allowed`"
+
+
 def c_close_ignores_a_recycled_pid() -> str:
     """A stale pid file must not aim SIGTERM at an unrelated process.
 
@@ -1500,6 +1538,11 @@ def c_profile_verbs() -> str:
         assert gone["reset"] is True and gone["verified"] is True, gone
         assert gone["files"] == 2 and gone["bytes_freed"] > 0, gone
         assert not os.path.exists(target), "the profile survived the wipe"
+        # a live SOURCE is a legitimate snapshot: a warning, not a refusal
+        live = ok_json("profile", "seed", "--from", str(ours["path"]),
+                       "--force", "--profile", target)
+        assert "in use" in str(live.get("warning", "")), live
+        assert live["verified"] is True, live
         # somebody's real profile is not one of ours to touch
         outside = tempfile.mkdtemp(prefix="browser-control-outside-")
         try:
@@ -1712,6 +1755,7 @@ CHECKS = (
      c_list_reports_the_listener),
     ("a port a stranger holds is refused", c_cdp_not_local),
     ("profile info/seed/reset", c_profile_verbs),
+    ("the policy gate blocks 'not-allowed'", c_policy_gate),
     ("close ignores a recycled pid", c_close_ignores_a_recycled_pid),
     ("close stops the browser, verified", c_close_stops_the_browser),
     ("close again is a no-op", c_close_is_idempotent),

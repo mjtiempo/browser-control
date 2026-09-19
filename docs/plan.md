@@ -264,7 +264,12 @@ unclear oracle into a claim of absence.**
     check-then-act, so `started: true` happens exactly once; a caller that
     cannot be served waits, then refuses `profile-busy` naming the holder, and a
     filesystem that cannot lock is reported as a warning rather than ignored.
-11. **The surface is DECLARED.** Every verb carries capability classes
+11. **The surface can be GATED.** `--allow`/`--deny` (or
+    `BROWSER_CONTROL_ALLOW`/`DENY`) refuse a verb whose capability classes fail
+    the policy, `not-allowed` naming the rule; it fails closed on an
+    unclassified action, resolves the mode where one decides a class, and never
+    gates `selftest` — the verb that reports the policy.
+12. **The surface is DECLARED.** Every verb carries capability classes
     (`read`/`write`/`code`/`file`/`egress`) per resolved action in
     `lib/capabilities.py`; `selftest` reports them and a hermetic check keeps
     them complete. It declares, it does not enforce.

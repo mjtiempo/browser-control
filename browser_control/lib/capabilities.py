@@ -30,6 +30,10 @@ enforcement (if it is ever wanted) belongs to whoever reads it.
 """
 from __future__ import annotations
 
+import os
+
+from browser_control.lib.errors import fail  # pyright: ignore[reportMissingImports]
+
 CLASSES = ("egress", "file", "code", "read", "write")
 
 #: action -> the classes it holds. Keys are what a caller actually invokes:
@@ -118,3 +122,96 @@ def by_class() -> dict[str, list[str]]:
         for name in classes:
             grouped.setdefault(name, []).append(action)
     return grouped
+
+
+# ---------------------------------------------------------------- the gate
+# A DECLARED surface is only half of a policy; this is the other half — the
+# check that a call is allowed to do what it is about to do, before it does it.
+# Two rules make it worth having:
+#
+# * **Fail CLOSED.** An action with no classes is refused as unclassified: a
+#   policy that lets an unknown verb through is not a policy.
+# * **The refusal explains itself.** It names the classes the action holds and
+#   the rule that blocked them, so a blocked caller learns what to ask for.
+#
+# No policy set means no gate: every call behaves as it did before one existed.
+ALLOW_ENV = "BROWSER_CONTROL_ALLOW"
+DENY_ENV = "BROWSER_CONTROL_DENY"
+EVERY = ("*", "all")
+
+POLICY: dict = {"allow": (), "deny": (), "source": ""}
+
+
+def _classes(text: str, what: str) -> tuple[str, ...]:
+    """The classes a policy string names, or a refusal.
+
+    An unknown class is REFUSED rather than ignored: a typo in a policy must
+    not quietly allow what it was written to stop.
+    """
+    out: list[str] = []
+    for part in str(text or "").replace(" ", "").split(","):
+        if not part:
+            continue
+        if part in EVERY:
+            return tuple(CLASSES)
+        if part not in CLASSES:
+            fail("bad-args",
+                 f"{what}: {part!r} is not a capability class (have: "
+                 + ", ".join(CLASSES) + ", or * for all)")
+        if part not in out:
+            out.append(part)
+    return tuple(out)
+
+
+def policy(allow: str | None = None, deny: str | None = None) -> dict:
+    """Replace the policy in force, from flags or from the environment.
+
+    `None` means "not given on this call": the environment has the say, and
+    with neither, there is no policy and everything the surface declares is
+    allowed. Flags win over the environment, and the reply of `selftest` says
+    which source is in force.
+    """
+    if allow is not None or deny is not None:
+        source = "--allow/--deny"
+        chosen_allow = allow or ""
+        chosen_deny = deny or ""
+    else:
+        chosen_allow = os.environ.get(ALLOW_ENV, "")
+        chosen_deny = os.environ.get(DENY_ENV, "")
+        source = ", ".join(name for name, value in
+                            ((ALLOW_ENV, chosen_allow), (DENY_ENV, chosen_deny))
+                            if value)
+    POLICY.update({"allow": _classes(chosen_allow, "--allow"),
+                   "deny": _classes(chosen_deny, "--deny"),
+                   "source": source})
+    return dict(POLICY)
+
+
+def describe() -> dict:
+    """The policy in force, for `selftest` to report."""
+    return {"allow": list(POLICY["allow"]), "deny": list(POLICY["deny"]),
+            "source": POLICY["source"],
+            "enforced": bool(POLICY["allow"] or POLICY["deny"])}
+
+
+def allowed(action: str) -> tuple[bool, str]:
+    """May that action run under the policy in force? (yes, or why not)."""
+    allow = tuple(POLICY["allow"])
+    deny = tuple(POLICY["deny"])
+    if not allow and not deny:
+        return True, ""
+    classes = ACTIONS.get(action)
+    if not classes:
+        return False, (f"{action} is not in the declared surface (see "
+                       "`selftest`), and an unclassified verb is refused")
+    blocked = [name for name in classes if name in deny]
+    if blocked:
+        return False, (f"{action} is {'+'.join(classes)}, and "
+                       f"{blocked[0]!r} is denied by {POLICY['source']}")
+    if allow:
+        missing = [name for name in classes if name not in allow]
+        if missing:
+            return False, (f"{action} is {'+'.join(classes)}, and "
+                           f"{missing[0]!r} is not allowed by "
+                           f"{POLICY['source']}")
+    return True, ""

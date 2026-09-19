@@ -1493,6 +1493,74 @@ def t_lock_serializes_a_check_then_act() -> None:
             assert broken["warning"], broken
 
 
+def t_policy_gate() -> None:
+    """The gate: fail closed, name the rule, and never block its own answer.
+
+    Module state on purpose — the policy is per PROCESS, set by the CLI from
+    `--allow`/`--deny` or the environment — so this restores it afterwards.
+    """
+    original = dict(capabilities.POLICY)
+    try:
+        for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV):
+            os.environ.pop(name, None)
+        # no policy: everything the declared surface holds is allowed
+        capabilities.policy()
+        assert capabilities.allowed("tab js")[0] is True
+        # an allow-list: EVERY class of the action has to be in it
+        capabilities.policy("read,write", None)
+        assert capabilities.allowed("open")[0] is True          # write
+        assert capabilities.allowed("tab js")[0] is False       # code+write
+        assert capabilities.allowed("tab upload")[0] is False   # write+file
+        # a deny-list: any one class is enough to block
+        capabilities.policy(None, "code")
+        blocked, why = capabilities.allowed("tab wait --for js")
+        assert blocked is False and "denied" in why, why
+        assert capabilities.allowed("tab wait")[0] is True
+        # `*` means every class; an unknown class is REFUSED, not ignored
+        capabilities.policy("*", None)
+        assert capabilities.allowed("tab js")[0] is True
+        refusal(lambda: capabilities.policy("nonsense", None), "bad-args")
+        # something nobody classified is refused rather than waved through
+        blocked, why = capabilities.allowed("tab frobnicate")
+        assert blocked is False and "declared surface" in why, why
+        # the environment is the default source; flags win over it
+        os.environ[capabilities.DENY_ENV] = "code"
+        assert capabilities.policy()["source"] == capabilities.DENY_ENV
+        assert capabilities.policy("read", None)["source"] == "--allow/--deny"
+        # the argv route, in-process: the gate refuses, `selftest` never is
+        rc, _out, err = run_cli(["tab", "text", "--deny", "read"])
+        assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+        rc, out, _err = run_cli(["selftest", "--deny", "read"])
+        assert rc == 0, (rc, out)
+        policy = json.loads(out)["policy"]
+        assert policy["deny"] == ["read"] and policy["enforced"] is True, \
+            policy
+        rc, _out, err = run_cli(["tab", "text", "--allow", "nonsense"])
+        assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    finally:
+        for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV):
+            os.environ.pop(name, None)
+        capabilities.POLICY.update(original)
+    # `list` reports the machine, so it refuses a scope instead of dropping it
+    outside = os.path.join(tempfile.gettempdir(),
+                           "browser-control-outside-profile")
+    rc, _out, err = run_cli(["list", "--profile", outside])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    # which DECLARED action a call is: the mode decides, where a mode exists
+    assert cli_main.action("tab", ["wait", "--for", "js"]) == \
+        "tab wait --for js"
+    assert cli_main.action("tab", ["wait", "--for", "load"]) == "tab wait"
+    assert cli_main.action("tab", ["dialog", "accept"]) == \
+        "tab dialog accept"
+    assert cli_main.action("tab", ["dialog"]) == "tab dialog state"
+    assert cli_main.action("tab", ["media", "play"]) == "tab media play"
+    assert cli_main.action("tab", ["media"]) == "tab media state"
+    assert cli_main.action("tab", ["text"]) == "tab text"
+    assert cli_main.action("tab", ["https://x.example"]) == "tab"
+    assert cli_main.action("profile", ["seed"]) == "profile seed"
+    assert cli_main.action("open", []) == "open"
+
+
 def t_pid_alive() -> None:
     assert browser._pid_alive(os.getpid()) is True                 # noqa: SLF001
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
@@ -1523,6 +1591,7 @@ def main() -> int:
          t_a_working_log_makes_no_scratch_dirs),
         ("the port is checked against the kernel", t_endpoint_ownership),
         ("the lock serializes a check-then-act", t_lock_serializes_a_check_then_act),
+        ("the policy gate fails closed", t_policy_gate),
         ("every verb is classified", t_capability_surface),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),

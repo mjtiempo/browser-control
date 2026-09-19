@@ -19,10 +19,10 @@ from collections.abc import Callable
 # pushed every line past the formatter's limit, so they are gone.
 from browser_control import __version__
 from browser_control.lib import audit
-from browser_control.lib import browser as browser_lib
 from browser_control.lib import capabilities
 from browser_control.lib import cdp
 from browser_control.lib import dom
+from browser_control.lib import browser as browser_lib
 from browser_control.lib import profile as profile_lib
 from browser_control.lib.browser import (
     activate,
@@ -127,6 +127,14 @@ flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
        --profile DIR    the INSTANCE to drive: a profile directory under the
                         root, which is how two instances of ONE browser are
                         told apart (`open --profile <root>/work`)
+       --allow CLASSES  the capability classes this call may use (read, write,
+                        code, file, egress, or * for all)
+       --deny CLASSES   classes it may not; a verb is refused `not-allowed`
+                        when ANY of its classes fails the policy
+gate:  --allow/--deny, or BROWSER_CONTROL_ALLOW/BROWSER_CONTROL_DENY for a
+       whole session. `selftest` reports the policy in force and is the one
+       verb that is never gated — a gate that blocks its own explanation
+       would be a trap. No policy set means no gate.
        --tab SPEC       the tab a page verb acts on (nav/back/forward/reload);
                         without it the verb acts on the ONLY page tab there is
 reads: every drivable browser.  writes: a managed browser, or an attached one
@@ -267,8 +275,19 @@ def cmd_close(rest: list[str], browser: str) -> dict:
 
 
 def cmd_list(rest: list[str], browser: str) -> dict:
-    _none(rest, "list")
+    """`list`: every browser on the machine — so nothing narrows it.
+
+    `--profile` is the INSTANCE selector, and this verb reports the whole
+    machine, so it refuses one rather than ignoring it: a scope that is
+    silently dropped is a caller who thinks they asked for something.
+    """
     _no_browser_flag("list", browser)
+    if browser_lib.scope():
+        fail("bad-args",
+             "list: --profile does not apply — this verb reports every browser "
+             "on the machine; `tab list --profile DIR` shows one instance's "
+             "tabs and `info --profile DIR` its endpoint")
+    _none(rest, "list")
     return list_browsers()
 
 
@@ -325,6 +344,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
                  "unclassified": capabilities.unclassified(
                      HANDLERS, {"tab": TAB_SUBCOMMANDS,
                                 "profile": PROFILE_SUBCOMMANDS})},
+             "policy": capabilities.describe(),
              "browsers": found}
     if browser:
         reply["requested"] = {"name": browser,
@@ -873,40 +893,83 @@ HANDLERS: dict[str, Handler] = {
 }
 
 
-def _flags(args: list[str]) -> tuple[list[str], str, str]:
-    """Pull `--browser NAME` and `--profile DIR` out of argv, anywhere.
+# The GLOBAL flags, and what each one sets: pulled out of argv in one place so
+# every verb sees the same globals, and none can quietly not know about one.
+FLAG_KEY = {"--browser": "browser", "--profile": "profile",
+            "--allow": "allow", "--deny": "deny"}
 
-    `--profile` is the INSTANCE selector, and it goes in the same place: the
-    process scope (`browser_lib.scope`), which every verb that narrows by
-    `--browser` also consults. `attach`/`detach`/`close` read it from there, so
-    one flag means one thing on every verb.
+
+def _flags(args: list[str]) -> tuple[list[str], str, str, str, str]:
+    """Pull the GLOBAL flags out of argv, anywhere.
+
+    `--browser NAME` picks the browser, `--profile DIR` the instance,
+    `--allow`/`--deny` the capability classes this call may use. One place, so
+    every verb sees the same globals and none of them can quietly not know
+    about one.
     """
+    found = dict.fromkeys(FLAG_KEY.values(), "")
     rest: list[str] = []
-    browser = ""
-    profile = ""
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg in ("--browser", "--profile"):
-            if i + 1 >= len(args):
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in FLAG_KEY:
+            if index + 1 >= len(args):
                 fail("bad-args", f"{arg} needs a value")
-            if arg == "--browser":
-                browser = args[i + 1]
-            else:
-                profile = args[i + 1]
-            i += 2
+            found[FLAG_KEY[arg]] = args[index + 1]
+            index += 2
             continue
-        if arg.startswith(("--browser=", "--profile=")):
-            key, value = arg.split("=", 1)
-            if key == "--browser":
-                browser = value
-            else:
-                profile = value
-            i += 1
+        named = [key for key in FLAG_KEY
+                 if arg.startswith(key + "=")]
+        if named:
+            found[FLAG_KEY[named[0]]] = arg.split("=", 1)[1]
+            index += 1
             continue
         rest.append(arg)
-        i += 1
-    return rest, browser, profile
+        index += 1
+    return (rest, found["browser"], found["profile"], found["allow"],
+            found["deny"])
+
+
+def _flag_value(rest: list[str], flag: str) -> str:
+    """The value of `--flag VALUE` (or `--flag=VALUE`) in argv, or ""."""
+    for index, arg in enumerate(rest):
+        if arg == flag and index + 1 < len(rest):
+            return str(rest[index + 1])
+        if arg.startswith(flag + "="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+def action(verb: str, rest: list[str]) -> str:
+    """Which DECLARED action a call is: verb, subcommand, and its mode.
+
+    Three subcommands answer differently by mode — `tab wait --for js` is code
+    while `tab wait` reads, `tab dialog accept` writes while `state` reads,
+    `tab media play` writes while `state` reads — so the gate asks for the mode
+    on exactly those and for the plain key on everything else. A caller cannot
+    get a write past the gate by spelling it as a read.
+    """
+    head = str(rest[0]) if rest else ""
+    if verb == "tab" and head in TAB_SUBCOMMANDS:
+        if head == "wait" and _flag_value(rest, "--for") == "js":
+            return "tab wait --for js"
+        # no mode means the default the verb actually runs: `tab dialog` is
+        # `state` (a read), `tab media` is `state` — a missing key would be
+        # refused as unclassified, which would block a read for no reason
+        if head == "dialog":
+            for mode in ("accept", "dismiss"):
+                if mode in rest[1:]:
+                    return f"tab dialog {mode}"
+            return "tab dialog state"
+        if head == "media":
+            for mode in ("play", "pause"):
+                if mode in rest[1:]:
+                    return f"tab media {mode}"
+            return "tab media state"
+        return f"tab {head}"
+    if verb == "profile" and head in PROFILE_SUBCOMMANDS:
+        return f"profile {head}"
+    return verb
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -923,16 +986,23 @@ def main(argv: list[str] | None = None) -> int:
     ok = False
     code: str | None = None
     try:
-        rest, browser, profile = _flags(args)
+        rest, browser, profile, allow, deny = _flags(args)
         verb, rest = rest[0], rest[1:]
-        # `--profile` is the INSTANCE, read from the process scope: one flag for
-        # every verb, and never inherited from another invocation
+        # the globals, in the order they matter: the instance, then the policy
         browser_lib.scope(profile or "")
+        capabilities.policy(allow or None, deny or None)
         audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:
             raise ControlError("unknown-command",
                                f"{verb} (have: {', '.join(HANDLERS)})")
+        if verb != "selftest":
+            # `selftest` is never gated: it is the verb that REPORTS the policy,
+            # and a gate that blocks its own explanation is a trap. Everything
+            # else answers to the classes its action declares.
+            permitted, why = capabilities.allowed(action(verb, rest))
+            if not permitted:
+                fail("not-allowed", why)
         print(json.dumps(handler(rest, browser)))
         ok = True
         return 0

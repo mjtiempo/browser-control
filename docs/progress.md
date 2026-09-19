@@ -204,7 +204,7 @@ off.)
 ## 5. What is next
 
 Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.22 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
+5.12 through 5.23 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
 (search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
 measured and rejected**. What is left in the CORE is **5.10: the launch/sync
 lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
@@ -813,6 +813,52 @@ other two are skipped, reseeding refuses `profile-exists`, `--dry` writes
 nothing, a live profile refuses `profile-live`, a wipe needs `--force` and then
 really wipes — and a profile outside the root refuses `not-managed`.
 
+### 5.23 The policy gate, and four warts — done
+
+**The gate.** The declared surface (§5.17) said what each verb CAN do; this says
+what this CALL may do, before it does it. `--allow read,write` / `--deny code`
+(or `BROWSER_CONTROL_ALLOW` / `BROWSER_CONTROL_DENY` for a whole session, which
+is how a host would set it once) refuse `not-allowed`, naming the classes the
+action holds and the rule that blocked them:
+
+```
+$ browser-control-cli tab js "1" --allow read,write
+ERR[not-allowed]: tab js is code+write, and 'code' is not allowed by --allow/--deny
+```
+
+Three decisions worth recording:
+
+* **Fail closed.** An action with no classes is refused as unclassified, and a
+  policy naming a class that does not exist is `bad-args` — a typo in a policy
+  must not quietly allow what it was written to stop.
+* **`selftest` is never gated.** It is the verb that reports the policy, and a
+  gate that blocks its own explanation is a trap.
+* **The MODE decides.** `tab wait --for js` is code while `tab wait` reads,
+  `tab dialog accept` writes while `state` reads — so the gate resolves the
+  action from argv, and `tab dialog` with no mode maps to `state` (otherwise a
+  READ would be refused as unclassified). No policy set means no gate, which is
+  what every call did before one existed.
+
+**Four warts, all of them places the tool claimed more than it knew:**
+
+1. `_one_tab` refused `cdp-not-local` — "the endpoint is not the browser it
+   claims to be" — when NOTHING was running at all. It now asks the strict form
+   first (an endpoint that answered but did not verify is that refusal) and
+   otherwise says there is nothing to drive.
+2. A scoped call with nothing up said "no drivable browser" without naming the
+   instance it was about. `_no_drive` names it and the command that starts it.
+3. `list --profile DIR` silently DROPPED the scope: the caller asked about one
+   instance and got the whole machine. It refuses `bad-args` now, the way it
+   already refused `--browser`.
+4. `profile seed` said nothing when the SOURCE profile was live. It warns now
+   ("what is on disk may lag its live state"), because a live source is a
+   legitimate snapshot while a live TARGET is a refusal.
+
+Hermetic 34 -> 35 (the gate's rules, the resolver's mode cases, the exemption,
+and `list`'s refusal), live 55 -> 56 (an allowed read works while a denied write
+refuses `not-allowed` with nothing sent; a live source warning; a policy typo
+refused). 0 skipped, no leftovers.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -826,9 +872,9 @@ plugin can fail but cannot claim success. *Done when* one out-of-core adapter
 passes its own live check through the contract.
 
 ### 5.10 Hardening (parallel, any time)
-A `--profile`/instance selector; richer `stop` identity. (DONE here: the
-`/proc` ownership guard — §5.16 — the capability surface — §5.17 — and the
-launch/sync lock — §5.18.)
+DONE: the `/proc` ownership guard (§5.16), the capability surface (§5.17), the
+launch/sync lock (§5.18), the instance selector (§5.20) and richer `stop`
+identity (§5.19). Nothing is left in this section.
 
 ### 5.11 `open --windowless` — built, measured, REJECTED
 A windowless start (`--no-startup-window`: CDP up, no window, no page) was built
