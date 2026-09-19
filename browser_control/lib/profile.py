@@ -31,7 +31,6 @@ to another machine needs that key too, and this verb does not pretend to.
 """
 from __future__ import annotations
 
-import contextlib
 import os
 import shutil
 import time

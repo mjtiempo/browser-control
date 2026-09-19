@@ -140,7 +140,7 @@ ALLOW_ENV = "BROWSER_CONTROL_ALLOW"
 DENY_ENV = "BROWSER_CONTROL_DENY"
 EVERY = ("*", "all")
 
-POLICY: dict = {"allow": (), "deny": (), "source": ""}
+POLICY: dict = {"allow": (), "deny": (), "source": "", "enforced": False}
 
 
 def _classes(text: str, what: str) -> tuple[str, ...]:
@@ -164,27 +164,52 @@ def _classes(text: str, what: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _side(value: str | None, env_name: str, what: str) -> str:
+    """One side of the policy: the flag if it was given, else the environment.
+
+    The sides are resolved INDEPENDENTLY, and that is the point: a flag naming
+    one side must not void the other, or a narrow-sounding `--deny egress`
+    would quietly drop a host's `BROWSER_CONTROL_ALLOW=read` whitelist and
+    authorise what the host forbade (measured: it did). A flag given with an
+    EMPTY value is refused rather than read as "no policy" — "allow nothing"
+    is spelled `--deny '*'` — while an environment variable that is set but
+    empty is not a policy at all (that is how a shell spells "unset").
+    """
+    if value is None:
+        return os.environ.get(env_name, "")
+    if not str(value).strip():
+        fail("bad-args",
+             f"{what}: needs at least one class — name them, use * for all, "
+             "or use `--deny *` to allow nothing")
+    return str(value)
+
+
 def policy(allow: str | None = None, deny: str | None = None) -> dict:
     """Replace the policy in force, from flags or from the environment.
 
-    `None` means "not given on this call": the environment has the say, and
-    with neither, there is no policy and everything the surface declares is
-    allowed. Flags win over the environment, and the reply of `selftest` says
-    which source is in force.
+    `None` means "not given on this CALL": that side falls back to the
+    environment, and to no policy when the environment is silent too. The reply
+    of `selftest` names every source in force.
     """
-    if allow is not None or deny is not None:
-        source = "--allow/--deny"
-        chosen_allow = allow or ""
-        chosen_deny = deny or ""
-    else:
-        chosen_allow = os.environ.get(ALLOW_ENV, "")
-        chosen_deny = os.environ.get(DENY_ENV, "")
-        source = ", ".join(name for name, value in
-                            ((ALLOW_ENV, chosen_allow), (DENY_ENV, chosen_deny))
-                            if value)
-    POLICY.update({"allow": _classes(chosen_allow, "--allow"),
-                   "deny": _classes(chosen_deny, "--deny"),
-                   "source": source})
+    chosen_allow = _side(allow, ALLOW_ENV, "--allow")
+    chosen_deny = _side(deny, DENY_ENV, "--deny")
+    sources = []
+    if allow is not None:
+        sources.append("--allow")
+    elif chosen_allow.strip():
+        sources.append(ALLOW_ENV)
+    if deny is not None:
+        sources.append("--deny")
+    elif chosen_deny.strip():
+        sources.append(DENY_ENV)
+    allow_classes = _classes(chosen_allow, "--allow")
+    deny_classes = _classes(chosen_deny, "--deny")
+    POLICY.update({"allow": allow_classes, "deny": deny_classes,
+                   "source": " + ".join(sources),
+                   # a policy with no classes is still a policy: `enforced` is
+                   # what `allowed` consults, so "nothing is allowed" can never
+                   # read as "no policy at all"
+                   "enforced": bool(allow_classes or deny_classes)})
     return dict(POLICY)
 
 
@@ -192,14 +217,14 @@ def describe() -> dict:
     """The policy in force, for `selftest` to report."""
     return {"allow": list(POLICY["allow"]), "deny": list(POLICY["deny"]),
             "source": POLICY["source"],
-            "enforced": bool(POLICY["allow"] or POLICY["deny"])}
+            "enforced": bool(POLICY["enforced"])}
 
 
 def allowed(action: str) -> tuple[bool, str]:
     """May that action run under the policy in force? (yes, or why not)."""
     allow = tuple(POLICY["allow"])
     deny = tuple(POLICY["deny"])
-    if not allow and not deny:
+    if not POLICY["enforced"]:
         return True, ""
     classes = ACTIONS.get(action)
     if not classes:

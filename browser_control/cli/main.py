@@ -7,6 +7,8 @@ caller-producible input can produce a traceback.
 """
 from __future__ import annotations
 
+import contextlib
+import difflib
 import json
 import math
 import platform
@@ -139,7 +141,9 @@ flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
                         told apart (`open --profile <root>/work`)
        --frame VALUE    the FRAME inside the tab: a URL substring, or an index
                         from `tab frames` (a cross-origin frame is a target of
-                        its own, so every page verb works inside it)
+                        its own, so every verb that acts on a page's CONTENT
+                        works inside it — not nav/back/forward/reload/list/
+                        frames/info/close/activate, which act on the tab)
        --allow CLASSES  the capability classes this call may use (read, write,
                         code, file, egress, or * for all)
        --deny CLASSES   classes it may not; a verb is refused `not-allowed`
@@ -169,6 +173,10 @@ def _one(rest: list[str], verb: str, required: bool = False) -> str:
                  f"{verb}: a TAB spec is required (id:<prefix> or a "
                  "title/url substring)")
         return ""
+    if not str(rest[0]).strip():
+        # an EMPTY value is not "no value": `tab activate ""` used to fall
+        # through to "the only page tab", which is a tab nobody named
+        fail("bad-args", f"{verb}: an empty argument is not a value")
     return rest[0]
 
 
@@ -406,8 +414,19 @@ def _switch(rest: list[str], flag: str) -> tuple[list[str], bool]:
 
 
 def _tab_flag(rest: list[str], verb: str) -> tuple[list[str], str]:
-    """`--tab SPEC`, or "" — the tab a page verb acts on."""
+    """`--tab SPEC`, or "" — the tab a page verb acts on.
+
+    `--tab ""` is REFUSED rather than read as "no spec": the flag was given, and
+    an empty spec reaching `_one_tab` means "the only page tab" — a tab nobody
+    named. The library refuses an empty spec, so the CLI must too, or the same
+    argv means two things one layer apart (`tab info ""` refused it while
+    `tab text --tab ""` quietly picked a tab).
+    """
     rest, spec = _pop(rest, "--tab", verb)
+    if spec is not None and not str(spec).strip():
+        fail("bad-args",
+             f"{verb}: --tab needs a SPEC (id:<prefix> or a title/url "
+             "substring); leave the flag out to act on the only page tab")
     return rest, spec or ""
 
 
@@ -936,15 +955,18 @@ FLAG_KEY = {"--browser": "browser", "--profile": "profile",
             "--frame": "frame", "--allow": "allow", "--deny": "deny"}
 
 
-def _flags(args: list[str]) -> tuple[list[str], dict[str, str]]:
+def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
     """Pull the GLOBAL flags out of argv, anywhere.
 
     `--browser NAME` picks the browser, `--profile DIR` the instance,
     `--frame VALUE` the frame inside the tab (a URL substring or an index from
     `tab frames`), `--allow`/`--deny` the capability classes this call may use.
-    One place, so every verb sees the same globals.
+    One place, so every verb sees the same globals. A flag that was NOT given
+    comes back as None rather than "", because `--allow` must be able to tell
+    the two apart: an empty value is a refusal, and reading it as "absent" is
+    how `--allow ""` used to mean "allow everything".
     """
-    found = dict.fromkeys(FLAG_KEY.values(), "")
+    found: dict[str, str | None] = dict.fromkeys(FLAG_KEY.values(), None)
     rest: list[str] = []
     index = 0
     while index < len(args):
@@ -966,14 +988,96 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str]]:
     return rest, found
 
 
-def _flag_value(rest: list[str], flag: str) -> str:
-    """The value of `--flag VALUE` (or `--flag=VALUE`) in argv, or ""."""
+def _flag_last(rest: list[str], flag: str) -> str:
+    """The LAST `--flag VALUE` (or `--flag=VALUE`) in argv, or "".
+
+    The last, because that is the one `_pop` leaves the handler: a gate that
+    read the FIRST would classify `--for load --for js` as a read while the verb
+    ran `js` (measured). Read-only — the gate must not consume argv.
+    """
+    value = ""
     for index, arg in enumerate(rest):
         if arg == flag and index + 1 < len(rest):
-            return str(rest[index + 1])
-        if arg.startswith(flag + "="):
-            return arg.split("=", 1)[1]
-    return ""
+            value = str(rest[index + 1])
+        elif arg.startswith(flag + "="):
+            value = arg.split("=", 1)[1]
+    return value
+
+
+def _bare_tab_word(word: str) -> None:
+    """Refuse a `tab` word that is neither a subcommand nor a URL.
+
+    The URL path would say only "refusing 'frams' as a URL", which reads as a
+    complaint about a URL when what happened is a typo — so this names both
+    lists, and the subcommand the word is closest to. It runs BEFORE the gate,
+    so a typo is `bad-args` whether or not a policy is in force (otherwise the
+    verb that knows the real message never gets to run).
+    """
+    try:
+        browser_lib.safe_url(word)
+        return                              # a URL: the URL path takes it
+    except ControlError:
+        pass
+    near = difflib.get_close_matches(str(word), sorted(TAB_SUBCOMMANDS),
+                                     n=1, cutoff=0.6)
+    fail("bad-args",
+         f"tab: {str(word)[:40]!r} is neither a subcommand (have: "
+         + ", ".join(sorted(TAB_SUBCOMMANDS))
+         + ") nor a URL (http(s) or about:blank only)"
+         + (f" — did you mean `tab {near[0]}`?" if near else ""))
+
+
+def _modes(head: str) -> tuple[str, ...]:
+    """The modes a mode-carrying `tab` subcommand accepts.
+
+    Read from the DECLARED surface, so no list is kept twice: `tab dialog
+    accept` and `tab media play` are actions, and `--for` takes the values its
+    own table holds (`tab wait --for js` is the one that changes class).
+    """
+    if head == "wait":
+        return tuple(dom.WAIT_EXPRS)
+    prefix = f"tab {head} "
+    return tuple(entry[len(prefix):] for entry in capabilities.ACTIONS
+                 if entry.startswith(prefix))
+
+
+def resolved_mode(verb: str, rest: list[str]) -> str:
+    """The mode a call will RUN — read the way its handler will read it.
+
+    The gate authorises a mode-carrying subcommand BY its mode, so it has to
+    resolve that mode exactly as the verb does: the LAST `--for` (what `_pop`
+    leaves), normalised by `dom.mode_of` (the one normaliser in the codebase),
+    and for a positional mode the first positional left once that verb's own
+    flags are out of the way. A mode the gate cannot read is one it cannot
+    authorise, so an unrecognised one is refused here rather than guessed at —
+    a typo has to be `bad-args` whether or not a policy is in force.
+    """
+    if verb != "tab" or not rest:
+        return ""
+    head = str(rest[0])
+    if head == "wait":
+        _kept, value = _pop(list(rest[1:]), "--for", "tab wait")
+        if value is None:
+            return ""
+        raw = str(value)
+    elif head in ("dialog", "media"):
+        args = list(rest[1:])
+        args, _spec = _pop(args, "--tab", f"tab {head}")
+        value_flag = "--text" if head == "dialog" else "--index"
+        args, _value = _pop(args, value_flag, f"tab {head}")
+        raw = next((str(arg) for arg in args
+                    if not str(arg).startswith("-")), "")
+        if not raw:
+            return ""
+    else:
+        return ""
+    mode = dom.mode_of(raw)
+    modes = _modes(head)
+    if mode not in modes:
+        fail("bad-args",
+             f"tab {head}: {'--for' if head == 'wait' else 'MODE'} is "
+             + "|".join(modes) + f", got {raw!r}")
+    return mode
 
 
 def action(verb: str, rest: list[str]) -> str:
@@ -982,29 +1086,27 @@ def action(verb: str, rest: list[str]) -> str:
     Three subcommands answer differently by mode — `tab wait --for js` is code
     while `tab wait` reads, `tab dialog accept` writes while `state` reads,
     `tab media play` writes while `state` reads — so the gate asks for the mode
-    on exactly those and for the plain key on everything else. A caller cannot
-    get a write past the gate by spelling it as a read.
+    on exactly those, resolved by `resolved_mode` (the reading its verb does),
+    and for the plain key on everything else. A caller cannot get a write past
+    the gate by spelling it as a read: `--for JS`, `--for " js "` and a repeated
+    `--for` all resolve to the mode the verb will actually run.
+
+    "" means "this call declares no action" — a subcommand nobody has — and the
+    gate then stays out of the way, so the caller sees the verb's own
+    `bad-args` rather than `not-allowed` for a typo.
     """
     head = str(rest[0]) if rest else ""
-    if verb == "tab" and head in TAB_SUBCOMMANDS:
-        if head == "wait" and _flag_value(rest, "--for") == "js":
-            return "tab wait --for js"
-        # no mode means the default the verb actually runs: `tab dialog` is
-        # `state` (a read), `tab media` is `state` — a missing key would be
-        # refused as unclassified, which would block a read for no reason
-        if head == "dialog":
-            for mode in ("accept", "dismiss"):
-                if mode in rest[1:]:
-                    return f"tab dialog {mode}"
-            return "tab dialog state"
-        if head == "media":
-            for mode in ("play", "pause"):
-                if mode in rest[1:]:
-                    return f"tab media {mode}"
-            return "tab media state"
+    if verb == "tab":
+        if head not in TAB_SUBCOMMANDS:
+            return verb              # a URL: the URL path, which is `tab`
+        if head == "wait":
+            return ("tab wait --for js" if resolved_mode(verb, rest) == "js"
+                    else "tab wait")
+        if head in ("dialog", "media"):
+            return f"tab {head} {resolved_mode(verb, rest) or 'state'}"
         return f"tab {head}"
-    if verb == "profile" and head in PROFILE_SUBCOMMANDS:
-        return f"profile {head}"
+    if verb == "profile":
+        return f"profile {head}" if head in PROFILE_SUBCOMMANDS else ""
     return verb
 
 
@@ -1023,27 +1125,53 @@ def main(argv: list[str] | None = None) -> int:
     code: str | None = None
     try:
         rest, flags = _flags(args)
+        if not rest:
+            # every token was a GLOBAL flag, so there is no verb to run: this
+            # used to be an uncaught IndexError out of `main` — a traceback and
+            # exit 1, which is neither of the two things the contract promises
+            print(USAGE, file=sys.stderr)
+            given = ", ".join(f"{key}={value!r}"
+                              for key, value in flags.items() if value)
+            print("ERR[bad-args]: a verb is required "
+                  f"(have: {', '.join(HANDLERS)})"
+                  + (f" — {given} was given, but no verb to run"
+                     if given else ""), file=sys.stderr)
+            return 2
         verb, rest = rest[0], rest[1:]
         # the globals, in the order they matter: the instance, the frame, the
         # policy. Each is SET OR CLEARED per invocation, so no verb inherits
         # another call's scope.
-        browser = flags["browser"]
+        browser = flags["browser"] or ""
         browser_lib.scope(flags["profile"] or "")
         dom.frame(flags["frame"] or "")
-        capabilities.policy(flags["allow"] or None, flags["deny"] or None)
+        # NOT `or None`: a flag given an empty value must reach the policy,
+        # which refuses it, instead of reading as "the call named no policy"
+        capabilities.policy(flags["allow"], flags["deny"])
         audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:
             raise ControlError("unknown-command",
                                f"{verb} (have: {', '.join(HANDLERS)})")
         head = str(rest[0]) if rest else ""
+        if verb == "tab" and head and head not in TAB_SUBCOMMANDS:
+            _bare_tab_word(head)
+        if verb == "tab" and flags["frame"] and head not in dom.FRAME_VERBS:
+            fail("bad-args",
+                 f"tab {head or 'URL'}: --frame does not apply — it scopes the "
+                 "verbs that act on a page's CONTENT ("
+                 + ", ".join(sorted(dom.FRAME_VERBS))
+                 + "), not the ones that act on the tab itself")
         if verb != "selftest":
             # `selftest` is never gated: it is the verb that REPORTS the policy,
             # and a gate that blocks its own explanation is a trap. Everything
-            # else answers to the classes its action declares.
-            permitted, why = capabilities.allowed(action(verb, rest))
-            if not permitted:
-                fail("not-allowed", why)
+            # else answers to the classes its action declares — and a call whose
+            # action is "" declares none, so the verb's own refusal is what the
+            # caller sees (`bad-args` for a subcommand nobody has).
+            wanted = action(verb, rest)
+            if wanted:
+                permitted, why = capabilities.allowed(wanted)
+                if not permitted:
+                    fail("not-allowed", why)
         reply = handler(rest, browser)
         scoped_frame = dom.frame()
         if verb == "tab" and head in dom.FRAME_VERBS and scoped_frame:
@@ -1056,6 +1184,22 @@ def main(argv: list[str] | None = None) -> int:
     except ControlError as e:
         code = e.code
         print(f"ERR[{e.code}]: {e.message}", file=sys.stderr)
+        return 2
+    except BrokenPipeError:
+        # a closed reader (`| head`) is not a crash: the verb already did its
+        # work, and the caller gets a code instead of a traceback
+        code = "broken-pipe"
+        with contextlib.suppress(OSError):
+            print("ERR[broken-pipe]: the reader of stdout went away",
+                  file=sys.stderr)
+        return 2
+    except Exception as e:                       # noqa: BLE001
+        # ONE JSON object on stdout, or ERR[code] on stderr — an unexpected
+        # failure is reported as `internal` with its type and message, never as
+        # a traceback, and it still reaches the action log in `finally`
+        code = "internal"
+        with contextlib.suppress(OSError):
+            print(f"ERR[internal]: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     finally:
         # one line per invocation, refusals included. A secret the verb PROVED

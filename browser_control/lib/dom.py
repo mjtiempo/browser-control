@@ -93,6 +93,21 @@ def frame(wanted: str | None = None) -> str:
     return FRAME["wanted"]
 
 
+def mode_of(mode: str | None) -> str:
+    """The mode a mode-carrying subcommand will run, normalised in ONE place.
+
+    Three calls answer differently by mode — `tab wait --for`, `tab dialog MODE`
+    and `tab media MODE` — and the capability gate authorises a call BY its
+    mode, so the gate and the verb that runs must read it the same way.
+    Measured, and the reason this function exists: the gate used to compare the
+    raw token (`--for JS` was not `js`, and `tab media PLAY` was not `play`),
+    so `--allow read` authorised a call that then ran caller code. Normalising
+    here — the verb normalises here too — means one spelling cannot be a read to
+    the gate and a write to the browser.
+    """
+    return str(mode or "").strip().lower()
+
+
 # The verbs `--frame` can be ABOUT: the CLI adds a `frame` note to their replies
 # and nowhere else. A verb that drives the tab rather than its document —
 # `tab nav`, `tab list`, `tab activate` — has no frame scope, and saying it did
@@ -916,7 +931,7 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     waited for and how long. `--for js` runs caller code, so that mode is
     resolved like a write.
     """
-    name = str(mode or "").strip().lower()
+    name = mode_of(mode)
     if name not in WAIT_EXPRS:
         fail("bad-args",
              f"tab wait: --for is load|idle|element|js, got {mode!r}")
@@ -1454,7 +1469,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
     for a dialog it is not showing — and its read-back is the renderer
     answering again.
     """
-    name = str(mode or "state").strip().lower()
+    name = mode_of(mode) or "state"
     if name not in ("state", "accept", "dismiss"):
         fail("bad-args",
              f"tab dialog: MODE is state, accept or dismiss, got {mode!r}")
@@ -2190,7 +2205,7 @@ def media(mode: str, index: int | None = None, tab: str = "",
     several players; without it the playing one — else the largest — is used,
     and `count` says how many the page has.
     """
-    name = str(mode or "").strip().lower()
+    name = mode_of(mode)
     if name not in ("state", "play", "pause"):
         fail("bad-args", f"tab media: MODE is state|play|pause, got {mode!r}")
     if index is not None and name == "state":

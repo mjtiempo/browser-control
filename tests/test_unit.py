@@ -1523,10 +1523,15 @@ def t_policy_gate() -> None:
         # something nobody classified is refused rather than waved through
         blocked, why = capabilities.allowed("tab frobnicate")
         assert blocked is False and "declared surface" in why, why
-        # the environment is the default source; flags win over it
+        # the environment is the default source, and a flag names ONE side:
+        # the other still comes from the environment (the bug this replaced:
+        # `--deny X` voided a host's `BROWSER_CONTROL_ALLOW=read` whitelist and
+        # let `tab js` run)
         os.environ[capabilities.DENY_ENV] = "code"
         assert capabilities.policy()["source"] == capabilities.DENY_ENV
-        assert capabilities.policy("read", None)["source"] == "--allow/--deny"
+        both = capabilities.policy("read", None)
+        assert both["source"] == f"--allow + {capabilities.DENY_ENV}", both
+        assert both["allow"] == ("read",) and both["deny"] == ("code",), both
         # the argv route, in-process: the gate refuses, `selftest` never is
         rc, _out, err = run_cli(["tab", "text", "--deny", "read"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
@@ -1559,6 +1564,106 @@ def t_policy_gate() -> None:
     assert cli_main.action("tab", ["https://x.example"]) == "tab"
     assert cli_main.action("profile", ["seed"]) == "profile seed"
     assert cli_main.action("open", []) == "open"
+
+
+def t_gate_and_argv_hardening() -> None:
+    """The gate and argv, after a review measured three ways past them.
+
+    Every case here was a REAL failure before it was a check: an argv made only
+    of global flags crashed with an IndexError, a mode spelled `--for JS` was
+    authorised as a read and then ran caller code, an empty `--allow` meant
+    "allow everything", and `--tab ""` acted on a tab nobody named.
+    """
+    # 1. a verb is required, and it is a REFUSAL — not a traceback, not exit 1
+    for argv in (["--allow", "read"], ["--browser=chrome"], ["--frame", "0"],
+                 ["--profile", tempfile.gettempdir(), "--deny", "code"]):
+        rc, out, err = run_cli(argv)
+        assert rc == 2, (argv, rc)
+        assert "ERR[bad-args]" in err and "verb is required" in err, (argv, err)
+        assert "Traceback" not in err and out == "", (argv, out, err)
+    # 2. a mode is resolved the way the VERB resolves it — case, whitespace,
+    #    and a repeated flag (the last one wins, which is what `_pop` leaves)
+    assert cli_main.action("tab", ["wait", "--for", "JS"]) == \
+        "tab wait --for js"
+    assert cli_main.action("tab", ["wait", "--for", " js "]) == \
+        "tab wait --for js"
+    assert cli_main.action("tab", ["wait", "--for", "load", "--for", "js"]) \
+        == "tab wait --for js"
+    assert cli_main.action("tab", ["dialog", "ACCEPT"]) == \
+        "tab dialog accept"
+    assert cli_main.action("tab", ["media", "PLAY"]) == "tab media play"
+    assert cli_main.action("tab", ["media", "--index", "1", "play"]) == \
+        "tab media play"
+    assert cli_main.action("tab", ["media", "--index", "1"]) == \
+        "tab media state"
+    # a mode nobody declares is refused HERE, so it is `bad-args` with or
+    # without a policy rather than a gate verdict about the wrong action
+    refusal(lambda: cli_main.action("tab", ["wait", "--for", "wibble"]),
+            "bad-args")
+    rc, _out, err = run_cli(["tab", "wait", "--for", "wibble", "--allow",
+                             "read"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    # END TO END: a read-only policy cannot authorise the write that `--for JS`
+    # becomes — and the refusal happens before any browser is looked for
+    rc, _out, err = run_cli(["tab", "wait", "--for", "JS", "--expr", "1",
+                             "--allow", "read"])
+    assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+    # 3. an empty policy VALUE is refused instead of read as "no policy"
+    for argv in (["list", "--allow", ""], ["list", "--deny", ""]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    # 4. the two sides of the policy are resolved INDEPENDENTLY: a `--deny`
+    #    cannot void the environment's allow-list (measured: it did)
+    original = dict(capabilities.POLICY)
+    saved = {name: os.environ.get(name)
+             for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV)}
+    try:
+        os.environ[capabilities.ALLOW_ENV] = "read"
+        capabilities.policy(None, "egress")
+        allowed, why = capabilities.allowed("tab js")
+        assert allowed is False and "not allowed" in why, why
+        described = capabilities.describe()
+        assert described["source"] == f"{capabilities.ALLOW_ENV} + --deny", \
+            described
+        assert described["enforced"] is True, described
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        capabilities.POLICY.update(original)
+    # 5. an empty value is not "the only tab" (the library refuses an empty
+    #    spec, so the CLI has to refuse it too, not hand it one)
+    for argv in (["tab", "text", "--tab", ""], ["tab", "activate", ""],
+                 ["tab", "nav", ""], ["open", ""]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    # 6. `--frame` is refused by the verbs it cannot scope, and accepted by the
+    #    ones it can (they then fail for want of a BROWSER, not for the flag)
+    rc, _out, err = run_cli(["tab", "frames", "--frame", "1"])
+    assert rc == 2 and "--frame does not apply" in err, (rc, err)
+    rc, _out, err = run_cli(["tab", "text", "--frame", "1", "--tab", "id:0"])
+    assert rc == 2 and "bad-args" not in err, (rc, err)
+    # 7. a typo says what it is, and points at the nearest subcommand
+    rc, _out, err = run_cli(["tab", "frams"])
+    assert rc == 2 and "neither a subcommand" in err and "frames" in err, err
+    # 8. an unknown SUBCOMMAND is a typo, not a policy verdict
+    rc, _out, err = run_cli(["profile", "bogus", "--allow", "read"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    # 9. an unexpected failure is an ERR[code], never a traceback
+    keeper = cli_main.HANDLERS["list"]
+
+    def explode(_rest: list[str], _browser: str) -> dict:
+        raise RuntimeError("boom")
+
+    try:
+        cli_main.HANDLERS["list"] = explode            # type: ignore[assignment]
+        rc, _out, err = run_cli(["list"])
+        assert rc == 2 and "ERR[internal]: RuntimeError: boom" in err, (rc, err)
+        assert "Traceback" not in err, err
+    finally:
+        cli_main.HANDLERS["list"] = keeper
 
 
 def t_frames_and_points() -> None:
@@ -1645,6 +1750,7 @@ def main() -> int:
         ("the port is checked against the kernel", t_endpoint_ownership),
         ("the lock serializes a check-then-act", t_lock_serializes_a_check_then_act),
         ("the policy gate fails closed", t_policy_gate),
+        ("gate and argv hardening", t_gate_and_argv_hardening),
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("every verb is classified", t_capability_surface),
         ("input verbs' argv", t_cli_input_grammar),
