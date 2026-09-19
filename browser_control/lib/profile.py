@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import time
 
 from browser_control.lib import browser as browser_lib
@@ -65,19 +66,24 @@ SEED_SKIP = frozenset({
 def _tree(source: str) -> dict:
     """Everything a naive copy would touch: bytes, files, dirs, skips, links.
 
-    Walks by hand rather than with `copytree` for three reasons: the skips are
-    by name at any depth, symlinks are COUNTED and not followed (a profile can
+    Walks by hand rather than with `copytree` for four reasons: the skips are by
+    name at any depth, symlinks are COUNTED and not followed (a profile can
     contain links into the filesystem, and following one would write wherever it
-    pointed), and the numbers are what the reply reports.
+    pointed), a directory that cannot be READ is counted rather than skipped
+    silently (it used to make a partial copy verify: neither the walk nor the
+    check saw it — a review flagged it), and the numbers are what the reply
+    reports.
     """
-    facts = {"bytes": 0, "files": 0, "dirs": 0, "links": 0,
-             "skipped": [], "entries": []}
+    facts = {"bytes": 0, "files": 0, "dirs": 0, "links": 0, "special": 0,
+             "links_planted": 0, "unreadable": [], "skipped": [],
+             "entries": []}
     stack = [source]
     while stack:
         here = stack.pop()
         try:
             children = list(os.scandir(here))
-        except OSError:
+        except OSError as e:
+            facts["unreadable"].append(f"{here}: {e}")
             continue
         for child in children:
             if child.name in SEED_SKIP:
@@ -91,23 +97,31 @@ def _tree(source: str) -> dict:
                 stack.append(child.path)
                 continue
             try:
-                facts["bytes"] += child.stat(follow_symlinks=False).st_size
+                info_ = child.stat(follow_symlinks=False)
             except OSError:
                 continue
+            if not stat.S_ISREG(info_.st_mode):
+                # a FIFO or a device: copying one blocks with no deadline, and
+                # the manifest has to agree with what the copy will do
+                facts["special"] += 1
+                continue
+            facts["bytes"] += info_.st_size
             facts["files"] += 1
             facts["entries"].append(child.path)
     return facts
 
 
-def _missing(source: str, target: str) -> list[str]:
-    """Files the source has (minus skips) that the target does not, by size.
+def _missing(entries: list[str], source: str, target: str) -> list[str]:
+    """Files the COPY walked that the target does not have, by size.
 
-    The read-back for a seed: a file that is absent, or a different size, means
-    the copy did not land — and a login that is not there must refuse rather
-    than be reported as seeded.
+    The oracle is the manifest `_copy` actually walked, not a second walk of
+    the source: re-walking read the source's CURRENT state, so Chrome's lazy
+    cookie flush refused a seed whose files HAD landed, and a file that vanished
+    from the source between the copy and the check was never verified at all (a
+    review flagged it).
     """
     absent: list[str] = []
-    for path in _tree(source)["entries"]:
+    for path in entries:
         relative = os.path.relpath(path, source)
         landed = os.path.join(target, relative)
         try:
@@ -143,6 +157,19 @@ def _copy(source: str, target: str, dry: bool) -> dict:
             if child.is_dir(follow_symlinks=False):
                 stack.append((child.path, destination))
                 continue
+            if os.path.islink(destination):
+                # never write THROUGH a link that is already there: `copy2`
+                # follows one, so the file it points at is not in this profile
+                # (a review flagged it). Counted, and named in the reply.
+                facts["links_planted"] += 1
+                continue
+            try:
+                mode = child.stat(follow_symlinks=False).st_mode
+            except OSError:
+                continue
+            if not stat.S_ISREG(mode):
+                facts["special"] += 1
+                continue
             try:
                 shutil.copy2(child.path, destination)
             except OSError as e:
@@ -158,9 +185,16 @@ def _int(value: object) -> int:
 
 
 def _has_content(path: str) -> bool:
-    """Does that directory exist and hold anything? Never raises."""
+    """Does that directory exist and hold anything? Never raises.
+
+    Our OWN bookkeeping does not count. Taking the profile lock (whose file
+    lives inside the profile) before this check made a fresh, empty profile look
+    occupied, so `profile seed` into a new directory refused `profile-exists` —
+    measured while fixing the lock order, and the reason this filters them out.
+    """
+    ours = (browser_lib.LOCK_FILE, browser_lib.PID_FILE)      # noqa: SLF001
     try:
-        return bool(os.listdir(path))
+        return bool([name for name in os.listdir(path) if name not in ours])
     except OSError:
         return False
 
@@ -196,9 +230,18 @@ def _target(profile: str = "", browser: str = "") -> str:
 
 
 def _live_pid(profile: str) -> int:
-    """The pid of the browser running on that profile, or 0."""
+    """The pid of the browser running on that profile, or 0.
+
+    Compared by NORMALISED path: a browser spells its `--user-data-dir` however
+    it was launched (a trailing slash, a `..`, a symlinked root), and an exact
+    string compare read a live profile as idle — which for `profile reset` means
+    wiping a running browser's directory (a review flagged it).
+    """
+    if not profile:
+        return 0
+    wanted = browser_lib._norm(profile)                       # noqa: SLF001
     for row in browser_lib.browsers():
-        if str(row["profile"]) == profile and row["pid"]:
+        if row["pid"] and browser_lib._norm(str(row["profile"])) == wanted:
             return _int(row["pid"])
     return 0
 
@@ -226,7 +269,8 @@ def info(profile: str = "") -> dict:
             os.path.abspath(os.path.expanduser(wanted))]:
         facts = _tree(path)
         live = next((r for r in browser_lib.browsers()
-                     if str(r["profile"]) == path), None)
+                     if browser_lib._norm(str(r["profile"]))
+                     == browser_lib._norm(path)), None)      # noqa: SLF001
         name = os.path.basename(path)
         row: dict = {
             "name": name,
@@ -289,8 +333,15 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     # is copied can lag the live state by a few seconds
     source_pid = _live_pid(src)
     held = True
-    with browser_lib._lock(browser_lib._lock_path(root()),   # noqa: SLF001
-                           "profile seed") as lock:
+    with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
+                            "profile seed") as lock,
+          browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001
+                            "profile seed") as profile_lock):
+        # the TARGET's own lock — the one `open` and `close` hold. The root lock
+        # orders the attach records; this one orders the PROFILE, and without it
+        # a concurrent `open` was not excluded at all: `seed` could copy into a
+        # profile a browser had just been started on (a review measured it).
+        _refuse_live(target, "seeding")         # re-checked UNDER the lock
         existing = _has_content(target)
         if existing and not force and not dry:
             fail("profile-exists",
@@ -300,8 +351,15 @@ def seed(source: str = "", profile: str = "", browser: str = "",
         facts = _copy(src, target, dry)
         if dry:
             held = False
+        elif facts["unreadable"]:
+            # a directory the walk could not read is not copied and cannot be
+            # verified: a PARTIAL copy must never report as verified
+            fail("seed-not-verified",
+                 f"{len(facts['unreadable'])} director(ies) under {src} "
+                 "could not be read, so this copy is PARTIAL and nothing "
+                 "was verified: " + "; ".join(facts["unreadable"][:3]))
         else:
-            absent = _missing(src, target)
+            absent = _missing(facts["entries"], src, target)
             if absent:
                 fail("seed-not-verified",
                      f"{len(absent)} file(s) did not land in {target}: "
@@ -311,12 +369,21 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              "dirs": facts["dirs"],
              "skipped": sorted(set(facts["skipped"])),
              "links_skipped": facts["links"],
+             "special_files": facts["special"],
+             "links_planted": facts["links_planted"],
+             "unreadable": facts["unreadable"],
              "verified": bool(held),
+             # WHAT the check could see, said out loud: the sizes of the files
+             # this copy walked. A same-size corruption is outside that oracle,
+             # and a caller should not have to guess which one was used.
+             "verified_by": "size of every file this copy walked",
              "note": ("same machine, same user: Chrome's cookie and password "
                       "keys live in the OS keyring, so the copy decrypts here "
                       "and only here")}
-    if lock["warning"]:
-        reply["warning"] = lock["warning"]
+    for warning in (lock["warning"], profile_lock["warning"]):
+        if warning:
+            reply["warning"] = (f"{reply['warning']}; {warning}"
+                                if "warning" in reply else warning)
     if source_pid:
         lag = (f"the source profile is in use (pid {source_pid}): what is on "
                "disk may lag its live state by a few seconds")
@@ -345,12 +412,19 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
              f"{target} holds {facts['files']} file(s), {facts['bytes']} "
              "bytes — `profile reset --force` wipes it, logins included; "
              "`profile info` shows it first")
-    with browser_lib._lock(browser_lib._lock_path(root()),   # noqa: SLF001
-                           "profile reset") as lock:
+    with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
+                            "profile reset") as lock,
+          browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001
+                            "profile reset") as profile_lock):
+        # the PROFILE's lock is the one `open` holds across its whole
+        # check-then-act: without it, a reset could `rmtree` the directory a
+        # browser was just being started on, and the liveness verdict above was
+        # stale by construction (a review measured it)
+        _refuse_live(target, "resetting")       # re-checked UNDER the lock
         detached = browser_lib.is_attached(target)
         if detached:
             records = browser_lib._attached()                # noqa: SLF001
-            records.pop(browser_lib._norm(target), None)     # noqa: SLF001
+            records.pop(browser_lib._norm(target), None)      # noqa: SLF001
             browser_lib._write_attached(records)             # noqa: SLF001
         try:
             shutil.rmtree(target)
@@ -363,6 +437,8 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
     reply = {"ok": True, "profile": target, "reset": True,
              "files": facts["files"], "bytes_freed": facts["bytes"],
              "detached": detached, "verified": True}
-    if lock["warning"]:
-        reply["warning"] = lock["warning"]
+    for warning in (lock["warning"], profile_lock["warning"]):
+        if warning:
+            reply["warning"] = (f"{reply['warning']}; {warning}"
+                                if "warning" in reply else warning)
     return reply

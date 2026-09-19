@@ -55,12 +55,12 @@ from typing import Any
 # tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
 from browser_control.lib import audit
+from browser_control.lib import browser as tabs
 from browser_control.lib import cdp
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ControlError,
     fail,
 )
-from browser_control.lib import browser as tabs
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
@@ -888,10 +888,24 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
     return rows[index]
 
 
+def _safe(text: object, limit: int = 60) -> str:
+    """Page-supplied text made safe to PRINT on a terminal.
+
+    A refusal that names an element goes to stderr — the operator's terminal —
+    and a page can put ANSI/OSC escape sequences in an aria-label, a title or an
+    `<option>`, where "decoration" is an instruction (title spoofing, screen
+    clearing, and on some terminals a clipboard write). `json.dumps` already
+    escapes the JSON replies; this is the human-facing refusal path.
+    """
+    kept = "".join(ch for ch in str(text or "")
+                   if ch >= " " and not "\x7f" <= ch <= "\x9f")
+    return kept[:limit]
+
+
 def _describe(row: dict) -> str:
-    """One match, in a few words, for a refusal message."""
-    return (f"{row.get('tag')} "
-            f"{str(row.get('name') or row.get('text') or '')[:40]}").strip()
+    """One match, in a few words, for a refusal message (page text, sanitised)."""
+    return (f"{_safe(row.get('tag'), 20)} "
+            f"{_safe(row.get('name') or row.get('text'), 40)}").strip()
 
 
 def _element(row: dict) -> dict:
@@ -1250,8 +1264,8 @@ def click(text: str | None = None, selector: str | None = None,
             fail("occluded",
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
-                 f"{element.get('hit_element') or 'nothing'} instead — "
-                 "something is on top of it")
+                 f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
+                 "instead — something is on top of it")
         x, y = [_int(v) for v in (element.get("point") or [])][:2]
         for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
                               ("mouseReleased", 0)):
@@ -1315,8 +1329,8 @@ def hover(text: str | None = None, selector: str | None = None,
             fail("occluded",
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
-                 f"{element.get('hit_element') or 'nothing'} instead — "
-                 "something is on top of it")
+                 f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
+                 "instead — something is on top of it")
         x, y = [_int(v) for v in (element.get("point") or [])][:2]
         session.call("Input.dispatchMouseEvent",
                      {"type": "mouseMoved", "x": x, "y": y,
@@ -1398,8 +1412,8 @@ def check(text: str | None = None, selector: str | None = None,
             fail("occluded",
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
-                 f"{element.get('hit_element') or 'nothing'} instead — "
-                 "something is on top of it")
+                 f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
+                 "instead — something is on top of it")
         x, y = [_int(v) for v in (element.get("point") or [])][:2]
         for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
                               ("mouseReleased", 0)):
@@ -1473,13 +1487,14 @@ def select(text: str | None = None, selector: str | None = None,
                  "SET of options, and this verb sets one (use `tab js`)")
         matched = _int(probe.get("matched"))
         if not matched:
-            labels = ", ".join(str(name) for name in
-                               (probe.get("labels") or [])[:12])
+            names = [_safe(name, 30)
+                     for name in (probe.get("labels") or [])[:12]]
+            labels = ", ".join(names)
             fail("no-match",
                  f"no <option> in {_describe(element)} has value or label "
                  f"{wanted!r} (have: {labels or 'none'})")
         if matched > 1:
-            candidates = ", ".join(str(name) for name in
+            candidates = ", ".join(_safe(name, 30) for name in
                                    (probe.get("candidates") or [])[:5])
             fail("ambiguous-option",
                  f"{matched} options in {_describe(element)} match "

@@ -60,14 +60,34 @@ def port_of(profile: str) -> int:
     return value if 0 < value < 65536 else 0
 
 
+class _LoopbackOnly(urllib.request.HTTPRedirectHandler):
+    """A CDP endpoint answers where it answers: a redirect is REFUSED.
+
+    The URL is built from the port file, so it is loopback by construction —
+    but `urlopen` follows a 3xx by default, and a local process that owns that
+    port could send this request (whose answer is parsed as CDP JSON) anywhere.
+    The websocket has been host-checked from the start; the HTTP read was not
+    (a review flagged it).
+    """
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str,
+                         headers: Any, newurl: str) -> Any:
+        fail("cdp-not-local",
+             f"{getattr(req, 'full_url', '?')}: refused a redirect "
+             f"({code}) to {newurl}")
+
+
 def _get_bytes(url: str) -> bytes:
     """The body at `url`, capped, or a refusal — never a bare exception."""
     body = b""
     try:
-        # loopback by construction: the URL is built from the port file, and
-        # the port is the browser's own (semgrep: ignore)
-        with urllib.request.urlopen(url, timeout=5) as r:   # noqa: S310
+        # loopback by construction, and a redirect is refused rather than
+        # followed (semgrep: ignore)
+        opener = urllib.request.build_opener(_LoopbackOnly)   # noqa: S310
+        with opener.open(url, timeout=5) as r:
             body = r.read(GET_CAP + 1)
+    except ControlError:
+        raise
     except Exception as e:                                     # noqa: BLE001
         fail("cdp-unreachable", f"{url}: {e}")
     if len(body) > GET_CAP:
@@ -630,12 +650,19 @@ class Session:
             try:
                 if self._page_domain:
                     self._loop.run_until_complete(_page_enable(self._ws, 1))
-            except ControlError:
+            except ControlError as e:
                 # A parked tab cannot enable the domain — and that is exactly
                 # when a BROWSER-side command (`Page.navigate`) is the way out,
                 # so the session stays usable and remembers why it is limited.
+                # Only a BLOCKED enable means "this tab is parked": recording a
+                # protocol refusal as parked made every later hint blame a
+                # dialog that was never there (a review flagged it).
                 self.page_domain_ok = False
-                self.parked = True
+                self.parked = e.code == "blocked"
+            except Exception as e:                             # noqa: BLE001
+                self.close()
+                raise ControlError("cdp-error",
+                                   f"Page.enable: {e}") from e
             self._rid = 1 if self._page_domain else 0    # id 1 was Page.enable
         return self._ws
 
@@ -736,13 +763,17 @@ class Session:
     def call(self, method: str, params: dict | None = None,
              timeout: float = 0.0) -> dict:
         """One method call on the open connection: the protocol's `result`."""
-        self._connect()
-        budget = timeout or self._timeout
-        if self.parked:
-            # nothing will answer: a browser-side command (`Page.navigate`) still
-            # works, so it gets a short budget and its own refusal
-            budget = min(budget, PARKED_BUDGET_S)
+        # `_connect` INSIDE the try: a connection that dies between the
+        # handshake and `Page.enable` — the tab closed, the browser exited mid
+        # verb — used to escape as a raw exception out of every page verb
+        # instead of a `cdp-error` (a review flagged it).
         try:
+            self._connect()
+            budget = timeout or self._timeout
+            if self.parked:
+                # nothing will answer: a browser-side command (`Page.navigate`)
+                # still works, so it gets a short budget and its own refusal
+                budget = min(budget, PARKED_BUDGET_S)
             return self._loop.run_until_complete(
                 self._call(method, params or {}, budget))
         except ControlError:

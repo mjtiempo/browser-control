@@ -268,9 +268,17 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _proc_text(pid: int, name: str) -> str:
+    """One /proc file, as text — read to the END, not to 4096 bytes.
+
+    The cap silently truncated the text every identity decision reads: a
+    renderer whose `--type=` fell past it looked like a MAIN process, and a
+    browser whose `--user-data-dir=` fell past it looked like no browser at all
+    (a review flagged it; measured here, the longest cmdline is 2344 bytes, so
+    the cap was reachable in principle rather than in practice).
+    """
     try:
         with open(f"/proc/{pid}/{name}", "rb") as f:
-            raw = f.read(4096)
+            raw = f.read()
     except OSError:
         return ""
     return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
@@ -402,9 +410,18 @@ def _default_profile(exe: str) -> str:
 
 
 def _is_managed(profile: str) -> bool:
-    """Is this profile one of ours? Prefix-safe, so a sibling root is not."""
-    return bool(profile) and os.path.abspath(profile).startswith(
-        os.path.abspath(root()) + os.sep)
+    """Is this profile one of ours? Prefix-safe, so a sibling root is not.
+
+    Compared by REAL path: a symlink under the root that points somewhere else
+    (the user's own Chrome profile, say) is not one of ours, and `profile seed`
+    writing through it is the one thing this tool promises never to do — a
+    review measured that `abspath` alone accepted it, because the lexical path
+    still LOOKED managed.
+    """
+    text = str(profile or "")
+    if not text:
+        return False
+    return os.path.realpath(text).startswith(os.path.realpath(root()) + os.sep)
 
 
 def browsers() -> list[dict]:

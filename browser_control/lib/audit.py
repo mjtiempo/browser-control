@@ -12,16 +12,18 @@ is recorded exactly like a success. Two rules make it safe to keep:
   redacts everything says nothing.
 
 `BROWSER_CONTROL_LOG` names the file, or `off` disables the log entirely.
-The file's DIRECTORY is created on the first write (mode 0700), and when it
-cannot be written the line lands in a scratch directory built for the purpose
-— `/tmp/browser-control-<timestamp>` (`scratch_dir`) — so a record is lost
-only when nothing at all can be written, never silently. `selftest` reports
-the path the log would use.
+The file's DIRECTORY is created on the first write (mode 0700) and the file is
+opened 0600 — its lines carry the argv of a call — with an existing wider file
+narrowed. When the configured path cannot be written the line lands in a
+scratch directory built for the purpose (`scratch_dir`, unique and 0700 via
+`mkdtemp`), so a record is lost only when nothing at all can be written, never
+silently. `selftest` reports the path the log would use.
 """
 from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import time
 from typing import Any
@@ -30,33 +32,58 @@ LOG_ENV = "BROWSER_CONTROL_LOG"
 DEFAULT_LOG = "~/.local/state/browser-control/actions.jsonl"
 SRC = "browser-control-cli"
 SCRATCH_PREFIX = "browser-control"
+ARG_CAP = 4096          # chars kept of ONE argv entry (a `tab js` is a program)
+ARGS_CAP = 16_384       # chars kept of the whole argument list
 _SCRATCH = ""
 
 
 def scratch_dir() -> str:
-    """`/tmp/browser-control-<timestamp>`, created on first use (mode 0700).
+    """A PRIVATE scratch directory for this process, created on first use.
 
-    One per process, and the name carries WHEN it was made, so two runs never
-    share a directory and nothing has to be cleaned up by hand — /tmp is the
-    OS's business. This is where the action log goes when the configured path
-    cannot be written, and it is what a test run (or any caller) uses for logs
-    and artifacts. "" when even /tmp cannot be written, which every caller has
-    to read as "no scratch".
+    `tempfile.mkdtemp`: the name is unique, the mode is 0700, and the directory
+    is ours. The timestamped name this used to build could be pre-created by
+    another local user — or be a symlink — and `exist_ok=True` accepted it, so
+    the fallback log could land in a directory they owned, or fail against all
+    eight names and drop the record (a review flagged it). Two runs in the same
+    second also shared one directory before, which the docstring claimed they
+    never would. "" when even /tmp cannot be written, which every caller has to
+    read as "no scratch".
     """
     global _SCRATCH
     if _SCRATCH:
         return _SCRATCH
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    base = os.path.join(tempfile.gettempdir(), f"{SCRATCH_PREFIX}-{stamp}")
-    for attempt in range(8):
-        candidate = base if not attempt else f"{base}-{attempt}"
-        try:
-            os.makedirs(candidate, mode=0o700, exist_ok=True)
-            _SCRATCH = candidate
-            return candidate
-        except OSError:
-            continue
-    return ""
+    try:
+        _SCRATCH = tempfile.mkdtemp(prefix=f"{SCRATCH_PREFIX}-{stamp}-")
+    except OSError:
+        return ""
+    return _SCRATCH
+
+
+def _brief(text: str) -> str:
+    """One argv entry, bounded.
+
+    `tab js` takes a whole program and an argument list can be long: one
+    invocation used to write a 5 MB line into the log, which is not a record of
+    anything (a review flagged it). What was cut is NAMED, so the line never
+    looks complete when it is not.
+    """
+    if len(text) <= ARG_CAP:
+        return text
+    return f"{text[:ARG_CAP]}<truncated: {len(text)} chars>"
+
+
+def _bounded(parts: list[str]) -> list[str]:
+    """An argument list with a total budget, and the cut named."""
+    out: list[str] = []
+    used = 0
+    for index, part in enumerate(parts):
+        if used + len(part) > ARGS_CAP:
+            out.append(f"<{len(parts) - index} more argument(s)>")
+            break
+        out.append(part)
+        used += len(part)
+    return out
 
 
 def _oneline(text: object) -> str:
@@ -111,7 +138,8 @@ class ActionLog:
             return
         row: dict = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                      "src": SRC, "action": _oneline(action), "ok": bool(ok),
-                     "args": [self._censor(str(a)) for a in (args or [])]}
+                     "args": _bounded([self._censor(_brief(str(a)))
+                                       for a in (args or [])])}
         if code:
             row["code"] = _oneline(code)
         if detail:
@@ -130,13 +158,25 @@ class ActionLog:
 
     @staticmethod
     def _append(path: str, line: str) -> bool:
-        """One line to one file, making its directory first. False on failure."""
+        """One line to one file, making its directory first. False on failure.
+
+        Opened 0600, and an existing wider file is narrowed with `fchmod`: the
+        lines carry the argv (`tab js <program>`, a file path), so a
+        world-readable action log is the second half of the promise that only a
+        PROVEN secret is redacted (a review flagged the mode).
+        """
         try:
             parent = os.path.dirname(path)
             if parent:
                 os.makedirs(parent, mode=0o700, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(line)
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                             0o600)
+            try:
+                if stat.S_IMODE(os.fstat(handle).st_mode) & 0o077:
+                    os.fchmod(handle, 0o600)
+                os.write(handle, line.encode("utf-8"))
+            finally:
+                os.close(handle)
             return True
         except OSError:
             return False
