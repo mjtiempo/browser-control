@@ -154,22 +154,23 @@ def _copy(source: str, target: str, dry: bool) -> dict:
             if child.name in SEED_SKIP or child.is_symlink():
                 continue
             destination = os.path.join(there, child.name)
+            if os.path.islink(destination):
+                # never write THROUGH a link that is already there — neither a
+                # file one nor a DIRECTORY one: `copy2` follows the first and
+                # `makedirs(exist_ok=True)` accepts the second, so the bytes
+                # would land outside this profile (a review flagged the dir
+                # case, which this check used to be BELOW). Counted and named.
+                facts["links_planted"] += 1
+                continue
             if child.is_dir(follow_symlinks=False):
                 stack.append((child.path, destination))
-                continue
-            if os.path.islink(destination):
-                # never write THROUGH a link that is already there: `copy2`
-                # follows one, so the file it points at is not in this profile
-                # (a review flagged it). Counted, and named in the reply.
-                facts["links_planted"] += 1
                 continue
             try:
                 mode = child.stat(follow_symlinks=False).st_mode
             except OSError:
                 continue
             if not stat.S_ISREG(mode):
-                facts["special"] += 1
-                continue
+                continue                 # the manifest already counted it
             try:
                 shutil.copy2(child.path, destination)
             except OSError as e:
@@ -407,11 +408,6 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         return {"ok": True, "profile": target, "reset": False,
                 "reason": "there was no profile to reset"}
     facts = _tree(target)
-    if facts["files"] and not force:
-        fail("profile-exists",
-             f"{target} holds {facts['files']} file(s), {facts['bytes']} "
-             "bytes — `profile reset --force` wipes it, logins included; "
-             "`profile info` shows it first")
     with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
                             "profile reset") as lock,
           browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001
@@ -421,6 +417,15 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         # browser was just being started on, and the liveness verdict above was
         # stale by construction (a review measured it)
         _refuse_live(target, "resetting")       # re-checked UNDER the lock
+        # …and the CONTENT guard belongs under it too: checked outside, a
+        # profile could gain its first file between the check and the wipe, and
+        # `--force` would then destroy a login nobody agreed to lose
+        facts = _tree(target)
+        if facts["files"] and not force:
+            fail("profile-exists",
+                 f"{target} holds {facts['files']} file(s), {facts['bytes']} "
+                 "bytes — `profile reset --force` wipes it, logins included; "
+                 "`profile info` shows it first")
         detached = browser_lib.is_attached(target)
         if detached:
             records = browser_lib._attached()                # noqa: SLF001

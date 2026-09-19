@@ -583,7 +583,10 @@ WAIT_EXPRS = {
   const selector = __SELECTOR__;
   return query(selector).some((el) => rendered(el) !== null);
 })()"""),
-    "js": "Boolean(__EXPR__)",
+    "js": ("(() => { const v = (__EXPR__); if (v && "
+           "(typeof v === 'object' || typeof v === 'function') && "
+           "typeof v.then === 'function') return 'thenable'; "
+           "return Boolean(v); })()"),
 }
 
 
@@ -614,7 +617,7 @@ def _well_formed(rows: Any, required: tuple) -> list[dict]:
 
 def _viewport(data: dict, target_id: str) -> list[int]:
     """The page's viewport, or a refusal when it has none."""
-    viewport = [_int(v) for v in (data.get("viewport") or [])]
+    viewport = _ints(data.get("viewport"))
     if len(viewport) < 2 or viewport[0] <= 0 or viewport[1] <= 0:
         fail("no-viewport",
              f"tab {target_id[:10]}… reports no viewport ({viewport}) — a box "
@@ -678,11 +681,11 @@ def frames_of(port: int, page_target: str,
     * two frames in this tab with the same URL (`candidates` > 0) — target ids
       are random, so pairing them by id order can bind the sibling (a review
       flagged it);
-    * in the fallback for a browser that reports no parents, only a URL that
-      appears ONCE in the whole browser is trusted, and a frame the page says
-      shares its process never takes a target at all — it provably has none in
-      this tab (a review measured that it could otherwise inherit another
-      tab's).
+    * a browser that does not say WHO owns an iframe target: nothing is
+      attributed (`attribution: "unattributable"`), and `_frame_target` refuses
+      — a URL that appears once is not proof, because a cross-origin frame in
+      this page's own process has no target while another tab's single target
+      with the same URL looks unique (a review constructed exactly that).
 
     `census` lets a caller that already evaluated it (a read that wants the
     counts) skip a second evaluation. `committed` is the URL the browser
@@ -694,6 +697,7 @@ def frames_of(port: int, page_target: str,
             or []
     owned = cdp.frame_targets(port)
     shared: dict[str, int] = {}
+    attribution = ""
     if any(str(row.get("parent")) for row in owned):
         pool = [r for r in owned if r["parent"] == page_target]
         counted: dict[str, int] = {}
@@ -702,16 +706,15 @@ def frames_of(port: int, page_target: str,
             counted[key] = counted.get(key, 0) + 1
         shared = {url: count for url, count in counted.items() if count > 1}
     else:
-        # no parents reported anywhere: a URL unique in the whole browser is
-        # the only thing left that can be attributed
-        from_json = cdp.frame_rows(port)
-        counts: dict[str, int] = {}
-        for row in from_json:
-            key = str(row.get("url"))
-            counts[key] = counts.get(key, 0) + 1
-        pool = [{"id": str(r.get("id")), "url": str(r.get("url"))}
-                for r in from_json if counts[str(r.get("url"))] == 1]
-        shared = {url: count for url, count in counts.items() if count > 1}
+        # This browser does not say which tab owns an iframe target, and a URL
+        # that appears ONCE is not proof of ownership: a cross-origin frame that
+        # stays in this page's PROCESS (a sandboxed one) has no target of its
+        # own, while another tab's single target with the same URL looks unique
+        # — so `--frame` would drive that other tab. A review constructed
+        # exactly that, so nothing is attributed here and `_frame_target`
+        # refuses rather than guessing.
+        pool = []
+        attribution = "unattributable"
     used: set[str] = set()
     rows: list[dict] = []
     for entry in census if isinstance(census, list) else []:
@@ -727,10 +730,11 @@ def frames_of(port: int, page_target: str,
         rows.append({"index": _int(entry.get("index")), "url": url,
                      "committed": str((match or {}).get("url") or ""),
                      "name": str(entry.get("name") or ""),
-                     "box": [_int(v) for v in (entry.get("box") or [])],
+                     "box": _ints(entry.get("box")),
                      "visible": bool(entry.get("visible")),
                      "same_process": bool(entry.get("same_process")),
                      "target": str((match or {}).get("id") or ""),
+                     "attribution": attribution,
                      "candidates": shared.get(url, 0)})
     return rows
 
@@ -780,6 +784,14 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
              f"{len(hits)} frames match {wanted!r} — pick one by index "
              f"(`--frame 0` … `--frame {len(rows) - 1}`): {where}")
     found = hits[0]
+    if found.get("attribution"):
+        fail("frame-unattributable",
+             f"frame [{found['index']}] "
+             f"{str(found['url'])[:60] or 'srcdoc'} — this browser does not "
+             "report which tab owns an iframe target, so the CLI cannot tell "
+             "this frame from another tab's with the same URL. `tab js` reads "
+             "a same-process frame, `tab click --at X,Y` hits one by "
+             "coordinate, or drive the tab that owns it")
     if found.get("candidates"):
         fail("frame-ambiguous",
              f"frame [{found['index']}] {str(found['url'])[:60]} matches "
@@ -848,8 +860,13 @@ def _frame_summary(row: dict, tab_row: dict,
                                     and r.get("same_process")),
                 "visible": sum(1 for r in raw if isinstance(r, dict)
                                and r.get("visible"))}
+    unattributed = any(r.get("attribution") for r in rows)
     return {"total": len(rows),
-            "separate": sum(1 for r in rows if r["target"]),
+            # `separate` counts frames with a target of their own — NULL, never
+            # 0, when the browser does not attribute targets to tabs: "none of
+            # them can be driven" would be a claim this cannot support
+            "separate": None if unattributed else sum(1 for r in rows
+                                                      if r["target"]),
             "cross_origin": sum(1 for r in rows if not r["same_process"]),
             "same_process": sum(1 for r in rows if r["same_process"]),
             "visible": sum(1 for r in rows if r["visible"])}
@@ -877,6 +894,10 @@ def _frames_note(row: dict | None, tab_row: dict | None) -> str:
                 "content may exist that nothing here can see")
     if census.get("total") in (None, 0):
         return ""
+    if census.get("separate") is None:
+        return (f" — this page has {census['total']} frame(s): `tab frames` "
+                "lists them, and this browser does not say which can be "
+                "driven directly")
     return (f" — this page has {census['total']} frame(s), "
             f"{census['separate']} of them separate: `tab frames` lists them "
             "and `--frame` reaches inside")
@@ -1132,6 +1153,15 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     value, samples = cdp.evaluate_until(
         _document_ws(cdp.port_of(profile), target_id), expression, bool,
         seconds, WAIT_POLL_S)
+    if value == "thenable":
+        # measured: `Boolean(promise)` is TRUE the moment the promise is made,
+        # so an async predicate passed before anything settled (a review found
+        # it) — the expression reports the thenable instead of coercing it
+        fail("bad-args",
+             "tab wait --for js: the expression returned a Promise — a wait "
+             "polls a BOOLEAN, and a Promise is truthy the moment it is made, "
+             "so the wait would pass before anything settled (await it in the "
+             "page, or set a flag and poll that)")
     if not value:
         what = selector or expr or ""
         fail("wait-timeout",
@@ -1164,10 +1194,10 @@ def find(text: str | None = None, selector: str | None = None,
         # `--frame` scoped that session to a frame
         frames_here = _frame_summary(row, tab_row, session)
     viewport = _viewport(data, str(tab_row["id"]))
-    matches = [dict(m, box=[_int(v) for v in m["box"]],
-                    center=[_int(v) for v in (m.get("center") or [])],
-                    viewport=[_int(v) for v in (m.get("viewport") or [])],
-                    point=[_int(v) for v in (m.get("point") or [])])
+    matches = [dict(m, box=_ints(m["box"]),
+                    center=_ints(m.get("center")),
+                    viewport=_ints(m.get("viewport")),
+                    point=_ints(m.get("point")))
                for m in _well_formed(data.get("matches") or [],
                                      ("tag", "box"))]
     if not matches:
@@ -1189,6 +1219,18 @@ def find(text: str | None = None, selector: str | None = None,
     return _with_frame(reply)
 
 
+def _under_point(session: cdp.Session, x: int, y: int) -> object:
+    """What `document.elementFromPoint` reaches at that point, as a short name.
+
+    The one probe both `--at` and the element path use, so "what is actually
+    there" is measured the same way after every dispatch.
+    """
+    return session.evaluate(
+        "(() => { const el = document.elementFromPoint("
+        f"{x}, {y}); return el ? el.tagName.toLowerCase()"
+        " + (el.id ? '#' + el.id : '') : null })()")
+
+
 def _at_point_click(session: cdp.Session, x: int, y: int) -> dict:
     """A move, a press and a release at a viewport point, and what is there."""
     for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
@@ -1196,11 +1238,7 @@ def _at_point_click(session: cdp.Session, x: int, y: int) -> dict:
         session.call("Input.dispatchMouseEvent",
                      {"type": kind, "x": x, "y": y, "button": "left",
                       "buttons": buttons, "clickCount": 1})
-    under = session.evaluate(
-        "(() => { const el = document.elementFromPoint("
-        f"{x}, {y}); return el ? el.tagName.toLowerCase()"
-        " + (el.id ? '#' + el.id : '') : null })()")
-    return {"under": under}
+    return {"under": _under_point(session, x, y)}
 
 
 def _click_at(row: dict, tab_row: dict, at: str) -> dict:
@@ -1215,7 +1253,8 @@ def _click_at(row: dict, tab_row: dict, at: str) -> dict:
     _at_point(at, "tab click")
     with _session(row, tab_row) as session:
         data = _matches_in(session, "", "", 1)     # page facts, no matching
-        x, y = _point(at, _viewport(data, str(tab_row["id"])))
+        x, y = _point(at, _viewport(data, str(tab_row["id"])),
+                    "tab click")
         before = session.evaluate(STATE_EXPR)
         probe = _at_point_click(session, x, y)
         after = session.evaluate(STATE_EXPR)
@@ -1244,7 +1283,8 @@ def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
     _at_point(at, "tab hover")
     with _session(row, tab_row) as session:
         data = _matches_in(session, "", "", 1)
-        x, y = _point(at, _viewport(data, str(tab_row["id"])))
+        x, y = _point(at, _viewport(data, str(tab_row["id"])),
+                    "tab hover")
         session.call("Input.dispatchMouseEvent",
                      {"type": "mouseMoved", "x": x, "y": y,
                       "button": "none", "buttons": 0})
@@ -1259,10 +1299,15 @@ def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
         fail("hover-not-verified",
              f"nothing at viewport {[x, y]} matches `:hover` after the pointer "
              f"moved there ({probe.get('under') or 'nothing'} is at that point)")
-    reply = {"ok": True, "hovered": True, "verified": True,
+    reply = {"ok": True, "hovered": True, "verified": False,
              "point": [x, y], "under": probe.get("under"),
              "note": ("real input (CDP): one mouseMoved at a point; the "
-                      "read-back is the engine's own `:hover` there"),
+                      "read-back is the engine's own `:hover` there. A POINT "
+                      "is not a selector: `under` is whatever the point "
+                      "reaches (an overlay qualifies), so this reports what "
+                      "happened rather than claiming it was the element "
+                      "intended — `tab hover TEXT|--selector CSS` is the "
+                      "verified form"),
              "tab": f"id:{tab_row['id']}",
              "browser": tabs._brief(row)}         # noqa: SLF001
     return _with_frame(reply)
@@ -1320,13 +1365,21 @@ def click(text: str | None = None, selector: str | None = None,
                  f"but that point reaches "
                  f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
-        x, y = [_int(v) for v in (element.get("point") or [])][:2]
+        # press at the point the HIT-TEST proved, not at the element's raw
+        # centre: the probe CLAMPS into the viewport, so an element whose centre
+        # is below the fold was tested inside it and pressed outside, and the
+        # reply still said `clicked: true` (a review measured the mismatch)
+        x, y = _ints(element.get("hit_at") or element.get("point"), 2)
         for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
                               ("mouseReleased", 0)):
             session.call("Input.dispatchMouseEvent",
                          {"type": kind, "x": x, "y": y, "button": "left",
                           "buttons": buttons, "clickCount": 1})
         after = session.evaluate(STATE_EXPR)
+        # what the point reaches AFTERWARDS: a click legitimately changes the
+        # document, so this is information rather than a verdict — but a reply
+        # that says `clicked: true` should also say what it can still see there
+        under = _under_point(session, x, y)
     after = after if isinstance(after, dict) else {}
     before = {"url": data.get("url"), "title": data.get("title"),
               "active": data.get("active"), "scroll": data.get("scroll")}
@@ -1335,7 +1388,7 @@ def click(text: str | None = None, selector: str | None = None,
                or after.get("active") != before["active"]
                or [after.get("x"), after.get("y")] != before["scroll"])
     return {"ok": True, "clicked": True, "element": _element(element),
-            "point": [x, y], "changed": changed,
+            "point": [x, y], "changed": changed, "under": under,
             "before": before,
             "after": {"url": after.get("url"), "title": after.get("title"),
                       "active": after.get("active"),
@@ -1385,7 +1438,7 @@ def hover(text: str | None = None, selector: str | None = None,
                  f"but that point reaches "
                  f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
-        x, y = [_int(v) for v in (element.get("point") or [])][:2]
+        x, y = _ints(element.get("hit_at") or element.get("point"), 2)
         session.call("Input.dispatchMouseEvent",
                      {"type": "mouseMoved", "x": x, "y": y,
                       "button": "none", "buttons": 0})
@@ -1468,7 +1521,7 @@ def check(text: str | None = None, selector: str | None = None,
                  f"but that point reaches "
                  f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
-        x, y = [_int(v) for v in (element.get("point") or [])][:2]
+        x, y = _ints(element.get("hit_at") or element.get("point"), 2)
         for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
                               ("mouseReleased", 0)):
             session.call("Input.dispatchMouseEvent",
@@ -1936,14 +1989,37 @@ def _at_point(at: str, verb: str = "tab scroll") -> tuple[int, int]:
     return _int(parts[0], -1), _int(parts[1], -1)
 
 
-def _point(at: str | None, viewport: list[int]) -> tuple[int, int]:
-    """The wheel's point: `--at X,Y` inside the viewport, else its middle."""
+def _ints(value: object, count: int = 0) -> list[int]:
+    """A numeric list from the page, or [] — never a TypeError out of a verb.
+
+    `_well_formed` checks that KEYS exist, and its callers then unpack the
+    values (`box`, `center`, `point`, `viewport`); a page that answers
+    `{"point": 7}` raised `TypeError` out of the verb instead of refusing, and
+    the page owns every value on that path (a review flagged it). A value that
+    is not a list at all is []: iterating a dict would have produced its KEYS as
+    numbers, which is worse than nothing.
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = [_int(item) for item in value]
+    return out[:count] if count else out
+
+
+def _point(at: str | None, viewport: list[int],
+           verb: str = "tab scroll") -> tuple[int, int]:
+    """The wheel's point: `--at X,Y` inside the viewport, else its middle.
+
+    `verb` is only for the refusal: `tab click --at` and `tab hover --at` take
+    the same range check, and naming "tab scroll" for a click is a message about
+    the wrong verb (a review flagged it — this message said "tab scroll" for
+    all three).
+    """
     if not at:
         return viewport[0] // 2, viewport[1] // 2
-    x, y = _at_point(at)
+    x, y = _at_point(at, verb)
     if not (0 <= x < viewport[0] and 0 <= y < viewport[1]):
         fail("bad-args",
-             f"tab scroll: --at {at!r} is outside the viewport {viewport}")
+             f"{verb}: --at {at!r} is outside the viewport {viewport}")
     return x, y
 
 
@@ -2090,7 +2166,7 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
              + _frames_note(row, tab_row))
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "selector": data.get("selector"),
-                  "viewport": [_int(v) for v in (data.get("viewport") or [])],
+                  "viewport": _ints(data.get("viewport")),
                   "text": str(data.get("text") or ""),
                   "length": _int(data.get("length")),
                   "truncated": bool(data.get("truncated"))})

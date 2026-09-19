@@ -173,7 +173,15 @@ class ActionLog:
                              0o600)
             try:
                 if stat.S_IMODE(os.fstat(handle).st_mode) & 0o077:
-                    os.fchmod(handle, 0o600)
+                    try:
+                        os.fchmod(handle, 0o600)
+                    except OSError:
+                        # a file we cannot narrow may be readable by others, and
+                        # this line carries the argv: refuse THIS file and let
+                        # the caller fall back to the private scratch log rather
+                        # than write it where it cannot be protected (a review
+                        # flagged that the chmod could lose the record)
+                        return False
                 os.write(handle, line.encode("utf-8"))
             finally:
                 os.close(handle)

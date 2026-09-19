@@ -756,6 +756,52 @@ def t_one_tab_addressing() -> None:
                 refusal(lambda: browser.attach(port=1515), "cdp-not-local")
             finally:
                 browser.browsers = rows                  # type: ignore[assignment]
+            # a tabs-read that FAILED is a refusal, not "no tabs": seven callers
+            # took `_tabs_of(row)[0]` and dropped the error, so a browser that
+            # did not answer produced "no tab matches … have: none"
+            real_tabs_of = browser._tabs_of
+            browser._tabs_of = lambda row: ([], "the /json read timed out")
+            try:
+                refusal(lambda: browser._tabs_or_fail(rows()[0]),  # noqa: SLF001
+                        "cdp-error")
+            finally:
+                browser._tabs_of = real_tabs_of          # type: ignore[assignment]
+            tabs[1616] = [page("AB12")]
+            assert [t["id"] for t in browser._tabs_or_fail(rows()[0])] == \
+                ["AB12"], "a good read passes through"
+            # a WRITE that goes straight to the browser endpoint asks the kernel
+            # who owns the port first, and sends NOTHING when the answer is not
+            # the browser we think — `Target.createTarget` used to go wherever
+            # the port file pointed (a review found no test for it at all)
+            calls: list[tuple] = []
+            real_owner, real_port = browser.endpoint_owner, cdp.port_of
+            real_call, real_verify = cdp.browser_call, browser._verify_profile_endpoint
+            browser.endpoint_owner = lambda profile, port: {    # type: ignore[assignment]
+                "verified": False, "reason": "a stranger holds that port"}
+            cdp.port_of = lambda profile: 1515                # type: ignore[assignment]
+            cdp.browser_call = lambda profile, method, params: (  # type: ignore[assignment]
+                calls.append((profile, method)) or {})
+            try:
+                refusal(lambda: browser._open_tabs(         # noqa: SLF001
+                    str(rows()[0]["profile"]), ["about:blank"]),
+                    "cdp-not-local")
+                assert calls == [], calls
+            finally:
+                browser.endpoint_owner = real_owner          # type: ignore[assignment]
+                cdp.port_of = real_port                      # type: ignore[assignment]
+                cdp.browser_call = real_call                 # type: ignore[assignment]
+            # …and the tab-CLOSING path asks too, once per profile
+            asked: list[str] = []
+            browser._verify_profile_endpoint = \
+                lambda profile: asked.append(profile)        # type: ignore[assignment]
+            cdp.browser_call = lambda profile, method, params: \
+                tabs.__setitem__(1616, []) or {}             # type: ignore[assignment]
+            try:
+                browser.close_tabs(["AB12"])
+            finally:
+                browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
+                cdp.browser_call = real_call                 # type: ignore[assignment]
+            assert asked == [str(rows()[0]["profile"])], asked
         finally:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
@@ -843,7 +889,15 @@ def t_dom_shape_filters() -> None:
     assert dom._int("12") == 12                              # noqa: SLF001
     assert dom._int("x", 7) == 7                             # noqa: SLF001
     assert dom._int(None, 3) == 3                            # noqa: SLF001
-    assert "__SELECTOR__" not in dom.FIND_EXPR.replace("__SELECTOR__", "")  # noqa: SLF001
+    # the VALUES a page supplies are shapes too: `_ints` never raises out of a
+    # verb, whatever the page answered (a review measured a TypeError)
+    assert dom._ints([1, 2, 3, 4], 2) == [1, 2]              # noqa: SLF001
+    assert dom._ints(["2", 3]) == [2, 3]                     # noqa: SLF001
+    for bad in (7, None, "12", {"a": 1}, object()):
+        assert dom._ints(bad) == [], bad                      # noqa: SLF001
+    # the placeholder check has to be one that CAN fail: `"x" not in
+    # expr.replace("x", "")` is a tautology (a review caught it)
+    assert dom.FIND_EXPR.count("__SELECTOR__") == 1          # noqa: SLF001
     for placeholder in ("__MODE__", "__NEEDLE__", "__SELECTOR__", "__CAP__"):
         assert placeholder in dom.FIND_EXPR                  # noqa: SLF001
 
@@ -1685,11 +1739,18 @@ def t_gate_and_argv_hardening() -> None:
         rc, _out, err = run_cli(["tab", "js", "1", "--deny", "egress"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
         # an ENVIRONMENT value that names no class is refused exactly like the
-        # flag (it used to read as "no policy" and switch the gate OFF)
-        for blank in (" ", "\t"):
-            os.environ[capabilities.ALLOW_ENV] = blank
-            rc, _out, err = run_cli(["list"])
-            assert rc == 2 and "ERR[bad-args]" in err, (blank, rc, err)
+        # flag (it used to read as "no policy" and switch the gate OFF) — on
+        # EITHER side, and even when a valid flag is present, because the blank
+        # side is a mistake and not an absence (a review found only the allow
+        # side, only without a flag, was pinned)
+        for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV):
+            for blank in (" ", "\t"):
+                os.environ[name] = blank
+                rc, _out, err = run_cli(["list"])
+                assert rc == 2 and "ERR[bad-args]" in err, (name, blank, rc, err)
+            rc, _out, err = run_cli(["list", "--allow", "read"])
+            assert rc == 2 and "ERR[bad-args]" in err, (name, rc, err)
+            os.environ.pop(name, None)
         # …and the allow side INTERSECTS. `tab wait --for js` is `code` ONLY, so
         # a flag that REPLACED the environment would let it through; the
         # environment's `read` is what refuses it, and the refusal names both
@@ -1803,33 +1864,27 @@ def t_frames_bind_to_their_tab() -> None:
         assert rows[0]["target"] == "" and rows[0]["candidates"] == 2, rows
         refusal(lambda: dom._frame_target(1234, "PAGE_A", "widget"),  # noqa: SLF001
                 "frame-ambiguous")
-        # 2. a browser that does NOT say: only a URL unique in the whole
-        #    browser is unambiguous, and a shared one is refused, not guessed
+        # 2. a browser that does NOT say who owns a target attributes NOTHING:
+        #    a URL that appears once is not proof (a cross-origin frame in this
+        #    page's own process has no target of its own, while another tab's
+        #    single target with that URL looks unique), so `--frame` refuses
+        #    rather than driving the wrong tab — a review constructed exactly it
         cdp.frame_targets = lambda port: []                 # type: ignore[assignment]
-        cdp.frame_rows = lambda port: [                     # type: ignore[assignment]
-            {"id": "AAA", "url": "http://localhost:9/widget.html"},
-            {"id": "BBB", "url": "http://localhost:9/widget.html"}]
         rows = dom.frames_of(1234, "PAGE_A")
-        assert rows[0]["target"] == "" and rows[0]["candidates"] == 2, rows
+        assert rows[0]["target"] == "", rows
+        assert rows[0]["attribution"] == "unattributable", rows
         refusal(lambda: dom._frame_target(1234, "PAGE_A", "widget"),  # noqa: SLF001
-                "frame-ambiguous")
-        cdp.frame_rows = lambda port: [                     # type: ignore[assignment]
-            {"id": "SOLO", "url": "http://localhost:9/widget.html"}]
-        # …a target list that carries NO parent still takes the fallback (it
-        # used to leave the pool empty and call every frame "not separate")
+                "frame-unattributable")
+        # …and a frame the PAGE says SHARES its process never takes a target,
+        # even where the browser does attribute them
         cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
             {"id": "SOLO", "url": "http://localhost:9/widget.html",
-             "parent": ""}]
-        rows = dom.frames_of(1234, "PAGE_A")
-        assert rows[0]["target"] == "SOLO", rows
-        assert rows[0]["committed"].endswith("/widget.html"), rows
-        # …but a frame the PAGE says SHARES its process has no target of its
-        # own, so a unique-URL row must not be handed to it: a review measured
-        # that it could otherwise inherit another tab's target
+             "parent": "PAGE_A"}]
         census.append({"index": 1, "url": "http://localhost:9/widget.html",
                        "name": "", "box": [], "visible": True,
                        "same_process": True})
         rows = dom.frames_of(1234, "PAGE_A")
+        assert rows[0]["target"] == "SOLO", rows          # the cross-origin one
         assert rows[1]["target"] == "" and rows[1]["candidates"] == 0, rows
         refusal(lambda: dom._frame_target(1234, "PAGE_A", "1"),  # noqa: SLF001
                 "frame-not-separate")

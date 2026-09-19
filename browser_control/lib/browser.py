@@ -324,16 +324,34 @@ def _main_processes() -> list[tuple[int, str, str]]:
     return sorted(found)
 
 
+def _profile_marker(profile: str) -> str:
+    """The `--user-data-dir` marker a browser on that profile carries.
+
+    Built from the NORMALISED path, so a browser launched with a trailing
+    slash, a `..` or a symlinked root is still recognised as this profile's — an
+    exact string compare read a live profile as somebody else's (a review
+    flagged it). Chrome's own helpers inherit the flag, which is why matching
+    the marker covers them too.
+    """
+    return f"--user-data-dir={_norm(profile)}"
+
+
+def _pid_on_marker(pid: int, cmd: str, profile: str) -> bool:
+    """Does that process's cmdline name this profile, however it was spelled?"""
+    spelled = _cmdline_value(cmd, "--user-data-dir")
+    return bool(spelled) and _norm(spelled) == _norm(profile)
+
+
 def _find_pid(profile: str) -> int:
     """The pid running ON this profile, from its own cmdline.
 
     The fallback when the pid file is gone (a crash restart). Only a MAIN
     process (no `--type=`) whose exe is Chromium-family counts, so this can
-    never hand back a renderer — or a process we did not start.
+    never hand back a renderer — or a process we did not start. The path is
+    compared NORMALISED, so the spelling a launcher chose does not matter.
     """
-    marker = f"--user-data-dir={profile}"
     for pid, _exe, cmd in _main_processes():
-        if marker in cmd:
+        if _pid_on_marker(pid, cmd, profile):
             return pid
     return 0
 
@@ -344,10 +362,11 @@ def _pid_on_profile(pid: int, profile: str) -> bool:
     The marker is the one `_find_pid` matches and the one Chrome is started
     with, so a pid that cannot show it is not this profile's browser — which is
     the difference between stopping that browser and signalling whatever
-    process inherited a recycled pid.
+    process inherited a recycled pid. The comparison is by NORMALISED path: an
+    exact string compare would refuse to stop the browser this CLI itself
+    started if the launcher spelled the directory differently.
     """
-    marker = f"--user-data-dir={profile}"
-    return any(found == pid and marker in cmd
+    return any(found == pid and _pid_on_marker(found, cmd, profile)
                for found, _exe, cmd in _main_processes())
 
 
@@ -799,12 +818,11 @@ def endpoint_owner(profile: str, port: int) -> dict:
                    "profile_pid": profile_pid,
                    "reason": f"pid {pid} holds the port and is not a "
                              f"Chromium-family browser ({exe or 'unknown'})"}
-    elif profile and f"--user-data-dir={profile}" not in cmd \
-            and not profile_pid:
+    elif profile and not _pid_on_marker(pid, cmd, profile):
         verdict = {"verified": False, "pid": pid, "exe": exe,
-                   "profile_pid": 0,
-                   "reason": f"pid {pid} holds the port, but neither it nor "
-                             "any other process runs that profile"}
+                   "profile_pid": profile_pid,
+                   "reason": f"pid {pid} holds the port, but its own command "
+                             f"line does not run {profile}"}
     else:
         verdict = {"verified": True, "pid": pid, "exe": exe,
                    "profile_pid": profile_pid, "reason": ""}
@@ -861,6 +879,20 @@ def _drivable(browser: str = "", strict: bool = True) -> list[dict]:
     if strict and not rows:
         _drive_refusal(browser, answering)
     return sorted(rows, key=lambda r: (r["exe"], str(r["profile"])))
+
+
+def _tabs_or_fail(row: dict) -> list[dict]:
+    """The tabs of one browser, or a REFUSAL when it did not answer.
+
+    `_tabs_of` returns (tabs, error) and seven callers took `[0]`, dropping the
+    error: a list that could not be read then became a claim of ABSENCE — "no
+    tab matches … have: none" for a browser that simply did not answer, which is
+    exactly what the error value exists to prevent (a review flagged it).
+    """
+    tabs, error = _tabs_of(row)
+    if error:
+        fail("cdp-error", f"{row['exe']} on {row['profile']}: {error}")
+    return tabs
 
 
 def _tabs_of(row: dict) -> tuple[list[dict], str]:
@@ -1070,8 +1102,11 @@ def _verify_profile_endpoint(profile: str) -> None:
 
     `ensure_up` proves only that something ANSWERS; the port comes from a FILE,
     so it is the kernel that says who owns it (`endpoint_owner`). The drive path
-    asks this before every verb, and a tab-creating call is a write: measured by
-    a review, `Target.createTarget` went wherever a stale port file pointed.
+    resolves its rows through `_drivable`, which requires a VERIFIED endpoint —
+    and the paths that call the browser directly (`_open_tabs` for
+    `open`/`tab URL`, `close_tabs` for `Target.closeTarget`) ask here, because
+    they re-read the port file at call time (a stale one sent a tab-creating
+    call wherever it pointed).
     """
     port = _to_int(cdp.port_of(profile))
     if not port:
@@ -1540,7 +1575,7 @@ def _resolve_across(specs: list[str], browser: str,
     rows = _drivable(browser)
     if not rows:
         _no_drive(browser)
-    tabs_of = {row["pid"]: _tabs_of(row)[0] for row in rows}
+    tabs_of = {row["pid"]: _tabs_or_fail(row) for row in rows}
     found: list[tuple[dict, dict, int]] = []
     for spec in specs:
         # `active` is about the browser this CLI DRIVES: the user's own Chrome
@@ -1585,7 +1620,7 @@ def _resolve_across(specs: list[str], browser: str,
 
 def _tab_count() -> int:
     """How many page tabs the drivable browsers show right now."""
-    return sum(len(_tabs_of(row)[0]) for row in _drivable())
+    return sum(len(_tabs_or_fail(row)) for row in _drivable())
 
 
 def tab_info(spec: str, browser: str = "") -> dict:
@@ -1624,7 +1659,7 @@ def _split(rows: list[dict]) -> tuple[list[tuple[dict, dict, int]],
     ours: list[tuple[dict, dict, int]] = []
     foreign: list[dict] = []
     for row in rows:
-        for index, tab in enumerate(_tabs_of(row)[0]):
+        for index, tab in enumerate(_tabs_or_fail(row)):
             if row["managed"] or row["attached"]:
                 ours.append((row, tab, index))
             else:
@@ -1644,7 +1679,7 @@ def _exact_matches(field: str, value: str,
     ours: list[tuple[dict, dict, int]] = []
     foreign: list[dict] = []
     for row in _closeable(browser):
-        for index, tab in enumerate(_tabs_of(row)[0]):
+        for index, tab in enumerate(_tabs_or_fail(row)):
             if str(tab.get(field) or "").lower() != wanted:
                 continue
             if row["managed"] or row["attached"]:
@@ -1710,7 +1745,7 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
             fail("bad-args", "tab close: a TAB spec cannot be empty")
         hits = 0
         for row in rows:
-            for index, tab in enumerate(_tabs_of(row)[0]):
+            for index, tab in enumerate(_tabs_or_fail(row)):
                 named = (bool(_match_spec([tab], spec)) if loose
                          else _exact_spec_match(tab, spec))
                 if not named:
@@ -1725,7 +1760,7 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
                     foreign.append(_foreign_row(row, tab))
         if not hits:
             have = ", ".join(f'{t["title"][:20] or t["url"][:20]}'
-                             for r in rows for t in _tabs_of(r)[0][:2])
+                             for r in rows for t in _tabs_or_fail(r)[:2])
             if loose:
                 fail("no-page-tab",
                      f"no tab contains {spec!r} in its title or URL "
@@ -1882,6 +1917,10 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
     for row, tab, _index in ours:
         by_profile.setdefault(str(row["profile"]), []).append(str(tab["id"]))
     for profile, ids in by_profile.items():
+        # closing a tab is a WRITE, and `browser_call` re-reads the port FILE at
+        # call time: ask the kernel once per profile first (a review measured
+        # that this loop went wherever the port file pointed)
+        _verify_profile_endpoint(profile)
         for target_id in ids:
             cdp.browser_call(profile, "Target.closeTarget",
                              {"targetId": target_id})
@@ -2001,7 +2040,7 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
                  "(`open`), an `attach --port N` grant, or a --tab SPEC to "
                  "read a tab instead")
         _no_drive(browser)
-    pairs = [(row, tab) for row in rows for tab in _tabs_of(row)[0]]
+    pairs = [(row, tab) for row in rows for tab in _tabs_or_fail(row)]
     if not pairs:
         fail("no-page-tab",
              "no page tabs to act on — open one with "
@@ -2086,7 +2125,11 @@ def _wait_move(profile: str, target_id: str, before_url: str,
                 and origin != before_origin:
             return True
         now = _href(profile, target_id)
-        if now and not _same_page(now, before_url):
+        # `before_url and …`: with an unreadable before, `_same_page(now, "")`
+        # is always false, so the move used to be reported as PROVEN by a
+        # tautology (a review measured it). An unknown before is handled by the
+        # caller, which judges the AFTER state instead.
+        if now and before_url and not _same_page(now, before_url):
             return True
         if time.time() >= deadline:
             return False
@@ -2165,8 +2208,14 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
              f"the browser treated {target!r} as a DOWNLOAD, so no page "
              "navigated and the tab is where it was")
     # FIRST the move, then the load: the document being left is already
-    # complete, so "complete" alone would answer before the navigation starts
-    moved = _wait_move(profile, target_id, before, before_origin)
+    # complete, so "complete" alone would answer before the navigation starts.
+    # When the address BEFORE could not be read — a parked tab is exactly that
+    # case — "did it move" has no oracle, so `moved` is NULL rather than `true`
+    # by tautology (`_same_page(now, "")` is always false), and the read-back
+    # below takes its place: the tab answers again and is on the target.
+    moved: bool | None = None if not before else _wait_move(profile, target_id,
+                                                            before,
+                                                            before_origin)
     loaded = _wait_document(profile, target_id) if moved else _ready(profile,
                                                                      target_id)
     url_read = _href(profile, target_id)
@@ -2176,7 +2225,12 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
              f"{f' ({refused})' if refused else ''} — the tab is on its own "
              "error page (a name that does not resolve, a refused connection "
              "or a certificate problem), not the requested document")
-    if not moved and not _same_page(target, before):
+    if moved is None and (not url_read or not _same_page(target, url_read)):
+        fail("nav-not-verified",
+             f"this tab's address could not be read before the navigation and "
+             f"reports {url_read!r} after it — the navigation did not verify "
+             "(the tab may still be parked on a dialog: `tab dialog state`)")
+    if moved is not None and not moved and not _same_page(target, before):
         fail("nav-not-verified",
              f"the tab is still at {before!r} after navigating to {target!r} "
              "— a beforeunload prompt the browser is waiting on (`tab dialog "
@@ -2192,17 +2246,39 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
     `history.back()` with nothing to go back to is not an error the page
     reports, so the reply is the OBSERVED change: a tab still at the same
     address after the wait refuses `nav-not-verified`.
+
+    The MOVE is the protocol's own (`Page.getNavigationHistory` +
+    `Page.navigateToHistoryEntry`), not page JavaScript: a page that shadows
+    `history.back` could otherwise turn a real move into a refusal, or into a
+    navigation of its own choosing — and "whatever CDP can do natively, do that"
+    is this project's rule (a review flagged the `history.back()` call).
     """
     if direction not in ("back", "forward"):
         fail("bad-args", f"history: {direction!r} is not back or forward")
     row, tab_row = _one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
     before = _href(profile, target_id)
-    _eval(profile, target_id, f"history.{direction}(); 'moving'", timeout=10)
+    tab_ws = cdp.target_ws(cdp.port_of(profile), target_id)
+    listing = cdp.call(tab_ws, "Page.getNavigationHistory")
+    entries = listing.get("entries") if isinstance(listing, dict) else None
+    index = _to_int(listing.get("currentIndex")) if isinstance(listing, dict) \
+        else -1
+    if not isinstance(entries, list) or not entries:
+        fail("nav-failed",
+             f"the browser reports no history for this tab, so there is no "
+             f"{direction} entry to move to")
+    wanted = index - 1 if direction == "back" else index + 1
+    if wanted < 0 or wanted >= len(entries):
+        fail("nav-failed",
+             f"the tab is at history entry {index + 1} of {len(entries)} — "
+             f"there is no {direction} entry to move to")
+    cdp.call(tab_ws, "Page.navigateToHistoryEntry",
+             {"entryId": (entries[wanted] or {}).get("id")})
     if not _wait_url_change(profile, target_id, before):
         fail("nav-not-verified",
-             f"the tab is still at {before!r} after {direction} — its history "
-             f"may have no {direction} entry")
+             f"the tab is still at {before!r} after {direction} — the browser "
+             "moved to a history entry whose address did not change (a "
+             "same-document entry), or the page re-set it")
     url_read = _href(profile, target_id)
     if url_read.startswith("chrome-error://"):
         fail("nav-failed",

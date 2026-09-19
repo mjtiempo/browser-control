@@ -637,6 +637,12 @@ def c_dom_wait_polls() -> str:
     ok_json("tab", "wait", "--for", "load")
     ok_json("tab", "wait", "--for", "js", "--expr",
             "document.title.length > 0")
+    # a Promise is TRUTHY the moment it is made, so `Boolean(promise)` used to
+    # pass the wait instantly — the expression reports the thenable now and the
+    # verb refuses rather than reporting a settle that never happened
+    err = refuses("bad-args", "tab", "wait", "--for", "js", "--expr",
+                  "fetch('/dom').then(r => r.ok)", "--timeout", "3")
+    assert "Promise" in err, err
     err = refuses("wait-timeout", "tab", "wait", "--for", "element",
                   "--selector", "#never", "--timeout", "1")
     assert "1s" in err, err
@@ -940,7 +946,12 @@ def c_tab_dialog() -> str:
     refuses("no-dialog", "tab", "dialog", "accept")   # suppressed: nothing left
     refuses("blocked", "tab", "text")                 # and every read says so
     moved = ok_json("tab", "nav", f"{base}/dom")      # the way out
-    assert moved["moved"] is True, moved
+    # `moved` is NULL here, not true: a parked tab's address cannot be read
+    # before the navigation, so "did it move" has no oracle — the read-backs do
+    # the proving (the tab answers again, on the target). It used to report
+    # `true` by tautology, because `_same_page(now, "")` is always false.
+    assert moved["moved"] is None, moved
+    assert moved["url_read"].endswith("/dom"), moved
     back = ok_json("tab", "text", "--chars", "40")
     assert back["length"] > 0, back
     healthy = ok_json("tab", "dialog")
@@ -1356,6 +1367,13 @@ def c_frames() -> str:
                   f"{point['point'][1]}", "--tab", tid)
     assert hit["verified"] is False, hit
     assert "at-target" in str(hit["under"]), hit
+    # …and the SIBLING point verb makes the same non-claim: a point is not a
+    # selector, so `under` says what it reached instead of claiming the element
+    # that was intended (a review found `hover --at` reporting verified: true)
+    hovered = ok_json("tab", "hover", "--at", f"{point['point'][0]},"
+                      f"{point['point'][1]}", "--tab", tid)
+    assert hovered["verified"] is False, hovered
+    assert "at-target" in str(hovered["under"]), hovered
     # NOT asserted here: that the page's handler FIRES. Twice measured, on this
     # fixture inside the battery, it did not — while the same page, the same
     # order, live cross-origin frames, a background tab and the same commands
