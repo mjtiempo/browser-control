@@ -407,7 +407,14 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
     if not os.path.isdir(target):
         return {"ok": True, "profile": target, "reset": False,
                 "reason": "there was no profile to reset"}
-    facts = _tree(target)
+    if os.path.islink(target):
+        # a symlinked DIRECTORY is a tree this CLI did not make: seed would write
+        # through it (the per-child guard cannot see the top level) and reset
+        # would follow it — both refuse (a review found the top-level hole after
+        # the child one was closed)
+        fail("reset-failed",
+             f"{target} is a symlink — this CLI wipes a profile directory, "
+             "not a link to somebody else's")
     with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
                             "profile reset") as lock,
           browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001

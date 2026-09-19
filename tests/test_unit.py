@@ -818,6 +818,30 @@ def t_one_tab_addressing() -> None:
                 browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
                 cdp.browser_call = real_call                 # type: ignore[assignment]
             assert asked == [str(rows()[0]["profile"])], asked
+            # …and it REFUSES before any browser call when the endpoint is not
+            # the browser we think (the probe above only asserted that it asked)
+            calls2: list[tuple] = []
+            cdp.browser_call = lambda profile, method, params: (  # type: ignore[assignment]
+                calls2.append((profile, method)) or {})
+            browser.endpoint_owner = lambda profile, port: {      # type: ignore[assignment]
+                "verified": False, "reason": "a stranger holds that port"}
+            cdp.port_of = lambda profile: 1515                 # type: ignore[assignment]
+            tabs[1616] = [page("AB12")]
+            try:
+                refusal(lambda: browser.close_tabs(["AB12"]), "cdp-not-local")
+                assert calls2 == [], calls2
+            finally:
+                browser.endpoint_owner = real_owner           # type: ignore[assignment]
+                cdp.port_of = real_port                       # type: ignore[assignment]
+                cdp.browser_call = real_call                  # type: ignore[assignment]
+            # …and the tabs read that failed is the ONLY place the error may be
+            # dropped: `_tabs_of(row)[0]` must not appear anywhere in the module
+            source = (Path(__file__).resolve().parent.parent
+                      / "browser_control/lib/browser.py").read_text(
+                          encoding="utf-8")
+            assert "_tabs_of(row)[0]" not in source, \
+                "a failed tabs read must refuse, not read as 'no tabs'"
+            assert "_tabs_or_fail(row)" in source
         finally:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
@@ -1869,6 +1893,17 @@ def t_frames_bind_to_their_tab() -> None:
         assert dom.frames_of(1234, "PAGE_B")[0]["target"] == "BBB"
         assert dom._frame_target(1234, "PAGE_A", "widget")["target"] == \
             "AAA"                                        # noqa: SLF001
+        # …and the other tab's target is never reached even when its id sorts
+        # FIRST: the id is a random token, so THIS is the case that tells a
+        # parent-scoped match from a URL-only one (a review found the PAGE_A
+        # assertion above passed either way by id luck)
+        cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
+            {"id": "AAA", "url": "http://localhost:9/widget.html",
+             "parent": "PAGE_B"},
+            {"id": "ZZZ", "url": "http://localhost:9/widget.html",
+             "parent": "PAGE_A"}]
+        assert dom.frames_of(1234, "PAGE_A")[0]["target"] == "ZZZ"
+        assert dom.frames_of(1234, "PAGE_B")[0]["target"] == "AAA"
         # …and a duplicate URL in ONE tab cannot be told apart by URL at all:
         # target ids are random, so pairing by id order can bind the sibling
         cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
@@ -1907,7 +1942,10 @@ def t_frames_bind_to_their_tab() -> None:
         census.pop()
         # 3. the census names its facts apart, and an unreadable one is an
         #    ERROR — never an empty page (`{}` is "no frames")
-        row, tab_row = {"profile": "/nonexistent/profile"}, {"id": "PAGE_A"}
+        row = {"pid": 4321, "exe": "chrome", "profile": "/profiles/x",
+               "managed": True, "attached": False,
+               "cdp": {"port": 1515}}
+        tab_row = {"id": "PAGE_A"}
         two = [
             # a same-process frame: its document is readable, no target of its own
             {"index": 0, "url": "about:srcdoc", "name": "", "box": [],
@@ -1923,6 +1961,18 @@ def t_frames_bind_to_their_tab() -> None:
         assert summary["cross_origin"] == 1, summary    # unreadable document
         assert summary["same_process"] == 1, summary
         assert "frame(s)" in dom._frames_note(row, tab_row)  # noqa: SLF001
+        # a browser that attributes NOTHING reports `separate: NULL`, never 0:
+        # "none of them can be driven" is a claim the reply cannot support (a
+        # review found `tab frames` saying 0 while `--frame` refused
+        # `frame-unattributable`)
+        dom.frames_of = lambda port, page, census=None: [    # type: ignore[assignment]
+            {"index": 0, "url": "u", "name": "", "box": [], "visible": True,
+             "same_process": False, "target": "",
+             "attribution": "unattributable", "candidates": 0}]
+        listed = dom.frames(row, tab_row)                     # noqa: SLF001
+        assert listed["separate"] is None, listed
+        assert "cannot attribute" in listed["note"], listed
+        dom.frames_of = lambda port, page, census=None: two  # type: ignore[assignment]
 
         def explode(port: int, page: str,
                     census: list | None = None) -> list[dict]:
@@ -1990,6 +2040,14 @@ def t_frames_and_points() -> None:
     assert dom._at_point("10,20") == (10, 20)          # noqa: SLF001
     assert dom._at_point(" 10, 20 ") == (10, 20)       # noqa: SLF001
     assert dom._at_point("-5,3") == (-5, 3)            # noqa: SLF001
+    # the RANGE refusal names the verb that asked (it said "tab scroll" for all
+    # three — a review flagged it)
+    try:
+        dom._point("9999,9999", [100, 100], "tab click")     # noqa: SLF001
+    except ControlError as e:
+        assert "tab click" in e.message, e.message
+    else:
+        raise AssertionError("a point outside the viewport must refuse")
     for bad in ("10", "x,y", "10,", ",20", ""):
         refusal(lambda bad=bad: dom._at_point(bad, "tab click"),  # noqa: SLF001
                 "bad-args")
@@ -2111,6 +2169,59 @@ def t_transport_against_a_fake_peer() -> None:
         "Runtime.evaluate"], seen
 
 
+def t_click_presses_at_the_proven_point() -> None:
+    """`tab click` presses at `hit_at` — the point the HIT-TEST proved.
+
+    Measured before the fix: the probe CLAMPED into the viewport and the press
+    did not, so an element whose centre is below the fold was TESTED inside it
+    and PRESSED outside, while the reply said `clicked: true`. A fake session
+    records what actually crossed `Input.dispatchMouseEvent`.
+    """
+    events: list[dict] = []
+
+    class FakeSession:
+        def __enter__(self) -> FakeSession:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object,
+                     tb: object) -> None:
+            return None
+
+        def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+            return {"url": "u", "title": "t", "active": "body",
+                    "scroll": [0, 0], "x": 0, "y": 0}
+
+        def call(self, method: str, params: dict | None = None,
+                 timeout: float = 0.0) -> dict:
+            events.append({"method": method, **(params or {})})
+            return {}
+
+    real = (dom._resolve, dom._session, dom._matches_in, dom._under_point)
+    fake_row = {"pid": 4321, "exe": "chrome", "profile": "/profiles/x",
+                "managed": True, "attached": False,
+                "cdp": {"port": 1515}}
+    dom._resolve = lambda tab, browser, for_write: (     # type: ignore[assignment]
+        fake_row, {"id": "TAB", "url": "u"})
+    dom._session = lambda row, tab_row: FakeSession()    # type: ignore[assignment]
+    dom._matches_in = lambda session, needle, css, cap: {  # type: ignore[assignment]
+        "matches": [{"tag": "button", "box": [10, 20, 30, 40],
+                     "point": [999, 999], "hit_at": [12, 34],
+                     "in_viewport": True, "hit": True,
+                     "hit_element": "button#x", "text": "x"}],
+        "title": "t", "url": "u", "ready": "complete", "total": 1,
+        "offscreen": 0, "active": "body", "scroll": [0, 0]}
+    dom._under_point = lambda session, x, y: "button#x"  # type: ignore[assignment]
+    try:
+        reply = dom.click(selector="#x")
+    finally:
+        (dom._resolve, dom._session, dom._matches_in,
+         dom._under_point) = real
+    pressed = [e for e in events if e.get("type") == "mousePressed"]
+    assert pressed and (pressed[0]["x"], pressed[0]["y"]) == (12, 34), events
+    assert reply["point"] == [12, 34], reply
+    assert reply["under"] == "button#x", reply
+
+
 def main() -> int:
     for name, fn in (
         ("safe_url policy", t_safe_url),
@@ -2139,6 +2250,7 @@ def main() -> int:
         ("the policy gate fails closed", t_policy_gate),
         ("gate and argv hardening", t_gate_and_argv_hardening),
         ("transport against a fake peer", t_transport_against_a_fake_peer),
+        ("the press lands at the proven point", t_click_presses_at_the_proven_point),
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("frames bind to their tab", t_frames_bind_to_their_tab),
         ("every verb is classified", t_capability_surface),

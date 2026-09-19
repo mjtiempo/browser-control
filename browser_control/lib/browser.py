@@ -329,9 +329,7 @@ def _profile_marker(profile: str) -> str:
 
     Built from the NORMALISED path, so a browser launched with a trailing
     slash, a `..` or a symlinked root is still recognised as this profile's — an
-    exact string compare read a live profile as somebody else's (a review
-    flagged it). Chrome's own helpers inherit the flag, which is why matching
-    the marker covers them too.
+    exact string compare read a live profile as somebody else's.
     """
     return f"--user-data-dir={_norm(profile)}"
 
@@ -791,11 +789,13 @@ def endpoint_owner(profile: str, port: int) -> dict:
 
     The rule, and why it stops there:
 
-    * a MANAGED profile must appear in the holder's own cmdline
-      (`--user-data-dir=<profile>`) — that is airtight;
-    * a Chromium-family process also passes when the profile's MAIN process is
-      on the machine, because a helper can own the socket while the browser
-      process is the one we drive;
+    * the holder passes when its OWN cmdline names this profile
+      (`--user-data-dir=<profile>`, compared as a normalised path) — Chrome's own
+      helpers inherit that flag, so one rule covers them too;
+    * a Chromium-family process that does NOT name it is UNVERIFIED, however many
+      other processes are running the profile: `open` sees a process running on
+      the profile as a stranger and refuses to adopt its endpoint (a review
+      measured the looser "some process runs the profile" rule this replaced);
     * anything else does not pass, and every caller that would DRIVE that
       endpoint refuses instead (`cdp-not-local`). A local process that names
       itself `chrome` cannot be told apart, and docs/progress.md says so.
@@ -2214,15 +2214,21 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
         fail("nav-failed",
              f"the browser treated {target!r} as a DOWNLOAD, so no page "
              "navigated and the tab is where it was")
-    # FIRST the move, then the load: the document being left is already
-    # complete, so "complete" alone would answer before the navigation starts.
-    # When the address BEFORE could not be read — a parked tab is exactly that
-    # case — "did it move" has no oracle, so `moved` is NULL rather than `true`
-    # by tautology (`_same_page(now, "")` is always false), and the read-back
-    # below takes its place: the tab answers again and is on the target.
+    # `moved` is NULL when the address BEFORE could not be read (a parked tab is
+    # exactly that case): "did it move" has no oracle then, so the read-back
+    # below takes its place — and it POLLS, because the new document's renderer
+    # may not answer on the first try (a review found this branch reading once
+    # where every other path polls)
     moved: bool | None = None if not before else _wait_move(profile, target_id,
                                                             before,
                                                             before_origin)
+    if moved is None:
+        deadline = time.time() + NAV_MOVE_S
+        while time.time() < deadline:
+            url_read = _href(profile, target_id)
+            if url_read and _same_page(target, url_read):
+                break
+            time.sleep(0.25)
     loaded = _wait_document(profile, target_id) if moved else _ready(profile,
                                                                      target_id)
     url_read = _href(profile, target_id)

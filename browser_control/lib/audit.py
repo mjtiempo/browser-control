@@ -14,10 +14,11 @@ is recorded exactly like a success. Two rules make it safe to keep:
 `BROWSER_CONTROL_LOG` names the file, or `off` disables the log entirely.
 The file's DIRECTORY is created on the first write (mode 0700) and the file is
 opened 0600 — its lines carry the argv of a call — with an existing wider file
-narrowed. When the configured path cannot be written the line lands in a
-scratch directory built for the purpose (`scratch_dir`, unique and 0700 via
-`mkdtemp`), so a record is lost only when nothing at all can be written, never
-silently. `selftest` reports the path the log would use.
+narrowed. When the configured path cannot be written, OR a wider file cannot be
+narrowed to 0600, the line lands in a scratch directory built for the purpose
+(`scratch_dir`, unique and 0700 via `mkdtemp`): a record is lost only when
+neither the configured file nor scratch can be written, never silently
+(`selftest` reports the path the log would use).
 """
 from __future__ import annotations
 

@@ -561,7 +561,12 @@ SHOT_METRICS = ("JSON.stringify((() => {" + PRELUDE + r"""
 # the frame shares this page's PROCESS — such a frame has no CDP target of its
 # own, which is the difference `--frame` has to know about.
 FRAME_CENSUS = ("JSON.stringify((() => {" + PRELUDE + r"""
-  return Array.from(document.querySelectorAll('iframe')).map((f, index) => {
+  const all = roots(document, []);
+  const frames = [];
+  for (const root of all) {
+    for (const f of root.querySelectorAll('iframe')) frames.push(f);
+  }
+  return frames.map((f, index) => {
     const r = f.getBoundingClientRect();
     let reads = false;
     try { reads = !!f.contentDocument } catch (e) { reads = false }
@@ -690,7 +695,9 @@ def frames_of(port: int, page_target: str,
     `census` lets a caller that already evaluated it (a read that wants the
     counts) skip a second evaluation. `committed` is the URL the browser
     actually committed, which can differ from the `src` attribute the page
-    shows.
+    shows. The census PIERCES open shadow roots (a frame inside one is a frame
+    the page can see, and walking only the document omitted it silently — a
+    review found that after the matcher had learned to pierce them).
     """
     if census is None:
         census = cdp.evaluate(cdp.target_ws(port, page_target), FRAME_CENSUS) \
