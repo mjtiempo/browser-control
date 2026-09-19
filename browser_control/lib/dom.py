@@ -2282,7 +2282,7 @@ def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
         fail(f"{rung}-not-verified",
              f"{why}: {before.get('active')!r} did not take the "
              f"{len(text)} character(s)")
-    reply = {"ok": True, "rung": rung, "chars": len(text),
+    reply = {"ok": True, "verb": rung, "chars": len(text),
              "active": after.get("active") or before.get("active"),
              "verified": bool(verified),
              "length_before": before.get("length"),

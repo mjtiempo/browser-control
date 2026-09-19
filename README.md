@@ -36,6 +36,18 @@ fields it has.
    tab(s) are open … pass --force`, `cdp-not-local: port 9222 … is not that
    profile's browser … run close --force and then open`.
 
+Two limits of that stance are worth saying out loud, because a caller who
+assumes otherwise will be wrong in a way that matters:
+
+* **The oracle for every DOM verb is the page's own JavaScript.** `hit`,
+  `:hover`, the geometry, `checked`, `currentTime` — a page can shadow all of
+  them, so `verified: true` means "the page says so". The page-INDEPENDENT
+  oracles are the screenshot's own PNG bytes, `/proc` (who holds the port, who
+  runs the profile), and the browser's own protocol errors.
+* **A read enables the Page domain on the tab it reads** (that is what makes a
+  suppressed dialog real instead of a wedge — see `tab dialog state`), so
+  reading a tab is not perfectly side-effect-free.
+
 Refusals go to stderr as `ERR[code]: message` with exit status 2.
 
 ## Install
@@ -135,7 +147,8 @@ blocks is bounded and named: `eval-timeout`, `blocked` (a parked renderer, with
 the dialog named when there is one), `profile-busy`, `wait-timeout`.
 
 `docs/progress.md` lists the known limits, including the honest one: `find` and
-`text` see the top document and open shadow roots, not iframes.
+`text` see the top document and open shadow roots — `tab frames` says which
+frames were left out, and `--frame` reaches into a cross-origin one.
 
 ## Licence
 

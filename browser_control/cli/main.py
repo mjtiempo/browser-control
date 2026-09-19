@@ -68,7 +68,7 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   profile seed --from DIR [--force] [--dry]
                      copy a source profile's LOGINS into a managed one (no
                      caches, no lock files, read back; --dry counts first)
-  profile reset --force
+  profile reset [--force]
                      wipe a managed profile, logins included
   tab [URL...]       open one tab per URL (about:blank when none)
   tab list           every drivable browser's page tabs, by browser
@@ -86,16 +86,15 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab back|forward [--tab SPEC]  history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
   tab activate [SPEC]            bring a tab forward (it raises its window)
-  tab hover TEXT|--selector CSS [--index N] [--tab SPEC]
-                                 put the pointer on an element (`:hover`)
   tab check TEXT|--selector CSS [--index N] [--uncheck] [--tab SPEC]
                                  check a box or radio with real input
   tab select TEXT|--selector CSS --value V [--index N] [--tab SPEC]
                                  choose one <option> with real arrow keys
   tab dialog [state|accept|dismiss] [--text VALUE] [--tab SPEC]
                                  read, accept or dismiss a JavaScript dialog
-  tab screenshot PATH [--full] [--force] [--tab SPEC]
-                                 write a PNG of the page (its header vouches)
+  tab screenshot PATH|--path PATH [--full] [--force] [--tab SPEC]
+                                 write a PNG of the page; its own header
+                                 vouches for the size, not the page's geometry
   tab js EXPR [--tab SPEC]       evaluate an expression (can write; unverified)
   tab find TEXT|--selector CSS [--cap N] [--tab SPEC]
                                  a visible element, in PAGE coordinates
@@ -128,6 +127,7 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab media state|play|pause [--index N] [--tab SPEC]
                                  read or drive the page's video/audio
   selftest           prove the install: interpreter, websockets, verbs
+  help               this text (also `-h` and `--help`)
 
 SPEC   a CDP target id prefix (`id:2D4BC76C`), `active` (the tab whose page
        reports itself visible — only one per window), or a title/url
@@ -826,7 +826,6 @@ def cmd_tab_type(rest: list[str], browser: str) -> dict:
 
 
 def cmd_tab_upload(rest: list[str], browser: str) -> dict:
-    """`tab upload FILE [--selector CSS] [--index N] [--tab SPEC]`."""
     """`tab upload FILE [--selector CSS] [--index N] [--tab SPEC]`."""
     rest, spec = _tab_flag(rest, "tab upload")
     rest, selector = _pop(rest, "--selector", "tab upload")

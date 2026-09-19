@@ -18,7 +18,7 @@ profile, one endpoint, resolved the same way everywhere.
 | Window-scoped tabs | **Not in v1** (no `--window`, no `--workspace`, no screen coordinates) |
 | Site adapters | Not in core — plugin system on top |
 | Interface | `lib` = importable services, `cli` = one adapter per verb, JSON in/out, `ERR[code]` |
-| CLI command | `bctl` (+ `python -m browser_control`) — only name still changeable |
+| CLI command | `browser-control-cli` (and `python -m browser_control`) — the name was settled: `bctl` would collide and read as a fourth thing to learn |
 
 ## 2. `lib/` modules
 
@@ -130,8 +130,11 @@ profile, one endpoint, resolved the same way everywhere.
 ### Cross-cutting
 
 `errors.py` (`ControlError`), `util.py`, `audit.py` (JSONL, per-action
-redaction, fail-open), `config.py` (env + config file), `__init__.py` exposing
-`BrowserService`.
+redaction, fail-open), `capabilities.py` (the declared surface + the policy
+gate), `profile.py` (seed/reset), `__init__.py` exposing `BrowserService`.
+(`config.py` was never built: the environment variables and the flags were
+enough, and a config file nobody asked for would have been one more thing to
+get wrong — this row says so instead of promising it.)
 
 ## 3. `cli/` verbs (v1)
 
@@ -260,8 +263,12 @@ unclear oracle into a claim of absence.**
    absence.
 7. **Unclear oracle ≠ absent effect.** Refuse only when the missing effect can
    be named; otherwise report `unverifiable` with the reason.
-8. **Every refusal carries the rung.** `effect`/`rung`/`code` in the reply and
-   the audit log.
+8. **Every refusal carries its code.** `code` in the reply and the audit log,
+   and the action name (`verb`) where a verb has more than one rung
+   (`insert`/`type`, `check`/`uncheck`). The L1–L4 appetite above is a DESIGN
+   tool: it says how much proof a verb owes, not a field every reply carries —
+   the earlier wording promised `effect`/`rung` fields that no reply ever had
+   (a review found the drift).
 9. **Nothing is driven through an unverified endpoint.** The port comes from a
    file; the process holding the listening socket is checked in `/proc`, and a
    drive of anything else refuses `cdp-not-local` naming the holder. `list`

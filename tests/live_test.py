@@ -21,6 +21,7 @@ import contextlib
 import http.server
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -286,6 +287,41 @@ def cmdline(pid: int) -> str:
     return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
 
 
+# Every throwaway profile carries this prefix, so a run that is KILLED can
+# still be swept and its leftover browser found: the four other names this suite
+# used to build (`-foreign-`, `-plain-`, `-source-`, `-outside-`) were invisible
+# to a scan keyed on ROOT alone (a review measured that a killed run left one
+# running).
+THROWAWAY_PREFIX = "browser-control-live-"
+
+
+def orphan_browsers() -> list[str]:
+    """Browsers running on a throwaway profile whose directory is GONE.
+
+    That is exactly what a run that was KILLED leaves behind: the next run
+    sweeps the stale root, and the Chrome that was using it keeps running —
+    invisible to a scan keyed on this run's ROOT alone, which is what the four
+    other fixture names (`-foreign-`, `-plain-`, `-source-`, `-outside-`) used
+    to be. A browser whose profile still EXISTS belongs to the run in progress,
+    so it is not an orphan and is not reported here.
+    """
+    base = os.path.join(tempfile.gettempdir(), THROWAWAY_PREFIX)
+    orphans: list[str] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        cmd = cmdline(int(entry))
+        if "chrome" not in cmd.lower():
+            continue
+        match = re.search(r"--user-data-dir=(\S+)", cmd)
+        if not match:
+            continue
+        profile = match.group(1).rstrip("/")
+        if profile.startswith(base) and not os.path.isdir(profile):
+            orphans.append(f"{entry}:{profile}")
+    return sorted(orphans)
+
+
 def procs_on(marker: str) -> list[int]:
     """Every pid whose cmdline mentions `marker` — the profile, so the answer
     covers the browser and its children."""
@@ -397,7 +433,7 @@ def sweep_stale_roots() -> list[str]:
     base = tempfile.gettempdir()
     for name in sorted(os.listdir(base)):
         path = os.path.join(base, name)
-        if not name.startswith("browser-control-live-") or path == ROOT \
+        if not name.startswith(THROWAWAY_PREFIX) or path == ROOT \
                 or not os.path.isdir(path):
             continue
         try:
@@ -1436,7 +1472,7 @@ def c_close_by_name_stops_a_foreign_browser() -> str:
     still guarding the tabs that stopping it would take down.
     """
     path = browser_lib.binary()
-    profile = tempfile.mkdtemp(prefix="browser-control-foreign-")
+    profile = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
     proc = subprocess.Popen(
         [path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
          "--no-first-run", "--no-default-browser-check", "about:blank"],
@@ -1525,7 +1561,7 @@ def c_two_instances_by_profile() -> str:
         back = ok_json("tab", "text", "--chars", "20", "--profile", personal)
         assert str(back["url"]).endswith("/personal"), back
         # a profile outside this CLI's root is not one it manages
-        outside = tempfile.mkdtemp(prefix="browser-control-outside-")
+        outside = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
         try:
             err = refuses("bad-args", "open", f"{base_url()}/x",
                           "--profile", outside)
@@ -1549,6 +1585,12 @@ def c_two_instances_by_profile() -> str:
 def c_no_leftover_process() -> str:
     left = procs_on(ROOT)
     assert not left, f"processes still running on the throwaway root: {left}"
+    # …and nothing of a run that was KILLED: its root is swept on the next run
+    # while its Chrome keeps running, on a profile path that no longer exists
+    # (a browser whose profile is still there belongs to this run)
+    orphans = orphan_browsers()
+    assert not orphans, ("browsers are running on throwaway profiles that no "
+                         f"longer exist (a run was killed): {orphans}")
     return "nothing of ours is left running"
 
 
@@ -1668,7 +1710,7 @@ def c_profile_verbs() -> str:
     touching anybody's real browser data.
     """
     target = os.path.join(ROOT, "instance-seeded")
-    source = tempfile.mkdtemp(prefix="browser-control-source-")
+    source = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
     try:
         os.makedirs(Path(source, "Cache"))
         Path(source, "Cookies").write_text("cookie-bytes" * 8, encoding="utf-8")
@@ -1722,7 +1764,7 @@ def c_profile_verbs() -> str:
         assert "in use" in str(live.get("warning", "")), live
         assert live["verified"] is True, live
         # somebody's real profile is not one of ours to touch
-        outside = tempfile.mkdtemp(prefix="browser-control-outside-")
+        outside = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
         try:
             refuses("not-managed", "profile", "reset", "--force",
                     "--profile", outside)
@@ -1742,7 +1784,7 @@ def c_list_shows_a_browser_outside_cdp() -> str:
     and every other verb must leave it alone.
     """
     path = browser_lib.binary()
-    profile = tempfile.mkdtemp(prefix="browser-control-plain-")
+    profile = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
     proc = subprocess.Popen(
         [path, f"--user-data-dir={profile}", "--no-first-run",
          "--no-default-browser-check", "about:blank"],
@@ -1808,7 +1850,7 @@ def c_attach_grants_writes() -> str:
     it, and `detach` puts the refusal back.
     """
     path = browser_lib.binary()
-    profile = tempfile.mkdtemp(prefix="browser-control-foreign-")
+    profile = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
     proc = subprocess.Popen(
         [path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
          "--no-first-run", "--no-default-browser-check", "about:blank"],
@@ -2016,7 +2058,7 @@ def cleanup() -> None:
 
 def main() -> int:
     global ROOT, LOG_DIR, SUITE_LOG
-    ROOT = tempfile.mkdtemp(prefix="browser-control-live-")
+    ROOT = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
     LOG_DIR = audit.scratch_dir() or ROOT
     SUITE_LOG = os.path.join(LOG_DIR, "live-actions.jsonl")
     reason = prereq()

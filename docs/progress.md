@@ -893,6 +893,50 @@ tab subcommands may claim a frame, and `nav`/`list`/`activate` may not), live 57
 fires its own handler, the census in `text`, the ambiguity named with indices,
 and the two refusals).
 
+### 5.25 The review campaign — what five lanes found, and what changed
+
+§4's appetite ("verify, or refuse") had been applied by hand until now; this is
+the first time the work was reviewed by someone who did not write it. Five
+read-only lanes (transport/process, DOM tier, gate/argv, filesystem/audit,
+adversarial + tests) read the tree against the documented contract, and every
+finding was re-verified here before it was fixed — two of the lanes' findings
+were refuted that way, and one was downgraded after measurement.
+
+* **The gate could be walked through.** `--for JS`, `--for " js"` and
+  `--for load --for js` were authorised as reads and then ran caller code;
+  `--deny X` voided `BROWSER_CONTROL_ALLOW`; an argv of only global flags raised
+  an IndexError out of `main`; `--allow ,` switched the gate off, and so did a
+  blank policy value in the environment.
+* **Writes could enter a browser nobody handed over**: with no `--tab`, scoped
+  to a profile outside the root, or through `Target.createTarget` on a port file
+  that named another endpoint.
+* **`--frame` could drive another tab's frame** (URL matching across the whole
+  browser, then a fallback that trusted a URL appearing once), and `tab wait`
+  never applied the scope while its reply said `frame: 1`.
+* **Claims that could be false**: `clicked: true` for a press that landed
+  outside the element (the hit-test clamped, the press did not), `verified: true`
+  for a point hover, `moved: true` by tautology on a parked tab, "no tab matches
+  … have: none" for a tab list that could not be read, `separate` counting two
+  different facts at once, and a census failure reading as "no frames".
+* **Filesystem and process**: seed/reset took the root lock while `open` took
+  the profile lock (a reset could delete a starting browser's directory),
+  liveness compared paths by exact string, `_is_managed` was lexical and `_copy`
+  wrote through a planted symlink, the seed read-back re-walked the source
+  instead of the copy's manifest, the audit scratch path was predictable and the
+  log file's mode was the umask's.
+* **Transport**: the HTTP read followed redirects off-loopback, `Session._connect`
+  escaped `call()`'s try, a `Page.enable` protocol refusal was recorded as
+  "parked", and `/proc` cmdlines were truncated at 4096 bytes — the text every
+  identity decision reads.
+* **Tests**: the whole websocket transport was untested (including the loopback
+  host check), two assertions could not fail, the battery's stale-root sweep
+  could not see four of its five throwaway prefixes, and three live oracles
+  would have passed with the feature broken.
+
+Every fix carries its own check, and two claims that could NOT be proved are
+written down where they live instead of being smoothed over: §5.24's click
+anomaly, and the DOM tier's page-owned oracle (README).
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs

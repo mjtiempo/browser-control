@@ -313,13 +313,29 @@ def t_expressions_and_shot_rules() -> None:
                 or not src.startswith("JSON.stringify"):
             continue
         seen += 1
-        assert src.rstrip().endswith(("})())", "})()")), (name, src[-12:])
+        # the FIRST alternative used to subsume the second (`"})()"` ends
+        # `"})())"`), so a wrap that dropped the last bracket passed the very
+        # check written to catch it (a review found it)
+        assert src.rstrip().endswith("})())"), (name, src[-12:])
         filled = src
         for key, value in placeholders.items():
             filled = filled.replace(key, value)
         left = [word for word in filled.replace("\n", " ").split()
                 if word.startswith("__")]
         assert not left, (name, left[:3])
+    assert seen, "no expressions were checked at all"
+    # WAIT_EXPRS are not module-level strings, so the loop above never visited
+    # them — including the one that carries the whole PRELUDE (a review flagged
+    # the hole)
+    for mode, expression in dom.WAIT_EXPRS.items():
+        if mode == "js":
+            continue                 # it interpolates caller code by design
+        filled = expression
+        for key, value in placeholders.items():
+            filled = filled.replace(key, value)
+        left = [word for word in filled.replace("\n", " ").split()
+                if word.startswith("__")]
+        assert not left, (mode, left[:3])
     assert seen >= 10, seen
     # the reserved spec never reaches the substring matcher
     rows = [{"pid": 1, "profile": "/p", "managed": True}]
@@ -2017,6 +2033,84 @@ def t_pid_alive() -> None:
     assert browser._pid_alive(999999) is False                     # noqa: SLF001
 
 
+def t_transport_against_a_fake_peer() -> None:
+    """The websocket path, against a peer that misbehaves on purpose.
+
+    Every branch that carries CDP traffic AFTER the HTTP read had no test at
+    all — framing, the reply-for-another-id filter, error envelopes, and the
+    parked rule — and neither did `_checked_ws`, the one guard between this tool
+    and a non-loopback endpoint that would receive every click, keystroke and
+    uploaded file (`plan.md` §5 tier 2 promised this peer).
+
+    `websockets.sync.server` runs the peer in a thread, so the suite stays
+    synchronous and hermetic: nothing leaves 127.0.0.1.
+    """
+    from websockets.sync.server import serve
+
+    seen: list[dict] = []
+
+    def handler(connection: object) -> None:
+        send = connection.send                    # type: ignore[union-attr]
+        for raw in connection:                    # type: ignore[union-attr]
+            message = json.loads(raw)
+            seen.append(message)
+            mid, method = message.get("id"), message.get("method")
+            if method == "Page.enable":
+                # a PROTOCOL refusal: it must not be recorded as "parked"
+                send(json.dumps({"id": mid, "error": {
+                    "code": -32000, "message": "enabling is not allowed"}}))
+            elif method == "Runtime.evaluate":
+                # a reply for ANOTHER id first: the caller must ignore it
+                send(json.dumps({"id": 9999, "result": {
+                    "result": {"type": "number", "value": -1}}}))
+                send(json.dumps({"id": mid, "result": {
+                    "result": {"type": "number", "value": 42}}}))
+            elif method == "Nonsense":
+                send("this is not JSON")
+            else:
+                send(json.dumps({"id": mid, "result": {}}))
+
+    with serve(handler, "127.0.0.1", 0) as server:
+        port = server.socket.getsockname()[1]
+        # websockets 16 wants an explicit `serve_forever` (the context manager
+        # only guarantees the close), so the peer runs on a daemon thread
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        url = f"ws://127.0.0.1:{port}/devtools/page/FAKE"
+        try:
+            # 1. the host check, which no other test in either suite exercises:
+            #    it lives in `evaluate`/`Session` (the entry points every verb
+            #    uses), not in the raw `call` primitive
+            refusal(lambda: cdp.evaluate("ws://evil.example/x", "1"),
+                    "cdp-not-local")
+            refusal(lambda: cdp.evaluate("wss://127.0.0.1.evil/x", "1"),
+                    "cdp-not-local")
+            refusal(lambda: cdp.evaluate("ws://user@evil.example/x", "1"),
+                    "cdp-not-local")
+            # 2. a reply for another id does not become the answer
+            result = cdp.call(url, "Runtime.evaluate", {"expression": "1"})
+            assert result["result"]["value"] == 42, result
+            # 3. a non-JSON frame is a refusal, not a decode traceback
+            refusal(lambda: cdp.call(url, "Nonsense"), "cdp-error")
+            # 4. a PROTOCOL refusal leaves the session usable and NOT parked:
+            #    only a blocked `Page.enable` means "this tab is parked"
+            with cdp.Session(url, page_domain=True) as session:
+                # the session connects LAZILY, so the refusal has to be caused
+                # before it can be judged — and the point of the case is that
+                # the session still answers afterwards
+                assert session.evaluate("1") == 42
+                assert session.page_domain_ok is False, session.__dict__
+                assert session.parked is False, "a protocol error is not a dialog"
+        finally:
+            server.shutdown()
+            serving.join(timeout=5)
+    # what the peer was actually asked, in order: the id filter, the non-JSON
+    # frame, `Page.enable` (refused), and the evaluate that still answered
+    assert [m.get("method") for m in seen] == [
+        "Runtime.evaluate", "Nonsense", "Page.enable",
+        "Runtime.evaluate"], seen
+
+
 def main() -> int:
     for name, fn in (
         ("safe_url policy", t_safe_url),
@@ -2044,6 +2138,7 @@ def main() -> int:
         ("the lock serializes a check-then-act", t_lock_serializes_a_check_then_act),
         ("the policy gate fails closed", t_policy_gate),
         ("gate and argv hardening", t_gate_and_argv_hardening),
+        ("transport against a fake peer", t_transport_against_a_fake_peer),
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("frames bind to their tab", t_frames_bind_to_their_tab),
         ("every verb is classified", t_capability_surface),
