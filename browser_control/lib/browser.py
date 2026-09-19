@@ -523,15 +523,39 @@ def _narrow(rows: list[dict], browser: str) -> list[dict]:
     return out
 
 
-def _writable(browser: str = "") -> list[dict]:
-    """The running browsers a WRITE may target: ours, plus the attached ones.
+def _who(rows: list[dict]) -> str:
+    """The browsers in a message, named so a caller can act on them."""
+    return "; ".join(f"{r['exe']} on {r['profile']}" for r in rows)
 
-    `_drivable` decides what "drivable" means (it must be the browser it claims
-    to be), and this narrows that to the ones a write may touch — an endpoint
-    that answered but did not verify is a refusal here, never a silent skip.
+
+def _writable(browser: str = "") -> list[dict]:
+    """The browsers a WRITE may target: the ones this CLI manages, plus the
+    attached ones.
+
+    `_drivable` decides what "drivable" means (the endpoint must be the browser
+    it claims to be), and this narrows that to the browsers a write may touch.
+    A browser nobody handed over is NOT one of them, however drivable it is:
+    the README promises writes go to a managed or attached browser, and the
+    fallback to "every drivable browser" that used to be here sent `tab press`
+    and `tab about:blank` into a stranger's session — measured against a
+    throwaway Chrome whose only sin was publishing a debugging port, which
+    then gained a tab it never asked for. `_one_tab` and `_writable_profile`
+    name the stranger and refuse instead of picking it.
     """
     return [r for r in _drivable(browser, strict=False)
-            if r["managed"] or r["attached"]] or _drivable(browser)
+            if r["managed"] or r["attached"]]
+
+
+def _readable(browser: str = "") -> list[dict]:
+    """The browsers a READ may target: ours and attached first, else every
+    drivable one.
+
+    Reading a stranger's tab list is not the same act as typing into it, so a
+    read reaches what a write may not — but "ours first" is what keeps an
+    unqualified read from refusing `tab-ambiguous` when the user's own browser
+    happens to run beside ours.
+    """
+    return _writable(browser) or _drivable(browser)
 
 
 def _writable_profile(browser: str = "") -> str:
@@ -543,6 +567,10 @@ def _writable_profile(browser: str = "") -> str:
     about. `attach`/`detach` decide which browsers are candidates; `--browser`
     picks among them, and `--profile DIR` (the process scope) names ONE instance
     outright — the answer to two instances of the same browser.
+
+    A browser that is merely DRIVABLE is not a candidate either: with only a
+    stranger's browser up, this returns the profile this CLI starts itself,
+    because "write into whatever answered" is the bug this rule exists for.
     """
     if SCOPE["profile"]:
         return SCOPE["profile"]
@@ -1894,19 +1922,28 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
     Not "the only tab on the machine": a second drivable browser — the user's
     own, running beside ours — would otherwise make every unqualified read
     refuse `tab-ambiguous`. Several tabs in that browser still refuse: a page
-    verb must never pick among tabs nobody named.
+    verb must never pick among tabs nobody named. For a WRITE, a browser
+    nobody handed over is not a candidate at all: it is named and refused.
     """
     if spec:
         row, tab, _index = _resolve_across([spec], browser, for_write)[0]
         return row, tab
-    rows = _writable(browser)
+    rows = _writable(browser) if for_write else _readable(browser)
     if not rows:
         # ask `_drivable` in its STRICT form first: an endpoint that answered
-        # but did not verify has to refuse `cdp-not-local`. Only when nothing
-        # answered at all is the answer "there is nothing to drive" — the
-        # first version blamed the endpoint for both, which is a lie when no
-        # browser is running.
-        _drivable(browser)
+        # but did not verify has to refuse `cdp-not-local`. Then a WRITE with
+        # only a stranger's browser up refuses `not-managed`, naming it and the
+        # two ways to hand it over — never a silent write into a session nobody
+        # offered. Only when nothing answered at all is the answer "there is
+        # nothing to drive": the first version blamed the endpoint for both,
+        # which is a lie when no browser is running.
+        strangers = _drivable(browser)
+        if for_write and strangers:
+            fail("not-managed",
+                 f"{_who(strangers)} is drivable, but this CLI neither manages "
+                 "nor has attached it — a write needs a browser it started "
+                 "(`open`), an `attach --port N` grant, or a --tab SPEC to "
+                 "read a tab instead")
         _no_drive(browser)
     pairs = [(row, tab) for row in rows for tab in _tabs_of(row)[0]]
     if not pairs:

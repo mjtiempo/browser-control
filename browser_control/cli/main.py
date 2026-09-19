@@ -988,26 +988,10 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
     return rest, found
 
 
-def _flag_last(rest: list[str], flag: str) -> str:
-    """The LAST `--flag VALUE` (or `--flag=VALUE`) in argv, or "".
-
-    The last, because that is the one `_pop` leaves the handler: a gate that
-    read the FIRST would classify `--for load --for js` as a read while the verb
-    ran `js` (measured). Read-only — the gate must not consume argv.
-    """
-    value = ""
-    for index, arg in enumerate(rest):
-        if arg == flag and index + 1 < len(rest):
-            value = str(rest[index + 1])
-        elif arg.startswith(flag + "="):
-            value = arg.split("=", 1)[1]
-    return value
-
-
 def _bare_tab_word(word: str) -> None:
     """Refuse a `tab` word that is neither a subcommand nor a URL.
 
-    The URL path would say only "refusing 'frams' as a URL", which reads as a
+    The URL path would say only "refusing this as a URL", which reads as a
     complaint about a URL when what happened is a typo — so this names both
     lists, and the subcommand the word is closest to. It runs BEFORE the gate,
     so a typo is `bad-args` whether or not a policy is in force (otherwise the
@@ -1015,16 +999,14 @@ def _bare_tab_word(word: str) -> None:
     """
     try:
         browser_lib.safe_url(word)
-        return                              # a URL: the URL path takes it
     except ControlError:
-        pass
-    near = difflib.get_close_matches(str(word), sorted(TAB_SUBCOMMANDS),
-                                     n=1, cutoff=0.6)
-    fail("bad-args",
-         f"tab: {str(word)[:40]!r} is neither a subcommand (have: "
-         + ", ".join(sorted(TAB_SUBCOMMANDS))
-         + ") nor a URL (http(s) or about:blank only)"
-         + (f" — did you mean `tab {near[0]}`?" if near else ""))
+        near = difflib.get_close_matches(str(word), sorted(TAB_SUBCOMMANDS),
+                                         n=1, cutoff=0.6)
+        fail("bad-args",
+             f"tab: {str(word)[:40]!r} is neither a subcommand (have: "
+             + ", ".join(sorted(TAB_SUBCOMMANDS))
+             + ") nor a URL (http(s) or about:blank only)"
+             + (f" — did you mean `tab {near[0]}`?" if near else ""))
 
 
 def _modes(head: str) -> tuple[str, ...]:
@@ -1056,7 +1038,11 @@ def resolved_mode(verb: str, rest: list[str]) -> str:
         return ""
     head = str(rest[0])
     if head == "wait":
-        _kept, value = _pop(list(rest[1:]), "--for", "tab wait")
+        # `--tab` FIRST, exactly as `cmd_tab_wait` pops it: a `--tab` value that
+        # is literally `--for` must not be read as the mode
+        args = list(rest[1:])
+        args, _spec = _pop(args, "--tab", "tab wait")
+        _kept, value = _pop(args, "--for", "tab wait")
         if value is None:
             return ""
         raw = str(value)
@@ -1136,6 +1122,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"(have: {', '.join(HANDLERS)})"
                   + (f" — {given} was given, but no verb to run"
                      if given else ""), file=sys.stderr)
+            code = "bad-args"           # so the audit line carries the code
             return 2
         verb, rest = rest[0], rest[1:]
         # the globals, in the order they matter: the instance, the frame, the
@@ -1155,12 +1142,19 @@ def main(argv: list[str] | None = None) -> int:
         head = str(rest[0]) if rest else ""
         if verb == "tab" and head and head not in TAB_SUBCOMMANDS:
             _bare_tab_word(head)
-        if verb == "tab" and flags["frame"] and head not in dom.FRAME_VERBS:
+        if flags["frame"] is not None and not str(flags["frame"]).strip():
             fail("bad-args",
-                 f"tab {head or 'URL'}: --frame does not apply — it scopes the "
-                 "verbs that act on a page's CONTENT ("
+                 "--frame needs a VALUE — a URL substring or an index from "
+                 "`tab frames` (an empty value is not a frame)")
+        if flags["frame"] and verb != "selftest" and not (
+                verb == "tab" and head in dom.FRAME_VERBS):
+            # a scope that cannot apply is REFUSED, by every verb: `list
+            # --frame 1` and `open --frame 1 URL` used to accept it and drop it
+            fail("bad-args",
+                 f"{verb}{' ' + head if head else ''}: --frame does not apply "
+                 "— it scopes the verbs that act on a page's CONTENT ("
                  + ", ".join(sorted(dom.FRAME_VERBS))
-                 + "), not the ones that act on the tab itself")
+                 + "), and `selftest` reports it; nothing else takes it")
         if verb != "selftest":
             # `selftest` is never gated: it is the verb that REPORTS the policy,
             # and a gate that blocks its own explanation is a trap. Everything
@@ -1176,8 +1170,12 @@ def main(argv: list[str] | None = None) -> int:
         scoped_frame = dom.frame()
         if verb == "tab" and head in dom.FRAME_VERBS and scoped_frame:
             # one place says which frame a scoped call acted in, so no verb has
-            # to remember to (and none can forget to)
+            # to remember to (and none can forget to) — plus WHICH document that
+            # turned out to be, because an index is the page's live frame order
             reply["frame"] = scoped_frame
+            resolved = dom.frame_resolved()
+            if resolved is not None:
+                reply["frame_resolved"] = resolved
         print(json.dumps(reply))
         ok = True
         return 0

@@ -725,6 +725,17 @@ def t_one_tab_addressing() -> None:
             assert readable["id"] == "EF56", readable
             refusal(lambda: browser._one_tab("EF56", "", for_write=True),  # noqa: SLF001
                     "not-managed")
+            # with NO managed browser up at all, a write refuses and NAMES the
+            # stranger instead of writing into it (measured live: a stranger's
+            # browser gained a tab from `tab about:blank`), while a read still
+            # reaches it — reading a tab list is not typing into it
+            browser.browsers = lambda: [rows()[1]]       # type: ignore[assignment]
+            tabs[1515] = [page("EF56")]
+            refusal(lambda: browser._one_tab("", "", for_write=True),  # noqa: SLF001
+                    "not-managed")
+            _row, stranger = browser._one_tab("", "", for_write=False)  # noqa: SLF001
+            assert stranger["id"] == "EF56", stranger
+            browser.browsers = rows                      # type: ignore[assignment]
         finally:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
@@ -1582,9 +1593,10 @@ def t_gate_and_argv_hardening() -> None:
         assert "ERR[bad-args]" in err and "verb is required" in err, (argv, err)
         assert "Traceback" not in err and out == "", (argv, out, err)
     # 2. a mode is resolved the way the VERB resolves it — case, whitespace,
-    #    and a repeated flag (the last one wins, which is what `_pop` leaves)
-    assert cli_main.action("tab", ["wait", "--for", "JS"]) == \
-        "tab wait --for js"
+    #    and a repeated flag (the last one wins, which is what `_pop` leaves),
+    #    and a `--tab` whose VALUE is literally `--for` is not the mode
+    assert cli_main.action("tab", ["wait", "--tab", "--for", "--for", "js"]) \
+        == "tab wait --for js"
     assert cli_main.action("tab", ["wait", "--for", " js "]) == \
         "tab wait --for js"
     assert cli_main.action("tab", ["wait", "--for", "load", "--for", "js"]) \
@@ -1608,6 +1620,13 @@ def t_gate_and_argv_hardening() -> None:
     rc, _out, err = run_cli(["tab", "wait", "--for", "JS", "--expr", "1",
                              "--allow", "read"])
     assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+    #   …and the POSITIONAL modes too, through the same route (a break in
+    #   `resolved_mode` for a positional mode would otherwise pass the suite)
+    for argv in (["tab", "dialog", "accept", "--allow", "read"],
+                 ["tab", "dialog", "ACCEPT", "--allow", "read"],
+                 ["tab", "media", "PLAY", "--allow", "read"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[not-allowed]" in err, (argv, rc, err)
     # 3. an empty policy VALUE is refused instead of read as "no policy"
     for argv in (["list", "--allow", ""], ["list", "--deny", ""]):
         rc, _out, err = run_cli(argv)
@@ -1639,12 +1658,20 @@ def t_gate_and_argv_hardening() -> None:
                  ["tab", "nav", ""], ["open", ""]):
         rc, _out, err = run_cli(argv)
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
-    # 6. `--frame` is refused by the verbs it cannot scope, and accepted by the
-    #    ones it can (they then fail for want of a BROWSER, not for the flag)
-    rc, _out, err = run_cli(["tab", "frames", "--frame", "1"])
-    assert rc == 2 and "--frame does not apply" in err, (rc, err)
+    # 6. `--frame` is refused by every verb it cannot scope (a scope that is
+    #    silently dropped is a caller who thinks they asked for something), and
+    #    accepted by the ones it can (they then fail for want of a BROWSER)
+    for argv in (["tab", "frames", "--frame", "1"],
+                 ["list", "--frame", "1"],
+                 ["open", "--frame", "1", "https://example.com/"],
+                 ["profile", "info", "--frame", "1"],
+                 ["tab", "text", "--frame", " ", "--tab", "id:0"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     rc, _out, err = run_cli(["tab", "text", "--frame", "1", "--tab", "id:0"])
     assert rc == 2 and "bad-args" not in err, (rc, err)
+    rc, _out, _err = run_cli(["selftest", "--frame", "1"])
+    assert rc == 0, rc
     # 7. a typo says what it is, and points at the nearest subcommand
     rc, _out, err = run_cli(["tab", "frams"])
     assert rc == 2 and "neither a subcommand" in err and "frames" in err, err
@@ -1664,6 +1691,95 @@ def t_gate_and_argv_hardening() -> None:
         assert "Traceback" not in err, err
     finally:
         cli_main.HANDLERS["list"] = keeper
+
+
+def t_frames_bind_to_their_tab() -> None:
+    """`--frame` resolves to a frame of the TAB it was asked about.
+
+    Measured before this check existed: with two tabs embedding the same widget,
+    both resolved to ONE CDP target, so `--frame` typed into the other tab. The
+    browser says which tab owns an iframe target (`Target.getTargets` carries
+    `parentId`), and these are the rules that read it — plus what happens when
+    the browser does NOT say, which must be a refusal rather than a guess.
+    """
+    census = [{"index": 0, "url": "http://localhost:9/widget.html",
+               "name": "", "box": [0, 0, 300, 120], "visible": True,
+               "same_process": False}]
+    real = {name: getattr(cdp, name) for name in
+            ("evaluate", "frame_targets", "frame_rows", "target_ws", "port_of")}
+    real_frames_of = dom.frames_of
+    cdp.evaluate = lambda ws, expr, timeout=15.0: census    # type: ignore[assignment]
+    cdp.port_of = lambda profile: 1234                      # type: ignore[assignment]
+    cdp.target_ws = lambda port, target, kind="page": f"ws://{kind}/{target}"  # type: ignore[assignment]
+    try:
+        # 1. the browser says who owns each target: only THIS tab's frame is
+        #    a candidate, and the other tab's target is never reached
+        cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
+            {"id": "AAA", "url": "http://localhost:9/widget.html",
+             "parent": "PAGE_A"},
+            {"id": "BBB", "url": "http://localhost:9/widget.html",
+             "parent": "PAGE_B"}]
+        rows = dom.frames_of(1234, "PAGE_A")
+        assert [r["target"] for r in rows] == ["AAA"], rows
+        assert rows[0]["candidates"] == 0, rows
+        assert dom.frames_of(1234, "PAGE_B")[0]["target"] == "BBB"
+        assert dom._frame_target(1234, "PAGE_A", "widget")["target"] == \
+            "AAA"                                        # noqa: SLF001
+        # 2. a browser that does NOT say: only a URL unique in the whole
+        #    browser is unambiguous, and a shared one is refused, not guessed
+        cdp.frame_targets = lambda port: []                 # type: ignore[assignment]
+        cdp.frame_rows = lambda port: [                     # type: ignore[assignment]
+            {"id": "AAA", "url": "http://localhost:9/widget.html"},
+            {"id": "BBB", "url": "http://localhost:9/widget.html"}]
+        rows = dom.frames_of(1234, "PAGE_A")
+        assert rows[0]["target"] == "" and rows[0]["candidates"] == 2, rows
+        refusal(lambda: dom._frame_target(1234, "PAGE_A", "widget"),  # noqa: SLF001
+                "frame-ambiguous")
+        cdp.frame_rows = lambda port: [                     # type: ignore[assignment]
+            {"id": "SOLO", "url": "http://localhost:9/widget.html"}]
+        assert dom.frames_of(1234, "PAGE_A")[0]["target"] == "SOLO"
+        # 3. the census names its facts apart, and an unreadable one is an
+        #    ERROR — never an empty page (`{}` is "no frames")
+        row, tab_row = {"profile": "/nonexistent/profile"}, {"id": "PAGE_A"}
+        dom.frames_of = lambda port, page: [                # type: ignore[assignment]
+            # a same-process frame: its document is readable, no target of its own
+            {"index": 0, "url": "about:srcdoc", "name": "", "box": [],
+             "visible": True, "same_process": True, "target": "",
+             "candidates": 0},
+            # a cross-origin one: a target of its own, and an unreadable document
+            {"index": 1, "url": "u", "name": "", "box": [], "visible": True,
+             "same_process": False, "target": "AAA", "candidates": 0}]
+        summary = dom._frame_summary(row, tab_row)           # noqa: SLF001
+        assert summary["total"] == 2, summary
+        assert summary["separate"] == 1, summary        # has a CDP target
+        assert summary["cross_origin"] == 1, summary    # unreadable document
+        assert summary["same_process"] == 1, summary
+        assert "frame(s)" in dom._frames_note(row, tab_row)  # noqa: SLF001
+
+        def explode(port: int, page: str) -> list[dict]:
+            raise ControlError("cdp-error", "boom")
+
+        dom.frames_of = explode                             # type: ignore[assignment]
+        broken = dom._frame_summary(row, tab_row)            # noqa: SLF001
+        assert broken["total"] is None and "boom" in broken["error"], broken
+        assert "could not be read" in dom._frames_note(row, tab_row)  # noqa: SLF001
+        dom.frames_of = lambda port, page: []               # type: ignore[assignment]
+        assert dom._frame_summary(row, tab_row) == {}        # noqa: SLF001
+        assert dom._frames_note(row, tab_row) == ""          # noqa: SLF001
+    finally:
+        dom.frames_of = real_frames_of
+        for name, fn in real.items():
+            setattr(cdp, name, fn)
+    # 4. the RESOLVED frame travels in the reply, and is cleared with the scope:
+    #    an index is the page's live order, so "which document did that act in"
+    #    cannot be inferred from the argument
+    dom.frame("frame.html")
+    assert dom.frame_resolved() is None
+    dom.FRAME["resolved"] = {"index": 0, "url": "u", "target": "AAA"}
+    assert dom.frame_resolved() == {"index": 0, "url": "u", "target": "AAA"}
+    assert dom.frame_resolved() is not dom.FRAME["resolved"]     # a COPY
+    dom.frame("")
+    assert dom.frame_resolved() is None, "the scope was cleared but the frame was not"
 
 
 def t_frames_and_points() -> None:
@@ -1752,6 +1868,7 @@ def main() -> int:
         ("the policy gate fails closed", t_policy_gate),
         ("gate and argv hardening", t_gate_and_argv_hardening),
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
+        ("frames bind to their tab", t_frames_bind_to_their_tab),
         ("every verb is classified", t_capability_surface),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),

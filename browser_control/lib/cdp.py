@@ -233,6 +233,41 @@ def frame_rows(port: int) -> list[dict]:
     return _of_kind(_get_port(port, "/json"), "iframe")
 
 
+def frame_targets(port: int) -> list[dict]:
+    """The IFRAME targets of this browser, EACH WITH THE TAB THAT OWNS IT.
+
+    `/json` lists iframe targets without their parent, so a frame matched by
+    URL alone can belong to ANOTHER tab — measured: two tabs embedding the same
+    widget both resolved to ONE target, and `--frame` then typed into the tab
+    nobody asked about. The browser endpoint's `Target.getTargets` carries
+    `parentId` for an iframe: the owning tab's target id, which is the proof
+    this returns. `[]` means the browser did not say (or would not answer), and
+    the caller then trusts only a URL that is unique in the whole browser.
+    """
+    version = _get_port(port, "/json/version")
+    url = str((version or {}).get("webSocketDebuggerUrl") or "") \
+        if isinstance(version, dict) else ""
+    if not url:
+        return []
+    try:
+        result = call(_checked_ws(url), "Target.getTargets")
+    except ControlError:
+        return []
+    infos = result.get("targetInfos") if isinstance(result, dict) else None
+    if not isinstance(infos, list):
+        return []
+    out: list[dict] = []
+    for info in infos:
+        if not isinstance(info, dict) or str(info.get("type")) != "iframe":
+            continue
+        out.append({"id": str(info.get("targetId") or ""),
+                    "url": str(info.get("url") or ""),
+                    "title": str(info.get("title") or ""),
+                    "parent": str(info.get("parentId") or ""),
+                    "parent_frame": str(info.get("parentFrameId") or "")})
+    return sorted(out, key=lambda row: row["id"])
+
+
 def _of_kind(rows: Any, kind: str) -> list[dict]:
     """A `/json` reply -> the targets of one kind, id-sorted.
 

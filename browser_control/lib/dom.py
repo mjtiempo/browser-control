@@ -76,7 +76,7 @@ SCROLL_MOVE_S = 4.0         # how long one wheel is given to move something
 # a URL substring or an index from `tab frames`. Empty means the page itself.
 # It is a SCOPE, exactly like `--profile`, and the CLI clears it on every
 # invocation that does not pass the flag.
-FRAME: dict[str, str] = {"wanted": ""}
+FRAME: dict[str, Any] = {"wanted": "", "resolved": None}
 
 
 def frame(wanted: str | None = None) -> str:
@@ -90,7 +90,22 @@ def frame(wanted: str | None = None) -> str:
     """
     if wanted is not None:
         FRAME["wanted"] = str(wanted).strip()
+        # a resolution belongs to the call that made it: nothing may inherit
+        # the last call's frame in a reply
+        FRAME["resolved"] = None
     return FRAME["wanted"]
+
+
+def frame_resolved() -> dict | None:
+    """Which frame the last session actually attached to, or None.
+
+    An index is the page's live iframe order, so "which document did that act
+    in" is not something a caller can infer from their own argument. `_session`
+    records the resolution here and the CLI puts it in the reply, in ONE place,
+    so no verb has to remember to and none can forget to.
+    """
+    resolved = FRAME.get("resolved")
+    return dict(resolved) if isinstance(resolved, dict) else None
 
 
 def mode_of(mode: str | None) -> str:
@@ -620,28 +635,55 @@ def _session(row: dict, tab_row: dict) -> cdp.Session:
     port = cdp.port_of(str(row["profile"]))
     if FRAME["wanted"]:
         target = _frame_target(port, str(tab_row["id"]), FRAME["wanted"])
+        # WHICH frame that was: an index is the page's live iframe order, so the
+        # reply says what was resolved, not only what was asked for
+        FRAME["resolved"] = {"index": _int(target["index"]),
+                             "url": str(target["url"]),
+                             "target": str(target["target"])}
         return cdp.Session(cdp.target_ws(port, str(target["target"]),
                                         "iframe"))
     return cdp.Session(cdp.target_ws(port, str(tab_row["id"])))
 
 
 def frames_of(port: int, page_target: str) -> list[dict]:
-    """Every frame of that page: the DOM's view, plus its CDP target.
+    """Every frame of THAT page: the DOM's view, plus its own CDP target.
 
     The DOM knows the geometry and whether a frame shares the page's process
-    (`contentDocument` readable); `/json` knows which frames are separate
-    TARGETS. A frame with `target: ""` has none, and `--frame` says so rather
-    than pretending it can drive it.
+    (`contentDocument` readable — a same-process frame has no target of its
+    own). The browser's target list knows which frames are separate targets and
+    WHICH TAB each belongs to: `Target.getTargets` gives an iframe target a
+    `parentId`, and matching on it is what keeps `--frame` inside the tab it was
+    asked about. Matching by URL alone — what this used to do — sent input into
+    another tab's frame: measured with two tabs embedding the same widget, both
+    resolved to ONE target.
+
+    `candidates` is how many targets in the whole browser share that URL when
+    the browser cannot say who owns them. More than one is a frame nobody can
+    attribute, and `_frame_target` refuses it rather than guessing.
     """
     census = cdp.evaluate(cdp.target_ws(port, page_target), FRAME_CENSUS) or []
-    separate = cdp.frame_rows(port)
+    owned = cdp.frame_targets(port)
+    shared: dict[str, int] = {}
+    if owned:
+        pool = [r for r in owned if r["parent"] == page_target]
+    else:
+        # this browser does not report a parent, so only a URL that appears ONCE
+        # in the whole browser is unambiguous
+        from_json = cdp.frame_rows(port)
+        counts: dict[str, int] = {}
+        for row in from_json:
+            key = str(row.get("url"))
+            counts[key] = counts.get(key, 0) + 1
+        pool = [{"id": str(r.get("id")), "url": str(r.get("url"))}
+                for r in from_json if counts[str(r.get("url"))] == 1]
+        shared = {url: count for url, count in counts.items() if count > 1}
     used: set[str] = set()
     rows: list[dict] = []
     for entry in census if isinstance(census, list) else []:
         if not isinstance(entry, dict):
             continue
         url = str(entry.get("url") or "")
-        match = next((r for r in separate
+        match = next((r for r in pool
                       if url and str(r.get("url")) == url
                       and str(r.get("id")) not in used), None)
         if match is not None:
@@ -651,7 +693,8 @@ def frames_of(port: int, page_target: str) -> list[dict]:
                      "box": [_int(v) for v in (entry.get("box") or [])],
                      "visible": bool(entry.get("visible")),
                      "same_process": bool(entry.get("same_process")),
-                     "target": str((match or {}).get("id") or "")})
+                     "target": str((match or {}).get("id") or ""),
+                     "candidates": shared.get(url, 0)})
     return rows
 
 
@@ -662,8 +705,8 @@ def frames(row: dict, tab_row: dict) -> dict:
     reply = {"ok": True, "count": len(rows), "frames": rows,
              "separate": sum(1 for r in rows if r["target"]),
              "note": ("a cross-origin frame is a target of its own: name it "
-                      "with `--frame <url substring|index>` and every page "
-                      "verb works inside it")}
+                      "with `--frame <url substring|index>` and every verb "
+                      "that acts on a page's content works inside it")}
     if not rows:
         reply["note"] = ("this page has no iframes — nothing for `--frame` to "
                           "name")
@@ -700,36 +743,79 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
              f"{len(hits)} frames match {wanted!r} — pick one by index "
              f"(`--frame 0` … `--frame {len(rows) - 1}`): {where}")
     found = hits[0]
+    if found.get("candidates"):
+        fail("frame-ambiguous",
+             f"frame [{found['index']}] {str(found['url'])[:60]} matches "
+             f"{found['candidates']} targets in this browser and it does not "
+             "say which tab owns them — run `tab frames` in the tab you mean "
+             "and name the frame by its index there")
     if not found["target"]:
         fail("frame-not-separate",
              f"frame [{found['index']}] "
-             f"{str(found['url'])[:60] or 'srcdoc'!r} shares this page's "
-             "process, so it is not a target this CLI can drive: `tab js` can "
-             "read it (its contentDocument is reachable), and "
-             "`tab click --at X,Y` hits it by coordinate")
+             f"{str(found['url'])[:60] or 'srcdoc'} has no target of its OWN in "
+             "this tab: either it shares the page's process (a same-origin or "
+             "srcdoc frame), or its committed URL differs from the `src` the "
+             "page shows (a redirect). `tab js` reads a same-process frame, "
+             "and `tab click --at X,Y` hits either one by coordinate")
     return found
 
 
-def _frame_summary(session: cdp.Session) -> dict:
+def _frame_summary(row: dict, tab_row: dict) -> dict:
     """What a read is NOT showing: the frames on this page, by kind.
 
     A `tab text` that silently omits everything inside an iframe is the one
     place this tool could read as "there is nothing there". The census makes it
-    say so instead, and costs one evaluation on the session already open.
+    say so instead — and it is taken over the PAGE, never over a `--frame`
+    scoped session, so a scoped read still reports the page it is a frame of.
+
+    `separate` counts frames with a CDP target of their own (`--frame` can drive
+    those), `cross_origin` counts frames whose document the page cannot read —
+    two different facts that used to share one number. An UNREADABLE census is
+    an error, not an empty page: `{}` means "no frames", and a page that breaks
+    the census expression must not be able to look like a page without frames.
     """
     try:
-        census = session.evaluate(FRAME_CENSUS)
-    except Exception:                                          # noqa: BLE001
-        return {}
-    rows = census if isinstance(census, list) else []
+        rows = frames_of(cdp.port_of(str(row["profile"])), str(tab_row["id"]))
+    except ControlError as e:
+        return {"error": f"{e.code}: {e.message}", "total": None,
+                "separate": None, "cross_origin": None, "visible": None,
+                "note": ("the frame census could not be read, so framed "
+                         "content may exist that this read does not show — "
+                         "that is NOT the same as a page without frames")}
     if not rows:
         return {}
-    separate = sum(1 for r in rows if isinstance(r, dict)
-                   and not r.get("same_process"))
-    return {"total": len(rows), "separate": separate,
-            "same_process": len(rows) - separate,
-            "visible": sum(1 for r in rows if isinstance(r, dict)
-                           and r.get("visible"))}
+    return {"total": len(rows),
+            "separate": sum(1 for r in rows if r["target"]),
+            "cross_origin": sum(1 for r in rows if not r["same_process"]),
+            "same_process": sum(1 for r in rows if r["same_process"]),
+            "visible": sum(1 for r in rows if r["visible"])}
+
+
+def _frames_note(row: dict | None, tab_row: dict | None) -> str:
+    """The sentence a REFUSAL carries when the page has frames.
+
+    A `no-match` that says "nothing matches" while the page has a frame this
+    read cannot see inside is the false-absence the whole tier is careful about,
+    so the refusal says how many frames there are and how to reach them. Empty
+    when there are none (nothing to explain), and computed only on the failure
+    path — a verb that succeeds never pays for it.
+    """
+    if not row or not tab_row:
+        return ""
+    try:
+        census = _frame_summary(row, tab_row)
+    except ControlError:
+        return ""
+    if not census:
+        return ""
+    if census.get("error"):
+        return (" — and the frame census could not be read either, so framed "
+                "content may exist that nothing here can see")
+    if census.get("total") in (None, 0):
+        return ""
+    return (f" — this page has {census['total']} frame(s), "
+            f"{census['separate']} of them separate: `tab frames` lists them "
+            "and `--frame` reaches inside")
 
 
 def _query_args(text: str | None, selector: str | None,
@@ -755,11 +841,16 @@ def _matches_in(session: cdp.Session, needle: str, css: str, cap: int) -> dict:
     return data
 
 
-def _pick(data: dict, needle: str, css: str, index: int | None) -> dict:
+def _pick(data: dict, needle: str, css: str, index: int | None,
+          row: dict | None = None, tab_row: dict | None = None) -> dict:
     """The ONE element a click or a reveal acts on.
 
     Several matches is not a choice this tool makes for the caller: it refuses
-    and names them with the index to pass.
+    and names them with the index to pass. A refusal over a page that HAS frames
+    also says so — the matcher cannot see inside them, and "nothing matches" is
+    exactly the claim that must not be made loosely. The caller passes the
+    resolution it already holds, and the census runs only when a refusal is
+    actually being built.
     """
     rows = _well_formed(data.get("matches") or [], ("tag", "box", "point"))
     if not rows:
@@ -769,14 +860,16 @@ def _pick(data: dict, needle: str, css: str, index: int | None) -> dict:
                 if offscreen else "")
         fail("no-match",
              f"no rendered element matches {needle or css!r} on "
-             f"{str(data.get('title'))!r}{hint}")
+             f"{str(data.get('title'))!r}{hint}"
+             + _frames_note(row, tab_row))
     if index is None:
         if len(rows) > 1:
-            where = "; ".join(f"[{i}] {_describe(row)}"
-                              for i, row in enumerate(rows[:5]))
+            where = "; ".join(f"[{i}] {_describe(candidate)}"
+                              for i, candidate in enumerate(rows[:5]))
             fail("ambiguous-element",
                  f"{len(rows)} elements match {needle or css!r} — pick one "
-                 f"with --index N: {where}")
+                 f"with --index N: {where}"
+                 + _frames_note(row, tab_row))
         index = 0
     if not 0 <= index < len(rows):
         fail("bad-args",
@@ -988,7 +1081,9 @@ def find(text: str | None = None, selector: str | None = None,
     row, tab_row = _resolve(tab, browser, for_write=False)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, limit)
-        frames_here = _frame_summary(session)
+    # the census over the PAGE (never over a frame-scoped session) and after the
+    # session is closed, so a read reports the page it is a frame of
+    frames_here = _frame_summary(row, tab_row)
     viewport = _viewport(data, str(tab_row["id"]))
     matches = [dict(m, box=[_int(v) for v in m["box"]],
                     center=[_int(v) for v in (m.get("center") or [])],
@@ -1002,7 +1097,8 @@ def find(text: str | None = None, selector: str | None = None,
              f"no rendered element matches {needle or css!r} on "
              f"{str(data.get('title'))!r} (readyState {data.get('ready')!r}, "
              f"{_int(data.get('total'))} candidate(s)"
-             + (f", {offscreen} offscreen" if offscreen else "") + ")")
+             + (f", {offscreen} offscreen" if offscreen else "") + ")"
+             + _frames_note(row, tab_row))
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "query": needle or css, "viewport": viewport,
                   "total": _int(data.get("total")),
@@ -1094,9 +1190,16 @@ def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
 
 
 def _with_frame(reply: dict) -> dict:
-    """Say which frame the verb acted in, when it was scoped to one."""
+    """Say which frame the verb acted in, when it was scoped to one.
+
+    The RESOLVED frame as well as the value that was asked for: an index is the
+    page's live iframe order, so a caller cannot infer from their own argument
+    which document the verb actually changed.
+    """
     if FRAME["wanted"]:
         reply["frame"] = FRAME["wanted"]
+        if FRAME.get("resolved"):
+            reply["frame_resolved"] = dict(FRAME["resolved"])
     return reply
 
 
@@ -1125,7 +1228,8 @@ def click(text: str | None = None, selector: str | None = None,
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, FIND_CAP)
-        element = _pick(data, needle, css, index)
+        element = _pick(data, needle, css, index, row=row,
+                           tab_row=tab_row)
         if not element.get("in_viewport"):
             fail("no-viewport-target",
                  f"{_describe(element)} is at page {element.get('box')}, "
@@ -1189,7 +1293,8 @@ def hover(text: str | None = None, selector: str | None = None,
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, FIND_CAP)
-        element = _pick(data, needle, css, index)
+        element = _pick(data, needle, css, index, row=row,
+                           tab_row=tab_row)
         if not element.get("in_viewport"):
             fail("no-viewport-target",
                  f"{_describe(element)} is at page {element.get('box')}, "
@@ -1262,7 +1367,8 @@ def check(text: str | None = None, selector: str | None = None,
     want = not uncheck
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, FIND_CAP)
-        element = _pick(data, needle, css, index)
+        element = _pick(data, needle, css, index, row=row,
+                           tab_row=tab_row)
         before = _check_state(session, needle, css, index)
         _checkable(before, element)
         if bool(before.get("checked")) == want:
@@ -1338,7 +1444,8 @@ def select(text: str | None = None, selector: str | None = None,
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, FIND_CAP)
-        element = _pick(data, needle, css, index)
+        element = _pick(data, needle, css, index, row=row,
+                           tab_row=tab_row)
         probe = _select_probe(session, needle, css, index, wanted)
         if not probe.get("is_select"):
             kind = str(probe.get("tag") or element.get("tag") or "?")
@@ -1855,7 +1962,8 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
     if not node_id:
         fail("no-match",
              f"no rendered element matches {needle or css!r}"
-             + (f" (--index {index} is past the end)" if index else ""))
+             + (f" (--index {index} is past the end)" if index else "")
+             + _frames_note(row, tab_row))
     session.call("DOM.scrollIntoViewIfNeeded", {"nodeId": node_id})
     # prove it: the SAME matcher now finds it inside the viewport
     deadline = time.time() + SCROLL_MOVE_S
@@ -1894,11 +2002,12 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
         data = session.evaluate(TEXT_EXPR.replace("__SELECTOR__",
                                                   json.dumps(css))
                                 .replace("__CAP__", str(limit)))
-        frames_here = _frame_summary(session)
+    frames_here = _frame_summary(row, tab_row)
     if not isinstance(data, dict):
         fail("cdp-error", "tab text: the page did not answer with an object")
     if not data.get("found"):
-        fail("no-match", f"tab text: no element matches {css!r}")
+        fail("no-match", f"tab text: no element matches {css!r}"
+             + _frames_note(row, tab_row))
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "selector": data.get("selector"),
                   "viewport": [_int(v) for v in (data.get("viewport") or [])],
@@ -1925,7 +2034,8 @@ def focus(text: str | None = None, selector: str | None = None,
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, FIND_CAP)
-        element = _pick(data, needle, css, index)
+        element = _pick(data, needle, css, index, row=row,
+                           tab_row=tab_row)
         node_id = _node_of(session,
                            _match_args(ELEMENT_EXPR, needle, css, index))
         if not node_id:
@@ -2117,7 +2227,7 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
             _match_args(CANDIDATES_EXPR, "", css).replace("__CAP__",
                                                           str(FIND_CAP)))
         element = _pick(data if isinstance(data, dict) else {},
-                        "", css, index)
+                        "", css, index, row=row, tab_row=tab_row)
         handle = session.handle(_match_args(ELEMENT_EXPR, "", css, index,
                                             visible=False))
         if not handle:
