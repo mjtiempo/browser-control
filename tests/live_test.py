@@ -79,6 +79,8 @@ DOM_FIXTURE = """<!doctype html><meta charset="utf-8"><title>dom fixture</title>
 <h1>Dom Fixture Heading</h1>
 <button aria-label="Save the thing">save</button>
 <button id="covered" aria-label="Covered Button">covered</button>
+<a id="point-link" href="/nine-b"
+   style="display:inline-block;padding:12px">point link</a>
 <div id="cover"></div>
 <a href="/one.html">a link</a>
 <input type="text" placeholder="search here">
@@ -147,6 +149,7 @@ FRAME_TOP = """<!doctype html><meta charset="utf-8"><title>frames</title>
 <p>TOP_MARKER</p>
 <button id="at-target" style="padding:14px"
         onclick="this.textContent='AT_CLICKED'">at press</button>
+<a id="at-link" href="/nine-b" style="padding:14px">at link</a>
 <iframe srcdoc="<p>SAME_PROCESS_MARKER</p>" width="300" height="80"></iframe>
 <iframe src="http://localhost:__PORT__/frames-inner" width="320" height="80"></iframe>
 <iframe src="http://localhost:__PORT__/frames-inner-two" width="320" height="80"></iframe>"""
@@ -293,33 +296,58 @@ def cmdline(pid: int) -> str:
 # to a scan keyed on ROOT alone (a review measured that a killed run left one
 # running).
 THROWAWAY_PREFIX = "browser-control-live-"
+FIXTURE_PROFILES: set[str] = set()
 
 
 def orphan_browsers() -> list[str]:
-    """Browsers running on a throwaway profile whose directory is GONE.
+    """Browsers running on a throwaway profile that this run does NOT own.
 
-    That is exactly what a run that was KILLED leaves behind: the next run
-    sweeps the stale root, and the Chrome that was using it keeps running —
-    invisible to a scan keyed on this run's ROOT alone, which is what the four
-    other fixture names (`-foreign-`, `-plain-`, `-source-`, `-outside-`) used
-    to be. A browser whose profile still EXISTS belongs to the run in progress,
-    so it is not an orphan and is not reported here.
+    That is what a run which was KILLED leaves behind, and the mark is ownership,
+    not absence: `sweep_stale_roots` refuses to remove a root a live process is
+    using, so a killed run's root (and the directory its browser was launched
+    with) is usually still there — the earlier version of this scan required the
+    directory to be GONE, which made its assertion unable to fail for exactly
+    the case it documents (a review measured that).
     """
     base = os.path.join(tempfile.gettempdir(), THROWAWAY_PREFIX)
-    orphans: list[str] = []
+    exes = set(browser_lib.BROWSER_EXES)          # not just "chrome": the project
+    orphans: list[str] = []                       # supports five families
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
-        cmd = cmdline(int(entry))
-        if "chrome" not in cmd.lower():
+        pid = int(entry)
+        try:
+            exe = os.path.basename(os.path.realpath(f"/proc/{pid}/exe"))
+        except OSError:
             continue
+        if exe not in exes:
+            continue
+        cmd = cmdline(pid)
         match = re.search(r"--user-data-dir=(\S+)", cmd)
         if not match:
             continue
-        profile = match.group(1).rstrip("/")
-        if profile.startswith(base) and not os.path.isdir(profile):
-            orphans.append(f"{entry}:{profile}")
+        profile = os.path.realpath(match.group(1).rstrip("/"))
+        if not profile.startswith(base):
+            continue
+        owned = any(profile == seen or profile.startswith(seen + os.sep)
+                    for seen in FIXTURE_PROFILES)
+        if not owned:
+            orphans.append(f"{pid}:{profile}")
     return sorted(orphans)
+
+
+def fixture_profile() -> str:
+    """A throwaway profile this run OWNS, remembered for the leftover scan.
+
+    `orphan_browsers` has to tell this run's fixtures from a run that was
+    KILLED, and the only honest way is to remember what this run made: a killed
+    run's root is usually still on disk (`sweep_stale_roots` refuses to remove a
+    root a live process uses), so "the directory is gone" was never the mark of
+    an orphan.
+    """
+    path = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+    FIXTURE_PROFILES.add(os.path.realpath(path))
+    return path
 
 
 def procs_on(marker: str) -> list[int]:
@@ -594,11 +622,20 @@ def c_history_moves_the_address() -> str:
 
 
 def c_reload_makes_a_new_document() -> str:
-    """`tab reload` is verified by `performance.timeOrigin`, not by a guess."""
+    """`tab reload` really replaces the document — by LOSING a marker.
+
+    The reply's own `reloaded: true` is the CLI talking about itself: a reload
+    that returned success without reloading, or reloaded another tab, passed the
+    old check (a review named it). A value set in the window is gone only when
+    the document is new, and that is an oracle the CLI cannot fake.
+    """
+    ok_json("tab", "js", "window.__bc_mark = 1")
     reply = ok_json("tab", "reload")
     assert reply["reloaded"] is True, reply
     assert reply["url_read"].endswith("/nine-b"), reply
-    return "reload is verified by the document time changing"
+    after = ok_json("tab", "js", "window.__bc_mark || 0")
+    assert after["value"] == 0, ("the document survived the reload", after)
+    return "reload is verified by the document time changing AND a lost marker"
 
 
 def c_nav_names_the_tab() -> str:
@@ -690,6 +727,20 @@ def c_dom_click_is_real_input() -> str:
     """`tab click` presses with CDP input, and refuses what it cannot reach."""
     ok_json("tab", "nav", f"{base_url()}/dom")
     ok_json("tab", "scroll", "--edge", "top")
+    # the POINT path FIRST, while the page is freshly at the top and nothing has
+    # moved: a point is a MOMENT, and a real press on a link is the browser's own
+    # DEFAULT ACTION — no page JavaScript involved — so this proves the input
+    # LANDED (an element click proves less, and the frames page's handler anomaly
+    # in §5.24 is about handlers, not about this)
+    link = ok_json("tab", "find", "--selector", "#point-link")["matches"][0]
+    assert link["in_viewport"] is True and link["hit"] is True, link
+    hit = ok_json("tab", "click", "--at",
+                  f"{link['point'][0]},{link['point'][1]}")
+    assert hit["verified"] is False, hit
+    landed = ok_json("tab", "info", f"id:{STATE['tab'][:8]}")["tab"]
+    assert str(landed["url"]).endswith("/nine-b"), landed
+    ok_json("tab", "nav", f"{base_url()}/dom")     # back for the rest
+    ok_json("tab", "scroll", "--edge", "top")
     # the refusals come FIRST: the successful click below focuses a field at
     # the bottom of the page, and the browser scrolls it into view — which is
     # why the reply carries the scroll position, and why this order matters
@@ -702,7 +753,8 @@ def c_dom_click_is_real_input() -> str:
     assert reply["element"]["hit"] is True, reply
     assert reply["changed"] is True, reply
     assert reply["after"]["title"] == "clicked", reply
-    return "occluded and off-screen refused; a trusted press landed"
+    return ("occluded and off-screen refused; a trusted press landed; a point "
+            "click drove the browser's own default action")
 
 
 def c_dom_scroll_moves_the_document_and_nested() -> str:
@@ -1410,6 +1462,16 @@ def c_frames() -> str:
                       f"{point['point'][1]}", "--tab", tid)
     assert hovered["verified"] is False, hovered
     assert "at-target" in str(hovered["under"]), hovered
+    # NOT asserted here: that the page's handler FIRES, or even that the
+    # browser's default action follows. Twice measured on this fixture inside
+    # the battery, nothing came of the press — while the same page, the same
+    # order, live cross-origin frames, a background tab, a second tab and the
+    # same commands all navigate or fire in isolation (five reproductions). The
+    # dispatch and the point's reach are what this check stands behind; the
+    # default-action oracle lives on the DOM page (where it passes) and §5.24
+    # records the frames-page anomaly rather than asserting it either way.
+    return ("3 frames (2 separate): named by index and URL, driven inside; a "
+            "point dispatched through to the control")
     # NOT asserted here: that the page's handler FIRES. Twice measured, on this
     # fixture inside the battery, it did not — while the same page, the same
     # order, live cross-origin frames, a background tab and the same commands
@@ -1472,7 +1534,7 @@ def c_close_by_name_stops_a_foreign_browser() -> str:
     still guarding the tabs that stopping it would take down.
     """
     path = browser_lib.binary()
-    profile = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+    profile = fixture_profile()
     proc = subprocess.Popen(
         [path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
          "--no-first-run", "--no-default-browser-check", "about:blank"],
@@ -1561,7 +1623,7 @@ def c_two_instances_by_profile() -> str:
         back = ok_json("tab", "text", "--chars", "20", "--profile", personal)
         assert str(back["url"]).endswith("/personal"), back
         # a profile outside this CLI's root is not one it manages
-        outside = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+        outside = fixture_profile()
         try:
             err = refuses("bad-args", "open", f"{base_url()}/x",
                           "--profile", outside)
@@ -1689,10 +1751,20 @@ def c_concurrent_open_is_serialized() -> str:
     assert len(started) == 1, (replies, refused)
     winner = started[0]
     assert all(r.get("pid") == winner["pid"] for r in replies), replies
-    names = {str(t["url"]).rsplit("/", 1)[-1]
-             for t in pages(winner["port"])}
-    if not refused:                     # the ordinary outcome: both landed
-        assert {"race-a", "race-b"} <= names, names
+    # The URL accounting has to hold for EVERY call, refused or not: the old
+    # check asserted "both landed" only when nothing was refused, so a collision
+    # (or an always-busy lock) could hide in the refusal branch (a review named
+    # this as the weakest oracle for the lock).
+    names = {str(t["url"]).rsplit("/", 1)[-1] for t in pages(winner["port"])}
+    for (rc, _out, _err), url in zip(parsed, urls, strict=True):
+        name = url.rsplit("/", 1)[-1]
+        if rc == 2:
+            assert name not in names, ("a refused open opened a page", name,
+                                       names)
+        else:
+            assert name in names, ("a successful open did not land", name,
+                                   names)
+    assert len(names) == len(replies), (names, replies)
     live = [b for b in ok_json("list")["browsers"]
             if b["profile"] == winner["profile"]]
     assert len(live) == 1 and live[0]["pid"] == winner["pid"], live
@@ -1710,7 +1782,7 @@ def c_profile_verbs() -> str:
     touching anybody's real browser data.
     """
     target = os.path.join(ROOT, "instance-seeded")
-    source = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+    source = fixture_profile()
     try:
         os.makedirs(Path(source, "Cache"))
         Path(source, "Cookies").write_text("cookie-bytes" * 8, encoding="utf-8")
@@ -1764,7 +1836,7 @@ def c_profile_verbs() -> str:
         assert "in use" in str(live.get("warning", "")), live
         assert live["verified"] is True, live
         # somebody's real profile is not one of ours to touch
-        outside = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+        outside = fixture_profile()
         try:
             refuses("not-managed", "profile", "reset", "--force",
                     "--profile", outside)
@@ -1784,7 +1856,7 @@ def c_list_shows_a_browser_outside_cdp() -> str:
     and every other verb must leave it alone.
     """
     path = browser_lib.binary()
-    profile = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+    profile = fixture_profile()
     proc = subprocess.Popen(
         [path, f"--user-data-dir={profile}", "--no-first-run",
          "--no-default-browser-check", "about:blank"],
@@ -1850,7 +1922,7 @@ def c_attach_grants_writes() -> str:
     it, and `detach` puts the refusal back.
     """
     path = browser_lib.binary()
-    profile = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+    profile = fixture_profile()
     proc = subprocess.Popen(
         [path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
          "--no-first-run", "--no-default-browser-check", "about:blank"],
@@ -2058,7 +2130,7 @@ def cleanup() -> None:
 
 def main() -> int:
     global ROOT, LOG_DIR, SUITE_LOG
-    ROOT = tempfile.mkdtemp(prefix=THROWAWAY_PREFIX)
+    ROOT = fixture_profile()
     LOG_DIR = audit.scratch_dir() or ROOT
     SUITE_LOG = os.path.join(LOG_DIR, "live-actions.jsonl")
     reason = prereq()

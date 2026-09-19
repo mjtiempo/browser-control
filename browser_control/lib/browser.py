@@ -2138,11 +2138,18 @@ def _wait_move(profile: str, target_id: str, before_url: str,
 
 def _wait_url_change(profile: str, target_id: str, before: str,
                      timeout: float = HISTORY_TIMEOUT_S) -> bool:
-    """Did the tab's address leave `before` within the deadline?"""
+    """Did the tab's address leave `before` within the deadline?
+
+    `before` must be KNOWN (`before and …`): with an unreadable address,
+    `_same_page(now, "")` is always false, so any readable address would count
+    as "it changed" — the same tautology `nav`'s `moved` had (a review found it
+    here after that one was fixed). Callers that cannot know the address judge
+    the AFTER state instead.
+    """
     deadline = time.time() + timeout
     while True:
         now = _href(profile, target_id)
-        if now and not _same_page(now, before):
+        if now and before and not _same_page(now, before):
             return True
         if time.time() >= deadline:
             return False
@@ -2275,10 +2282,19 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
     cdp.call(tab_ws, "Page.navigateToHistoryEntry",
              {"entryId": (entries[wanted] or {}).get("id")})
     if not _wait_url_change(profile, target_id, before):
-        fail("nav-not-verified",
-             f"the tab is still at {before!r} after {direction} — the browser "
-             "moved to a history entry whose address did not change (a "
-             "same-document entry), or the page re-set it")
+        if not before:
+            # the address could not be read BEFORE, so "it changed" has no
+            # oracle: what proves the move is the tab answering on a real page
+            after = _href(profile, target_id)
+            if not after or after.startswith("chrome-error://"):
+                fail("nav-not-verified",
+                     f"this tab's address could not be read before {direction} "
+                     f"and reports {after!r} after it — the move did not verify")
+        else:
+            fail("nav-not-verified",
+                 f"the tab is still at {before!r} after {direction} — the "
+                 "browser moved to a history entry whose address did not "
+                 "change (a same-document entry), or the page re-set it")
     url_read = _href(profile, target_id)
     if url_read.startswith("chrome-error://"):
         fail("nav-failed",

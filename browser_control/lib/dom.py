@@ -743,9 +743,20 @@ def frames(row: dict, tab_row: dict) -> dict:
     """`tab frames`: the page's own TOP-LEVEL frames, and which can be driven."""
     port = cdp.port_of(str(row["profile"]))
     rows = frames_of(port, str(tab_row["id"]))
+    unattributed = any(r.get("attribution") for r in rows)
     reply = {"ok": True, "count": len(rows), "frames": rows,
-             "separate": sum(1 for r in rows if r["target"]),
-             "note": ("a cross-origin frame is a target of its own: name it "
+             # NULL, never 0, when the browser attributes nothing: "none of
+             # them can be driven" is a claim this cannot support, and the note
+             # below used to promise `--frame` while `--frame` refused
+             # `frame-unattributable` (a review caught the contradiction)
+             "separate": None if unattributed
+             else sum(1 for r in rows if r["target"]),
+             "note": ("this browser does not report which tab owns an iframe "
+                      "target, so `--frame` cannot attribute one to this tab "
+                      "— `tab js` reads a same-process frame, and "
+                      "`tab click --at X,Y` hits one by coordinate"
+                      if unattributed else
+                      "a cross-origin frame is a target of its own: name it "
                       "with `--frame <url substring|index>` and every verb "
                       "that acts on a page's content works inside it")}
     if not rows:
@@ -1369,7 +1380,16 @@ def click(text: str | None = None, selector: str | None = None,
         # centre: the probe CLAMPS into the viewport, so an element whose centre
         # is below the fold was tested inside it and pressed outside, and the
         # reply still said `clicked: true` (a review measured the mismatch)
-        x, y = _ints(element.get("hit_at") or element.get("point"), 2)
+        point = _ints(element.get("hit_at") or element.get("point"), 2)
+        if len(point) < 2:
+            # a page may answer anything for a value that crosses
+            # Runtime.evaluate, and "[7]" is not a point: refuse rather
+            # than raise ValueError out of the verb (both review lanes
+            # found the unpack behind the `_ints` guard)
+            fail("no-viewport-target",
+                 f"{_describe(element)} reports no usable point "
+                 f"({point!r}) — the page owns this value")
+        x, y = point
         for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
                               ("mouseReleased", 0)):
             session.call("Input.dispatchMouseEvent",
@@ -1438,7 +1458,16 @@ def hover(text: str | None = None, selector: str | None = None,
                  f"but that point reaches "
                  f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
-        x, y = _ints(element.get("hit_at") or element.get("point"), 2)
+        point = _ints(element.get("hit_at") or element.get("point"), 2)
+        if len(point) < 2:
+            # a page may answer anything for a value that crosses
+            # Runtime.evaluate, and "[7]" is not a point: refuse rather
+            # than raise ValueError out of the verb (both review lanes
+            # found the unpack behind the `_ints` guard)
+            fail("no-viewport-target",
+                 f"{_describe(element)} reports no usable point "
+                 f"({point!r}) — the page owns this value")
+        x, y = point
         session.call("Input.dispatchMouseEvent",
                      {"type": "mouseMoved", "x": x, "y": y,
                       "button": "none", "buttons": 0})
@@ -1521,7 +1550,16 @@ def check(text: str | None = None, selector: str | None = None,
                  f"but that point reaches "
                  f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
-        x, y = _ints(element.get("hit_at") or element.get("point"), 2)
+        point = _ints(element.get("hit_at") or element.get("point"), 2)
+        if len(point) < 2:
+            # a page may answer anything for a value that crosses
+            # Runtime.evaluate, and "[7]" is not a point: refuse rather
+            # than raise ValueError out of the verb (both review lanes
+            # found the unpack behind the `_ints` guard)
+            fail("no-viewport-target",
+                 f"{_describe(element)} reports no usable point "
+                 f"({point!r}) — the page owns this value")
+        x, y = point
         for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
                               ("mouseReleased", 0)):
             session.call("Input.dispatchMouseEvent",
