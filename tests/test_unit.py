@@ -1648,13 +1648,12 @@ def t_lock_serializes_a_check_then_act() -> None:
                 assert "(open)" in e.message, e.message    # names the holder
         # free again, with nothing to clean up: the lock file may stay
         with browser._lock(path, "open", wait=0.0) as again:      # noqa: SLF001
-            assert again.held is True, again
+            assert again == browser.LockState(held=True, warning=""), again
         assert os.path.exists(path), path
         # a path that cannot be opened at all is a WARNING, never a failure:
         # a guard that silently does nothing would be worse than none
         with browser._lock("/proc/nope/lock", "open") as broken:  # noqa: SLF001
-            assert broken.held is False, broken
-            assert broken.warning, broken
+            assert broken.held is False and broken.warning, broken
 
 
 def t_policy_gate() -> None:

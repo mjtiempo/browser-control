@@ -40,31 +40,28 @@ from browser_control.lib import attachments as attachments_lib
 from browser_control.lib import browser as browser_lib
 from browser_control.lib import locks
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
-    binary,
-    profile_dir,
     profiles,
     root,
     scope,
 )
-from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BAD_ARGS,
     ERR_NOT_MANAGED,
     ERR_PROFILE_EXISTS,
-    ERR_PROFILE_LIVE,
     ERR_RESET_FAILED,
     ERR_RESET_NOT_VERIFIED,
     ERR_SEED_FAILED,
     ERR_SEED_NOT_VERIFIED,
     fail,
 )
+from browser_control.lib.instance import (
+    Instance,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
     LOCK_FILE,
     PID_FILE,
     expand,
-    is_managed,
     lock_path,
-    norm,
     pid_file,
 )
 
@@ -232,62 +229,6 @@ def _remove(path: str) -> None:
         return
 
 
-def _target(profile: str = "", browser: str = "") -> str:
-    """The managed profile a `profile` verb acts on, or a refusal.
-
-    The scoped/named profile wins; otherwise it is the default instance for
-    that browser, the same one `open` would use. Anything outside the root is
-    refused: this CLI manages its own root, and a wipe aimed at somebody's real
-    profile is the mistake this rule exists to prevent.
-    """
-    wanted = str(profile or "").strip() or scope()
-    if wanted:
-        path = expand(wanted)
-        if not is_managed(path):
-            fail(ERR_NOT_MANAGED,
-                 f"{path} is not under {root()} — this CLI only manages the "
-                 "profiles in its own root (BROWSER_CONTROL_ROOT); it will not "
-                 "reset or seed into somebody's real browser profile")
-    else:
-        path = profile_dir(binary(browser))
-    if os.path.islink(path):
-        # a symlinked DIRECTORY is a tree this CLI did not make: the per-child
-        # guard in `_copy` cannot see the top level, and a wipe would follow
-        # the link. Checked for the DEFAULT instance too, not only a named one
-        # (a review found `seed` wrote through such a link into a live profile).
-        fail(ERR_NOT_MANAGED,
-             f"{path} is a symlink — this CLI manages real profile "
-             "directories, and a link can point a seed or a wipe at a tree "
-             "it does not own")
-    return path
-
-
-def _live_pid(profile: str) -> int:
-    """The pid of the browser running on that profile, or 0.
-
-    Compared by NORMALISED path: a browser spells its `--user-data-dir` however
-    it was launched (a trailing slash, a `..`, a symlinked root), and an exact
-    string compare read a live profile as idle — which for `profile reset` means
-    wiping a running browser's directory (a review flagged it).
-    """
-    if not profile:
-        return 0
-    wanted = norm(profile)
-    for row in browser_lib.browsers():
-        if row["pid"] and norm(str(row["profile"])) == wanted:
-            return as_int(row["pid"])
-    return 0
-
-
-def _refuse_live(profile: str, verb: str) -> None:
-    pid = _live_pid(profile)
-    if pid:
-        fail(ERR_PROFILE_LIVE,
-             f"pid {pid} is running on {profile} — {verb} under a live browser "
-             "corrupts the profile (Chrome's own singleton warning says why): "
-             f"`close --profile {profile} --force` first")
-
-
 def info(profile: str = "") -> dict:
     """`profile info [--profile DIR]`: what exists under this CLI's root.
 
@@ -300,26 +241,21 @@ def info(profile: str = "") -> dict:
     """
     wanted = str(profile or "").strip() or scope()
     if wanted:
-        wanted = expand(wanted)
-        if not is_managed(wanted):
-            fail(ERR_NOT_MANAGED,
-                 f"{wanted} is not under {root()} — `profile info` reports "
-                 "the profiles this CLI manages; name one under the root")
+        wanted = Instance.resolve(profile, "", verb="info").path
     rows: list[dict] = []
     for path in profiles() if not wanted else [wanted]:
+        inst = Instance(path)
         facts = _tree(path)
-        live = next((r for r in browser_lib.browsers()
-                     if norm(str(r["profile"]))
-                     == norm(path)), None)
+        live = inst.browsers_row()
         name = os.path.basename(path)
         row: dict = {
             "name": name,
             "path": path,
             "exists": os.path.isdir(path),
-            "managed": is_managed(path),
+            "managed": inst.managed,
             "default_for": (name if name in browser_lib.BROWSER_BINS
                             and shutil.which(name) else ""),
-            "attached": browser_lib.is_attached(path),
+            "attached": inst.attached,
             "bytes": facts["bytes"],
             "files": facts["files"],
             "modified": (time.strftime(
@@ -389,18 +325,18 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     src = expand(source)
     if not os.path.isdir(src):
         fail(ERR_BAD_ARGS, f"profile seed: {src} is not a directory")
-    target = _target(profile, browser)
+    target = Instance.resolve(profile, browser, verb="seed").path
     dest = _seed_destination(src, target)
     if src == dest or src.startswith(dest + os.sep) \
             or dest.startswith(src + os.sep):
         fail(ERR_BAD_ARGS,
              f"profile seed: the source and the destination are the same "
              f"tree ({src} and {dest})")
-    _refuse_live(target, "seeding")
+    Instance(target).refuse_live("seeding")
     # the SOURCE may be running: that is a legitimate snapshot, so it is a
     # warning and not a refusal — Chrome flushes cookies to disk lazily, so what
     # is copied can lag the live state by a few seconds
-    source_pid = _live_pid(src)
+    source_pid = Instance(src).live_pid()
     held = True
     # `--dry` must not write anything: taking the target's lock CREATES the
     # target directory and its lock file, and the docstring promises "without
@@ -415,7 +351,7 @@ def seed(source: str = "", profile: str = "", browser: str = "",
             # PROFILE, and without it a concurrent `open` was not excluded at
             # all: `seed` could copy into a profile a browser had just been
             # started on (a review measured it). Re-checked UNDER the lock.
-            _refuse_live(target, "seeding")
+            Instance(target).refuse_live("seeding")
         existing = _has_content(target)
         if existing and not force and not dry:
             fail(ERR_PROFILE_EXISTS,
@@ -474,8 +410,8 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
     profile that is running refuses `profile-live`. The read-back is that the
     path is gone.
     """
-    target = _target(profile, browser)
-    _refuse_live(target, "resetting")
+    target = Instance.resolve(profile, browser, verb="reset").path
+    Instance(target).refuse_live("resetting")
     if not os.path.isdir(target):
         return {"ok": True, "profile": target, "reset": False,
                 "reason": "there was no profile to reset"}
@@ -492,7 +428,7 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         # check-then-act: without it, a reset could `rmtree` the directory a
         # browser was just being started on, and the liveness verdict above was
         # stale by construction (a review measured it)
-        _refuse_live(target, "resetting")       # re-checked UNDER the lock
+        Instance(target).refuse_live("resetting")   # re-checked UNDER the lock
         # …and the CONTENT guard belongs under it too: checked outside, a
         # profile could gain its first file between the check and the wipe, and
         # `--force` would then destroy a login nobody agreed to lose
