@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import contextlib
 import json
 import math
 import os
@@ -55,7 +54,7 @@ from typing import Any
 # The private helpers below are this layer's contract with lib.browser: the
 # tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
-from browser_control.lib import audit, cdp
+from browser_control.lib import audit, cdp, images
 from browser_control.lib import browser as tabs
 from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
     as_float,
@@ -70,7 +69,6 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ERR_CDP_ERROR,
     ERR_CHECK_NOT_VERIFIED,
     ERR_DIALOG_NOT_VERIFIED,
-    ERR_FILE_EXISTS,
     ERR_FOCUS_NOT_VERIFIED,
     ERR_FRAME_AMBIGUOUS,
     ERR_FRAME_NOT_SEPARATE,
@@ -94,7 +92,6 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ERR_SELECT_NOT_VERIFIED,
     ERR_UPLOAD_NOT_VERIFIED,
     ERR_WAIT_TIMEOUT,
-    ERR_WRITE_FAILED,
     ControlError,
     fail,
 )
@@ -112,6 +109,13 @@ _int = as_int
 _num = as_float
 _ints = as_ints
 _list = as_list
+
+# The screenshot file layer lives in lib/images.py; these private spellings
+# stay because the hermetic checks call them by name.
+_png_size = images.png_size
+_pixels = images.expected_pixels
+_shot_target = images.output_path
+_write_shot = images.write_atomic
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
@@ -197,8 +201,6 @@ FRAME_VERBS = frozenset({
 CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
 DIALOG_PROBE_S = 1.5        # how long the tab is given to prove it is awake
 DIALOG_CLEAR_S = 3.0        # how long the renderer is given to come back
-PNG_SIG = b"\x89PNG\r\n\x1a\n"
-SHOT_MAX_PX = 100_000        # a dimension no screenshot of this page can have
 TYPE_PAUSE_S = 0.008        # between keystrokes: the page's handlers need air
 MEDIA_TIMEOUT_S = 5.0       # how long a play/pause is given to take effect
 
@@ -2035,118 +2037,6 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
             "browser": tabs._brief(row)}           # noqa: SLF001
 
 
-def _png_size(data: bytes) -> list[int]:
-    """[width, height] from the PNG's OWN header, or [] when it is not one.
-
-    The file is judged by its bytes, not by the answer that produced it: a
-    screenshot whose header disagrees with the page's own geometry is refused
-    before it is written anywhere.
-    """
-    if len(data) < 24 or not data.startswith(PNG_SIG) or data[12:16] != b"IHDR":
-        return []
-    return [int.from_bytes(data[16:20], "big"),
-            int.from_bytes(data[20:24], "big")]
-
-
-def _pixels(css: int, dpr: float) -> int:
-    """CSS pixels → device pixels, or a refusal.
-
-    Both numbers come from the PAGE, so a nonsense pair must become a refusal
-    rather than an exception or a silently wrong expectation: this is the value
-    the PNG's own header is compared against.
-    """
-    try:
-        value = int(round(css * dpr))
-    except (OverflowError, ValueError) as e:
-        fail(ERR_SCREENSHOT_NOT_VERIFIED,
-             f"the page reports {css} px at devicePixelRatio {dpr:g}, which is "
-             f"not a size ({e}) — nothing was written")
-    if not 0 < value <= SHOT_MAX_PX:
-        fail(ERR_SCREENSHOT_NOT_VERIFIED,
-             f"the page reports {css} px at devicePixelRatio {dpr:g}, i.e. "
-             f"{value} device pixels — no screenshot of it exists — nothing "
-             "was written")
-    return value
-
-
-def _shot_target(path: str) -> str:
-    """The absolute path a screenshot may be written to, or a refusal."""
-    expanded = os.path.expanduser(str(path or ""))
-    if not os.path.isabs(expanded):
-        # the help and this function's own docstring say ABSOLUTE; a relative
-        # path used to be silently resolved against the CLI's cwd (a review
-        # flagged the mismatch with `tab upload`, which refuses one)
-        fail(ERR_BAD_ARGS,
-             f"tab screenshot: {path!r} must be an absolute path — this tool "
-             "writes where it was told, not where it happens to be run from")
-    target = os.path.abspath(expanded)
-    if os.path.isdir(target):
-        fail(ERR_BAD_ARGS, f"tab screenshot: {target} is a directory")
-    if not target.lower().endswith(".png"):
-        fail(ERR_BAD_ARGS,
-             f"tab screenshot: {path!r} must end in .png — the data IS a PNG, "
-             "and a name that says otherwise is a lie about the file")
-    parent = os.path.dirname(target)
-    if not os.path.isdir(parent):
-        fail(ERR_BAD_ARGS,
-             f"tab screenshot: {parent} is not a directory — create it first")
-    return target
-
-
-def _write_shot(target: str, data: bytes, force: bool) -> None:
-    """Write the PNG; refuse to clobber unless `force`.
-
-    Without `force` the open is EXCLUSIVE, so "it did not exist" is the
-    kernel's answer rather than a check that can lose a race. With `force` the
-    bytes land on a temporary name and are renamed into place, so a failed
-    write never replaces a good file.
-    """
-    if not force:
-        try:
-            handle = os.open(target,
-                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            fail(ERR_FILE_EXISTS,
-                 f"tab screenshot: {target} already exists — pass --force to "
-                 "replace it")
-        except OSError as e:
-            fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
-        try:
-            with os.fdopen(handle, "wb") as out:
-                out.write(data)
-        except OSError as e:
-            # the exclusive open succeeded, but the WRITE failed (ENOSPC,
-            # EFBIG…): without this the OSError escaped as ERR[internal] and
-            # left a truncated file at a path the caller was told was not
-            # written (a review flagged it)
-            with contextlib.suppress(OSError):
-                os.remove(target)
-            fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
-        return
-    temp = f"{target}.bc-{os.getpid()}.part"
-    try:
-        # EXCLUSIVE and never through a link: the predictable temp name was a
-        # pre-creatable symlink, and `open(..., "wb")` truncated whatever it
-        # pointed at (a review flagged CWE-377). A leftover temp is refused,
-        # not silently adopted.
-        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                         | os.O_NOFOLLOW, 0o644)
-    except FileExistsError:
-        fail(ERR_WRITE_FAILED,
-             f"tab screenshot: a leftover temporary file is in the way "
-             f"({temp}) — remove it and try again")
-    except OSError as e:
-        fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
-    try:
-        with os.fdopen(handle, "wb") as out:
-            out.write(data)
-        os.replace(temp, target)
-    except OSError as e:
-        with contextlib.suppress(OSError):
-            os.remove(temp)
-        fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
-
-
 def screenshot(path: str, full: bool = False, force: bool = False,
                tab: str = "", browser: str = "") -> dict:
     """`tab screenshot`: the page as a PNG the file's OWN header vouches for.
@@ -2161,7 +2051,7 @@ def screenshot(path: str, full: bool = False, force: bool = False,
     times `devicePixelRatio` — measured, those are EXACT on this browser. A
     file that would not match is not written at all.
     """
-    target = _shot_target(path)
+    target = images.output_path(path)
     row, tab_row = _resolve(tab, browser, for_write=False)
     with _session(row, tab_row) as session:
         metrics = session.evaluate(SHOT_METRICS)
@@ -2183,8 +2073,8 @@ def screenshot(path: str, full: bool = False, force: bool = False,
              "no size can be checked against — nothing was written")
     want = ([as_int(metrics.get("sw")), as_int(metrics.get("sh"))] if full
             else [as_int(metrics.get("iw")), as_int(metrics.get("ih"))])
-    expected = [_pixels(css, dpr) for css in want]
-    size = _png_size(data)
+    expected = [images.expected_pixels(css, dpr) for css in want]
+    size = images.png_size(data)
     if not size:
         fail(ERR_SCREENSHOT_NOT_VERIFIED,
              "the bytes are not a PNG (no signature, no IHDR) — nothing was "
@@ -2195,7 +2085,7 @@ def screenshot(path: str, full: bool = False, force: bool = False,
              f"{'document' if full else 'viewport'} is {want[0]}x{want[1]} CSS "
              f"px at devicePixelRatio {dpr:g} ({expected[0]}x{expected[1]} "
              "pixels) — nothing was written")
-    _write_shot(target, data, force)
+    images.write_atomic(target, data, force)
     return {"ok": True, "path": target, "bytes": len(data),
             "width": size[0], "height": size[1], "full": bool(full),
             "device_pixel_ratio": dpr, "css_size": want, "verified": True,
