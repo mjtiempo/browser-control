@@ -1167,7 +1167,9 @@ def action(verb: str, rest: list[str]) -> str:
 # the flags and the environment before the gate is asked anything.
 _POLICY = policy_lib.Policy()
 
-PLUGINS = plugins_lib.Registry()
+# One holder per process, RESET per invocation (attribute mutation, so no
+# module-level `global` is needed).
+PLUGINS = plugins_lib.PluginSet()
 
 
 def _verb_names() -> list[str]:
@@ -1176,7 +1178,7 @@ def _verb_names() -> list[str]:
 
 
 def _plugins_report() -> dict:
-    return {"plugins": PLUGINS.describe(), "plugin_errors": PLUGINS.errors}
+    return PLUGINS.report()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1184,14 +1186,13 @@ def main(argv: list[str] | None = None) -> int:
     # Plugins load once per invocation, BEFORE the help text and the gate:
     # `--help`/`selftest` report them, and the classes they declare have to be
     # in the surface before `allowed()` is asked anything.
-    global PLUGINS
-    PLUGINS = plugins_lib.load(reserved=set(HANDLERS) | {"help"})
-    capabilities.set_plugins({verb: tuple(spec["classes"])
-                              for verb, spec in PLUGINS.actions.items()})
+    PLUGINS.reset(plugins_lib.PluginSet.load(
+        reserved=set(HANDLERS) | {"help"}))
+    capabilities.set_plugins(PLUGINS.classes())
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)
-        for spec in PLUGINS.actions.values():
-            print(f"  {spec['usage']}")
+        for usage in PLUGINS.usages():
+            print(f"  {usage}")
         return 0
     # reset the per-invocation secret HERE, before any early refusal: a call
     # that refuses before the verb must not be stamped with the PREVIOUS
@@ -1251,7 +1252,7 @@ def main(argv: list[str] | None = None) -> int:
         handler = HANDLERS.get(verb)
         if handler is None:
             plugin = PLUGINS.actions.get(verb)
-            handler = plugin["run"] if plugin is not None else None
+            handler = plugin.run if plugin is not None else None
         if handler is None:
             raise ControlError(ERR_UNKNOWN_COMMAND,
                                f"{verb} (have: {', '.join(_verb_names())})")
