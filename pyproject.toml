@@ -30,6 +30,7 @@ packages = ["browser_control", "browser_control.lib",
             "browser_control.lib.dom",
             "browser_control.lib.profile",
             "browser_control.lib.plugins",
+            "browser_control.cli.verbs",
             "browser_control.cli"]
 
 [tool.setuptools.dynamic]

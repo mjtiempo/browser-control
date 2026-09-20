@@ -247,9 +247,9 @@ def t_cli_new_verbs_grammar() -> None:
         calls.append(("screenshot", path, full, force, tab, browser))
         return {"ok": True}
 
-    originals = (cli_main.activate, dom.hover, dom.check, dom.select,
+    originals = (browser.activate, dom.hover, dom.check, dom.select,
                  dom.dialog, dom.screenshot)
-    (cli_main.activate, dom.hover, dom.check, dom.select, dom.dialog,
+    (browser.activate, dom.hover, dom.check, dom.select, dom.dialog,
      dom.screenshot) = (fake_activate, fake_hover, fake_check, fake_select,
                         fake_dialog, fake_shot)   # type: ignore[assignment]
     try:
@@ -293,7 +293,7 @@ def t_cli_new_verbs_grammar() -> None:
             ("screenshot", shot_c, True, True, "", ""),
         ], calls
     finally:
-        (cli_main.activate, dom.hover, dom.check, dom.select, dom.dialog,
+        (browser.activate, dom.hover, dom.check, dom.select, dom.dialog,
          dom.screenshot) = originals               # type: ignore[assignment]
     # these refuse in argv, before any browser is involved
     for argv in (["tab", "activate", "a", "b"],
@@ -406,8 +406,8 @@ def t_cli_dispatch() -> None:
         seen["browser"] = browser
         return {"ok": True, "opened": list(urls or [])}
 
-    original = cli_main.launch
-    cli_main.launch = fake_launch          # type: ignore[assignment]
+    original = browser.launch
+    browser.launch = fake_launch          # type: ignore[assignment]
     try:
         rc, out, err = run_cli(["open", "https://a.example",
                                 "https://b.example",
@@ -421,7 +421,7 @@ def t_cli_dispatch() -> None:
         rc, out, err = run_cli(["open"])          # no URL is allowed
         assert rc == 0 and json.loads(out)["opened"] == [], (rc, out, err)
     finally:
-        cli_main.launch = original         # type: ignore[assignment]
+        browser.launch = original         # type: ignore[assignment]
 
 
 def t_cli_tab_grammar() -> None:
@@ -456,10 +456,10 @@ def t_cli_tab_grammar() -> None:
                       all_tabs, tuple(excepts or ()), tuple(like or ()), dry))
         return {"ok": True, "closed": []}
 
-    originals = (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
-                 cli_main.close_tabs)
-    (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
-     cli_main.close_tabs) = (fake_new_tab, fake_list_tabs, fake_tab_info,
+    originals = (browser.new_tab, browser.list_tabs, browser.tab_info,
+                 browser.close_tabs)
+    (browser.new_tab, browser.list_tabs, browser.tab_info,
+     browser.close_tabs) = (fake_new_tab, fake_list_tabs, fake_tab_info,
                              fake_close_tabs)          # type: ignore[assignment]
     try:
         for argv in (["tab"], ["tab", "https://a.example", "https://b.example"],
@@ -479,8 +479,8 @@ def t_cli_tab_grammar() -> None:
             ("tab close", ("a", "b"), "", None, None, False, (), (), False),
         ], calls
     finally:
-        (cli_main.new_tab, cli_main.list_tabs, cli_main.tab_info,
-         cli_main.close_tabs) = originals             # type: ignore[assignment]
+        (browser.new_tab, browser.list_tabs, browser.tab_info,
+         browser.close_tabs) = originals             # type: ignore[assignment]
     # a bare word is not a URL — and that is decided before any browser is
     # touched (the real service, not the fake)
     rc, _out, err = run_cli(["tab", "frobnicate"])
@@ -501,9 +501,9 @@ def t_cli_lists() -> None:
         calls.append(("info", browser))
         return {"ok": True, "running": False}
 
-    originals = (cli_main.list_browsers, cli_main.browser_info)
-    cli_main.list_browsers = fake_list_browsers     # type: ignore[assignment]
-    cli_main.browser_info = fake_browser_info       # type: ignore[assignment]
+    originals = (browser.list_browsers, browser.browser_info)
+    browser.list_browsers = fake_list_browsers     # type: ignore[assignment]
+    browser.browser_info = fake_browser_info       # type: ignore[assignment]
     try:
         rc, out, err = run_cli(["list"])
         assert rc == 0 and json.loads(out)["browsers"] == rows, (rc, out, err)
@@ -517,7 +517,7 @@ def t_cli_lists() -> None:
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     finally:
-        (cli_main.list_browsers, cli_main.browser_info) = originals  # type: ignore[assignment]
+        (browser.list_browsers, browser.browser_info) = originals  # type: ignore[assignment]
 
 
 def t_cli_attach_grammar() -> None:
@@ -537,9 +537,9 @@ def t_cli_attach_grammar() -> None:
         calls.append(("detach", port, pid, profile, detach_all))
         return {"ok": True}
 
-    originals = (cli_main.attach, cli_main.attachments, cli_main.detach)
-    (cli_main.attach, cli_main.attachments,
-     cli_main.detach) = (fake_attach, fake_attachments,
+    originals = (browser.attach, browser.attachments, browser.detach)
+    (browser.attach, browser.attachments,
+     browser.detach) = (fake_attach, fake_attachments,
                          fake_detach)                # type: ignore[assignment]
     try:
         for argv in (["attach", "--port", "43903"],
@@ -567,8 +567,8 @@ def t_cli_attach_grammar() -> None:
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     finally:
-        (cli_main.attach, cli_main.attachments,
-         cli_main.detach) = originals                # type: ignore[assignment]
+        (browser.attach, browser.attachments,
+         browser.detach) = originals                # type: ignore[assignment]
     # the library refuses what the CLI cannot know: none, or two selectors
     for argv in (["attach"], ["attach", "--port", "1", "--pid", "2"],
                  ["detach"]):
@@ -663,8 +663,8 @@ def t_cli_nav_grammar() -> None:
         calls.append(("reload", tab, browser))
         return {"ok": True}
 
-    originals = (cli_main.nav, cli_main.history, cli_main.reload)
-    cli_main.nav, cli_main.history, cli_main.reload = (
+    originals = (browser.nav, browser.history, browser.reload_page)
+    browser.nav, browser.history, browser.reload_page = (
         fake_nav, fake_history, fake_reload)         # type: ignore[assignment]
     try:
         for argv in (["tab", "nav", "https://a.example"],
@@ -693,8 +693,8 @@ def t_cli_nav_grammar() -> None:
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     finally:
-        (cli_main.nav, cli_main.history,
-         cli_main.reload) = originals                # type: ignore[assignment]
+        (browser.nav, browser.history,
+         browser.reload_page) = originals                # type: ignore[assignment]
 
 
 def t_same_page() -> None:
@@ -1051,8 +1051,8 @@ def t_cli_close_bulk() -> None:
                       tuple(excepts or ()), tuple(like or ()), dry))
         return {"ok": True}
 
-    original = cli_main.close_tabs
-    cli_main.close_tabs = fake_close                   # type: ignore[assignment]
+    original = browser.close_tabs
+    browser.close_tabs = fake_close                   # type: ignore[assignment]
     try:
         for argv in (["tab", "close", "--title", "a"],
                      ["tab", "close", "--url", "http://a/"],
@@ -1085,7 +1085,7 @@ def t_cli_close_bulk() -> None:
             ((), "", None, None, False, ("a", "b"), (), False),
         ], calls
     finally:
-        cli_main.close_tabs = original                 # type: ignore[assignment]
+        browser.close_tabs = original                 # type: ignore[assignment]
     # `close` reaches the service with --force and with a named browser, and
     # refuses anything else (the selector is the same one attach/detach take)
     stops: list[tuple] = []
@@ -1095,8 +1095,8 @@ def t_cli_close_bulk() -> None:
         stops.append((browser, force, port, pid, profile))
         return {"ok": True}
 
-    original_stop = cli_main.stop
-    cli_main.stop = fake_stop                         # type: ignore[assignment]
+    original_stop = browser.stop
+    browser.stop = fake_stop                         # type: ignore[assignment]
     try:
         for argv in (["close"], ["close", "--force"],
                      ["close", "--browser=x", "--force"],
@@ -1114,7 +1114,7 @@ def t_cli_close_bulk() -> None:
                          ("", False, 0, 0, fake_profile),
                          ("", True, 0, 42, "")], stops
     finally:
-        cli_main.stop = original_stop                  # type: ignore[assignment]
+        browser.stop = original_stop                  # type: ignore[assignment]
     for argv in (["close", "now"], ["close", "--pid", "1", "--port", "2"],
                  ["close", "--pid"], ["close", "--list"],
                  # --profile IS a selector: naming two ways is bad-args
@@ -1407,10 +1407,10 @@ def t_cli_argv_is_strict() -> None:
     def boom(*_args: object, **_kwargs: object) -> dict:
         raise AssertionError("an argv that must be refused reached the service")
 
-    originals = (cli_main.launch, cli_main.new_tab, cli_main.close_tabs,
-                 cli_main.stop)
-    (cli_main.launch, cli_main.new_tab, cli_main.close_tabs,
-     cli_main.stop) = (boom, boom, boom, boom)   # type: ignore[assignment]
+    originals = (browser.launch, browser.new_tab, browser.close_tabs,
+                 browser.stop)
+    (browser.launch, browser.new_tab, browser.close_tabs,
+     browser.stop) = (boom, boom, boom, boom)   # type: ignore[assignment]
     try:
         rc, _out, err = run_cli(["frobnicate"])
         assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
@@ -1432,8 +1432,8 @@ def t_cli_argv_is_strict() -> None:
         rc, out, _err = run_cli(["--help"])
         assert rc == 0 and out.startswith("usage: browser-control-cli"), out
     finally:
-        (cli_main.launch, cli_main.new_tab, cli_main.close_tabs,
-         cli_main.stop) = originals              # type: ignore[assignment]
+        (browser.launch, browser.new_tab, browser.close_tabs,
+         browser.stop) = originals              # type: ignore[assignment]
 
 
 def t_selftest() -> None:
@@ -1447,14 +1447,14 @@ def t_selftest() -> None:
     # the one thing selftest must FAIL on: without websockets no verb can
     # speak CDP, and an install that cannot reach a browser should say so at
     # once rather than at the first `tabs`
-    original = cli_main.cdp.websockets
-    cli_main.cdp.websockets = None
+    original = cdp.websockets
+    cdp.websockets = None
     try:
         rc, _out, err = run_cli(["selftest"])
         assert rc == 2, (rc, err)
         assert "ERR[no-websockets]" in err, err
     finally:
-        cli_main.cdp.websockets = original
+        cdp.websockets = original
 
 
 def t_a_working_log_makes_no_scratch_dirs() -> None:
@@ -2101,8 +2101,8 @@ def t_frames_and_points() -> None:
         calls.append((text, selector, at))
         return {"ok": True}
 
-    original = cli_main.dom.click
-    cli_main.dom.click = fake_click                   # type: ignore[assignment]
+    original = dom.click
+    dom.click = fake_click                   # type: ignore[assignment]
     try:
         rc, _out, err = run_cli(["tab", "click", "--at", "10,20"])
         assert rc == 0 and calls == [(None, None, "10,20")], (rc, calls, err)
@@ -2113,7 +2113,7 @@ def t_frames_and_points() -> None:
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
         assert calls == [(None, None, "10,20")], calls
     finally:
-        cli_main.dom.click = original                 # type: ignore[assignment]
+        dom.click = original                 # type: ignore[assignment]
     # a point that is not two numbers refuses BEFORE any browser is touched
     # (the real `dom.click`, so the real `_at_point` judgement runs)
     rc, _out, err = run_cli(["tab", "click", "--at", "10"])
