@@ -42,6 +42,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
+from browser_control.lib.text import flat  # pyright: ignore[reportMissingImports]
 
 # The PATH names, in preference order. The profile is keyed off the basename
 # of whichever resolves, so the same browser cannot end up with two profiles.
@@ -231,19 +232,6 @@ def _match_spec(tabs: list[dict], spec: str) -> list[dict]:
             or low in str(t.get("title") or "").lower()]
 
 
-def _flat(text: object, cap: int = 60) -> str:
-    """One bounded, single-line piece of PAGE text for a refusal message.
-
-    A page owns its titles; a title can carry newlines (which would forge
-    extra stderr lines) or terminal escape sequences, and refusal messages are
-    printed raw. The recipe is `audit._oneline`'s, plus a cap and the C0/DEL/C1
-    filter `cdp._foreign` uses.
-    """
-    line = " ".join(str(text or "").split())[:cap]
-    return "".join(ch for ch in line
-                   if ch >= " " and not "\x7f" <= ch <= "\x9f")
-
-
 def resolve_tab(rows: list[dict], spec: str) -> dict:
     """One page row for a spec, within ONE browser's tabs.
 
@@ -255,11 +243,11 @@ def resolve_tab(rows: list[dict], spec: str) -> dict:
         if needle.lower().startswith("id:"):
             fail("no-page-tab", f"no tab with id {needle[3:]!r} "
                                 "(the tab was probably closed)")
-        have = ", ".join(_flat(r.get("title"), 30)
+        have = ", ".join(flat(r.get("title"), 30)
                           for r in rows[:4]) or "none"
         fail("no-page-tab", f"no tab matches {needle!r} (have: {have})")
     if len(hits) > 1:
-        titles = ", ".join(_flat(r.get("title"), 30) for r in hits[:5])
+        titles = ", ".join(flat(r.get("title"), 30) for r in hits[:5])
         fail("tab-ambiguous", f"{needle!r} matches {len(hits)} tabs: {titles}")
     return hits[0]
 
@@ -1668,7 +1656,7 @@ def _resolve_across(specs: list[str], browser: str,
         else:
             hits = _spec_hits(rows, tabs_of, spec)
         if not hits:
-            have = ", ".join(f'{_flat(t["title"], 20) or _flat(t["url"], 20)} '
+            have = ", ".join(f'{flat(t["title"], 20) or flat(t["url"], 20)} '
                              f'({r["exe"]})'
                              for r in rows for t in tabs_of[r["pid"]][:2])
             fail("no-page-tab",
@@ -1676,7 +1664,7 @@ def _resolve_across(specs: list[str], browser: str,
         if len(hits) > 1:
             # pid in the message: two browsers can share an executable name
             where = ", ".join(
-                f'{_flat(t["title"], 20) or _flat(t["id"], 8)} in {r["exe"]}'
+                f'{flat(t["title"], 20) or flat(t["id"], 8)} in {r["exe"]}'
                 f':{os.path.basename(str(r["profile"]))} (pid {r["pid"]})'
                 for r, t, _index in hits[:4])
             fail("tab-ambiguous",
@@ -1839,7 +1827,7 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
                 else:
                     foreign.append(_foreign_row(row, tab))
         if not hits:
-            have = ", ".join(f'{_flat(t["title"], 20) or _flat(t["url"], 20)}'
+            have = ", ".join(f'{flat(t["title"], 20) or flat(t["url"], 20)}'
                              for r in rows for t in _tabs_or_fail(r)[:2])
             if loose:
                 fail("no-page-tab",
@@ -2126,7 +2114,7 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
              "no page tabs to act on — open one with "
              "`browser-control-cli tab URL`")
     if len(pairs) > 1:
-        where = ", ".join(f'{_flat(t["title"], 20) or _flat(t["url"], 30)} '
+        where = ", ".join(f'{flat(t["title"], 20) or flat(t["url"], 30)} '
                           f'({r["exe"]})' for r, t in pairs[:5])
         fail("tab-ambiguous",
              f"{len(pairs)} page tabs are open — name one with --tab SPEC "

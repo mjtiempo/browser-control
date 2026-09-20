@@ -61,6 +61,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
+from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
@@ -992,24 +993,10 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
     return rows[index]
 
 
-def _safe(text: object, limit: int = 60) -> str:
-    """Page-supplied text made safe to PRINT on a terminal.
-
-    A refusal that names an element goes to stderr — the operator's terminal —
-    and a page can put ANSI/OSC escape sequences in an aria-label, a title or an
-    `<option>`, where "decoration" is an instruction (title spoofing, screen
-    clearing, and on some terminals a clipboard write). `json.dumps` already
-    escapes the JSON replies; this is the human-facing refusal path.
-    """
-    kept = "".join(ch for ch in str(text or "")
-                   if ch >= " " and not "\x7f" <= ch <= "\x9f")
-    return kept[:limit]
-
-
 def _describe(row: dict) -> str:
     """One match, in a few words, for a refusal message (page text, sanitised)."""
-    return (f"{_safe(row.get('tag'), 20)} "
-            f"{_safe(row.get('name') or row.get('text'), 40)}").strip()
+    return (f"{foreign(row.get('tag'), 20)} "
+            f"{foreign(row.get('name') or row.get('text'), 40)}").strip()
 
 
 def _element(row: dict) -> dict:
@@ -1565,7 +1552,7 @@ def click(text: str | None = None, selector: str | None = None,
             fail("occluded",
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
-                 f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
+                 f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
         # press at the point the HIT-TEST proved, not at the element's raw
         # centre: the probe CLAMPS into the viewport, so an element whose centre
@@ -1647,7 +1634,7 @@ def hover(text: str | None = None, selector: str | None = None,
             fail("occluded",
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
-                 f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
+                 f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
         point = _ints(element.get("hit_at") or element.get("point"), 2)
         if len(point) < 2:
@@ -1739,7 +1726,7 @@ def check(text: str | None = None, selector: str | None = None,
             fail("occluded",
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
-                 f"{_safe(element.get('hit_element'), 50) or 'nothing'} "
+                 f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
         point = _ints(element.get("hit_at") or element.get("point"), 2)
         if len(point) < 2:
@@ -1823,14 +1810,14 @@ def select(text: str | None = None, selector: str | None = None,
                  "SET of options, and this verb sets one (use `tab js`)")
         matched = _int(probe.get("matched"))
         if not matched:
-            names = [_safe(name, 30)
+            names = [foreign(name, 30)
                      for name in _list(probe.get("labels"))[:12]]
             labels = ", ".join(names)
             fail("no-match",
                  f"no <option> in {_describe(element)} has value or label "
                  f"{wanted!r} (have: {labels or 'none'})")
         if matched > 1:
-            candidates = ", ".join(_safe(name, 30) for name in
+            candidates = ", ".join(foreign(name, 30) for name in
                                    _list(probe.get("candidates"))[:5])
             fail("ambiguous-option",
                  f"{matched} options in {_describe(element)} match "

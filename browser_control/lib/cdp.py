@@ -26,6 +26,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
+from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 # The one third-party dependency. Typed as Any so a missing package is a
 # runtime refusal (`no-websockets`), not an import-time traceback — and so the
@@ -424,8 +425,8 @@ async def _call(ws_url: str, method: str, params: dict,
                     err = msg.get("error")
                     if err:
                         fail("cdp-error",
-                             f"{method}: {_foreign(err.get('message'))} "
-                             f"(code {_foreign(err.get('code'), 40)})")
+                             f"{method}: {foreign(err.get('message'))} "
+                             f"(code {foreign(err.get('code'), 40)})")
                     return msg.get("result") or {}
                 if time.time() >= deadline:
                     fail("cdp-error",
@@ -448,21 +449,6 @@ def call(ws_url: str, method: str, params: dict | None = None,
     return asyncio.run(_call(ws_url, method, params or {}, timeout))
 
 
-def _foreign(text: object, cap: int = 200) -> str:
-    """One bounded, escape-free line of text THIS TOOL did not write.
-
-    A page or a browser can put newlines, terminal control sequences (OSC 52,
-    CSI) or megabytes into an exception description, and the CLI prints
-    refusal messages verbatim. Untrusted text is flattened and capped here
-    rather than reaching the terminal raw; C0, DEL and C1 controls are
-    dropped, ordinary Unicode text is kept (a review flagged the injection
-    and the unbounded size).
-    """
-    line = " ".join(str(text or "").split())[:cap]
-    return "".join(ch for ch in line
-                   if ch >= " " and not "\x7f" <= ch <= "\x9f")
-
-
 def _value_of(result: dict) -> Any:
     """The value one Runtime.evaluate reply carries, or a refusal.
 
@@ -475,7 +461,7 @@ def _value_of(result: dict) -> Any:
         exception = details.get("exception") or {}
         text = str(exception.get("description") or details.get("text")
                    or "page JS exception")
-        fail("js-error", f"Runtime.evaluate: {_foreign(text)}")
+        fail("js-error", f"Runtime.evaluate: {foreign(text)}")
     value = (result.get("result") or {}).get("value")
     try:
         # A string's cap is about the TEXT the page produced, not its JSON
@@ -811,8 +797,8 @@ class Session:
                 err = msg.get("error")
                 if err:
                     raise ControlError(
-                        "cdp-error", f"{method}: {_foreign(err.get('message'))} "
-                        f"(code {_foreign(err.get('code'), 40)})")
+                        "cdp-error", f"{method}: {foreign(err.get('message'))} "
+                        f"(code {foreign(err.get('code'), 40)})")
                 return msg.get("result") or {}
             if msg.get("method"):
                 self.events.append({"method": msg["method"],
@@ -867,7 +853,7 @@ class Session:
             exception = details.get("exception") or {}
             text = str(exception.get("description") or details.get("text")
                        or "page JS exception")
-            fail("js-error", f"Runtime.evaluate: {_foreign(text)}")
+            fail("js-error", f"Runtime.evaluate: {foreign(text)}")
         return str((result.get("result") or {}).get("objectId") or "")
 
     def close(self) -> None:

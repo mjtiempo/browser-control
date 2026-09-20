@@ -29,6 +29,8 @@ import tempfile
 import time
 from typing import Any
 
+from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
+
 LOG_ENV = "BROWSER_CONTROL_LOG"
 DEFAULT_LOG = "~/.local/state/browser-control/actions.jsonl"
 SRC = "browser-control-cli"
@@ -87,12 +89,6 @@ def _bounded(parts: list[str]) -> list[str]:
     return out
 
 
-def _oneline(text: object) -> str:
-    """One line, always: a message that carries a newline would forge a line
-    in a log a reader parses."""
-    return " ".join(str(text or "").split())
-
-
 class ActionLog:
     """The log itself: one instance, one line per command invocation."""
 
@@ -138,7 +134,7 @@ class ActionLog:
         if not path:
             return
         row: dict = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                     "src": SRC, "action": _oneline(action), "ok": bool(ok),
+                     "src": SRC, "action": foreign(action), "ok": bool(ok),
                      # CENSOR FIRST, truncate after: `_censor` only replaces an
                      # argument when the WHOLE secret is present, so truncating
                      # first wrote the first 4096 characters of any longer
@@ -148,9 +144,9 @@ class ActionLog:
                      "args": _bounded([_brief(self._censor(str(a)))
                                        for a in (args or [])])}
         if code:
-            row["code"] = _oneline(code)
+            row["code"] = foreign(code)
         if detail:
-            row["detail"] = _oneline(detail)[:200]
+            row["detail"] = foreign(detail)[:200]
         if self._secret:
             row["redacted"] = True
         line = json.dumps(row) + "\n"
