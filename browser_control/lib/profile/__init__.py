@@ -33,12 +33,11 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import time
 
 from browser_control.lib import attachments as attachments_lib
 from browser_control.lib import browser as browser_lib
-from browser_control.lib import locks
+from browser_control.lib import locks, seedtree
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     profiles,
     root,
@@ -50,7 +49,6 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ERR_PROFILE_EXISTS,
     ERR_RESET_FAILED,
     ERR_RESET_NOT_VERIFIED,
-    ERR_SEED_FAILED,
     ERR_SEED_NOT_VERIFIED,
     fail,
 )
@@ -81,152 +79,33 @@ SEED_SKIP = frozenset({
 })
 
 
-def _tree(source: str, count_skips: bool = False) -> dict:
-    """Everything a naive copy would touch: bytes, files, dirs, skips, links.
-
-    Walks by hand rather than with `copytree` for four reasons: the skips are by
-    name at any depth, symlinks are COUNTED and not followed (a profile can
-    contain links into the filesystem, and following one would write wherever it
-    pointed), a directory that cannot be READ is counted rather than skipped
-    silently (it used to make a partial copy verify: neither the walk nor the
-    check saw it — a review flagged it), and the numbers are what the reply
-    reports.
-
-    `count_skips` descends into SEED_SKIP directories so a caller about to
-    DELETE the tree (`profile reset`) sees and reports what the skip list would
-    otherwise hide — a half-gigabyte `Cache` used to be wiped as "0 files,
-    0 bytes" (a review flagged it). `seed` keeps the default: it copies nothing
-    from there, so those bytes are not part of its manifest.
-    """
-    facts = {"bytes": 0, "files": 0, "dirs": 0, "links": 0, "special": 0,
-             "links_planted": 0, "unreadable": [], "skipped": [],
-             "entries": []}
-    stack = [source]
-    while stack:
-        here = stack.pop()
-        try:
-            children = list(os.scandir(here))
-        except OSError as e:
-            facts["unreadable"].append(f"{here}: {e}")
-            continue
-        for child in children:
-            if child.name in SEED_SKIP:
-                facts["skipped"].append(child.name)
-                if count_skips and child.is_dir(follow_symlinks=False):
-                    stack.append(child.path)
-                continue
-            if child.is_symlink():
-                facts["links"] += 1
-                continue
-            if child.is_dir(follow_symlinks=False):
-                facts["dirs"] += 1
-                stack.append(child.path)
-                continue
-            try:
-                info_ = child.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if not stat.S_ISREG(info_.st_mode):
-                # a FIFO or a device: copying one blocks with no deadline, and
-                # the manifest has to agree with what the copy will do
-                facts["special"] += 1
-                continue
-            facts["bytes"] += info_.st_size
-            facts["files"] += 1
-            facts["entries"].append(child.path)
-    return facts
 
 
-def _missing(entries: list[str], source: str, target: str) -> list[str]:
-    """Files the COPY walked that the target does not have, by size.
-
-    The oracle is the manifest `_copy` actually walked, not a second walk of
-    the source: re-walking read the source's CURRENT state, so Chrome's lazy
-    cookie flush refused a seed whose files HAD landed, and a file that vanished
-    from the source between the copy and the check was never verified at all (a
-    review flagged it).
-    """
-    absent: list[str] = []
-    for path in entries:
-        relative = os.path.relpath(path, source)
-        landed = os.path.join(target, relative)
-        try:
-            if os.path.getsize(landed) != os.path.getsize(path):
-                absent.append(relative)
-        except OSError:
-            absent.append(relative)
-        if len(absent) >= 8:
-            break
-    return absent
 
 
-def _copy(source: str, target: str, dry: bool) -> dict:
-    """Copy source into target, skipping SEED_SKIP names and symlinks."""
-    facts = _tree(source)
-    if dry:
-        return facts
-    stack = [(source, target)]
-    while stack:
-        here, there = stack.pop()
-        try:
-            os.makedirs(there, exist_ok=True)
-        except OSError as e:
-            fail(ERR_SEED_FAILED, f"cannot create {there}: {e}")
-        try:
-            children = list(os.scandir(here))
-        except OSError:
-            continue
-        for child in children:
-            if child.name in SEED_SKIP or child.is_symlink():
-                continue
-            destination = os.path.join(there, child.name)
-            if os.path.islink(destination):
-                # never write THROUGH a link that is already there — neither a
-                # file one nor a DIRECTORY one: `copy2` follows the first and
-                # `makedirs(exist_ok=True)` accepts the second, so the bytes
-                # would land outside this profile (a review flagged the dir
-                # case, which this check used to be BELOW). Counted and named.
-                facts["links_planted"] += 1
-                continue
-            if child.is_dir(follow_symlinks=False):
-                stack.append((child.path, destination))
-                continue
-            try:
-                mode = child.stat(follow_symlinks=False).st_mode
-            except OSError:
-                continue
-            if not stat.S_ISREG(mode):
-                continue                 # the manifest already counted it
-            try:
-                shutil.copy2(child.path, destination)
-            except OSError as e:
-                fail(ERR_SEED_FAILED, f"cannot copy {child.path}: {e}")
-    return facts
+
+
+
+
+
+
+
+def _tree(source: str, count_skips: bool = False) -> seedtree.TreeFacts:
+    """The profile tree walk, with the seed/copy skip policy named here."""
+    return seedtree.walk(source, skips=SEED_SKIP, descend_skips=count_skips)
+
+
+def _copy(source: str, target: str, dry: bool) -> seedtree.TreeFacts:
+    """The verified copy, with the seed/copy skip policy named here."""
+    return seedtree.copy_verified(source, target, dry, skips=SEED_SKIP)
 
 
 def _has_content(path: str) -> bool:
-    """Does that directory exist and hold anything? Never raises.
-
-    Our OWN bookkeeping does not count. Taking the profile lock (whose file
-    lives inside the profile) before this check made a fresh, empty profile look
-    occupied, so `profile seed` into a new directory refused `profile-exists` —
-    measured while fixing the lock order, and the reason this filters them out.
-    """
-    ours = (LOCK_FILE, PID_FILE)
-    try:
-        return bool([name for name in os.listdir(path) if name not in ours])
-    except OSError:
-        return False
+    """`seedtree.has_content`, with this CLI's own bookkeeping named."""
+    return seedtree.has_content(path, ours=(LOCK_FILE, PID_FILE))
 
 
-def _remove(path: str) -> None:
-    """Remove a file if it is there. A removal that cannot happen is not a
-    failure — the thing it was removing is what matters, and the caller checks
-    that."""
-    try:
-        os.remove(path)
-    except OSError:
-        return
+_remove = seedtree.remove
 
 
 def info(profile: str = "") -> dict:
@@ -369,7 +248,7 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                  "could not be read, so this copy is PARTIAL and nothing "
                  "was verified: " + "; ".join(facts["unreadable"][:3]))
         else:
-            absent = _missing(facts["entries"], src, dest)
+            absent = seedtree.missing(facts["entries"], src, dest)
             if absent:
                 fail(ERR_SEED_NOT_VERIFIED,
                      f"{len(absent)} file(s) did not land in {dest}: "
