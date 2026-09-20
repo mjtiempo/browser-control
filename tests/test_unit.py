@@ -16,6 +16,7 @@ import io
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -35,16 +36,17 @@ from browser_control.lib import (  # noqa: E402
     cdp,
     dom,
 )
+from browser_control.lib import (
+    profile as profile_lib,
+)
 from browser_control.lib.errors import ControlError  # noqa: E402
 
-# A hermetic run must not append to the user's REAL action log — it makes
-# hundreds of invocations. Turning the log OFF was worse than it looked: it
-# hid that the default directory was never created, so every write to it was
-# silently dropped. The suite logs into its own scratch directory instead
-# (/tmp/browser-control-<timestamp>) and then CHECKS that the file has lines.
-LOG_DIR = audit.scratch_dir() or tempfile.mkdtemp(prefix="browser-control-")
-SUITE_LOG = os.path.join(LOG_DIR, "hermetic-actions.jsonl")
-os.environ.setdefault("BROWSER_CONTROL_LOG", SUITE_LOG)
+# Importing this module must be INERT: it used to mkdtemp a /tmp directory and
+# `setdefault` the log, so a host that exports BROWSER_CONTROL_LOG had every
+# in-process call append to the sheet's real log (the battery's own lesson,
+# applied late — a review flagged it). `main()` pins the log, the root and the
+# policy, unconditionally.
+SUITE_LOG = "/dev/null"          # replaced in main()
 
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -120,6 +122,7 @@ def t_launch_flags() -> None:
 
 def t_profile_keyed_by_binary() -> None:
     with tempfile.TemporaryDirectory() as tmp:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         try:
             path = browser.profile_dir("/usr/bin/google-chrome-stable")
@@ -129,7 +132,7 @@ def t_profile_keyed_by_binary() -> None:
             assert browser.profiles() == [], browser.profiles()
             assert browser.live_profiles() == [], browser.live_profiles()
         finally:
-            del os.environ["BROWSER_CONTROL_ROOT"]
+            _restore_root(keep_root)
 
 
 def t_port_file() -> None:
@@ -561,6 +564,7 @@ def t_attach_bookkeeping() -> None:
     (attached). The point is the boundary, not the plumbing.
     """
     with tempfile.TemporaryDirectory() as tmp:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         ours = os.path.join(tmp, "ours")
         foreign = os.path.join(tmp, "foreign")
@@ -620,7 +624,7 @@ def t_attach_bookkeeping() -> None:
         finally:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
-            del os.environ["BROWSER_CONTROL_ROOT"]
+            _restore_root(keep_root)
 
 
 def t_cli_nav_grammar() -> None:
@@ -691,6 +695,7 @@ def t_one_tab_addressing() -> None:
     """A page verb acts on the only tab, refuses several, and never writes
     into a browser that is neither ours nor attached."""
     with tempfile.TemporaryDirectory() as tmp:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         ours = os.path.join(tmp, "ours")
         foreign = os.path.join(tmp, "foreign")
@@ -845,7 +850,7 @@ def t_one_tab_addressing() -> None:
         finally:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
-            del os.environ["BROWSER_CONTROL_ROOT"]
+            _restore_root(keep_root)
 
 
 def t_cli_dom_grammar() -> None:
@@ -1344,13 +1349,21 @@ def t_cli_media_grammar() -> None:
 
 
 def t_cmdline_value() -> None:
-    """Chrome writes `--flag=value` and `--flag value`; both are read."""
+    """Chrome writes `--flag=value` and `--flag value`; both are read.
+
+    The NUL-separated argv form is the one that keeps a value with SPACES
+    whole: flattening NULs to spaces made a profile path containing one look
+    like a different profile (a review flagged it).
+    """
     value = browser._cmdline_value                            # noqa: SLF001
-    assert value("chrome --user-data-dir=/x/y z", "--user-data-dir") == "/x/y"
-    assert value("chrome --user-data-dir /x/y z", "--user-data-dir") == "/x/y"
-    assert value("chrome --user-data-dir=", "--user-data-dir") == ""
-    assert value("chrome --user-data-dir", "--user-data-dir") == ""
+    assert value("chrome\0--user-data-dir=/x/y z\0--type=renderer",
+                 "--user-data-dir") == "/x/y z"
+    assert value("chrome\0--user-data-dir\0/x/y z", "--user-data-dir") \
+        == "/x/y z"
+    assert value("chrome\0--user-data-dir=", "--user-data-dir") == ""
+    assert value("chrome\0--user-data-dir", "--user-data-dir") == ""
     assert value("chrome", "--user-data-dir") == ""
+    # the legacy space-joined form is still parsed
     assert value("chrome --remote-debugging-port=0",
                  "--remote-debugging-port") == "0"
 
@@ -1425,7 +1438,14 @@ def t_a_working_log_makes_no_scratch_dirs() -> None:
     make for itself.
     """
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    pattern = os.path.join(tempfile.gettempdir(), "browser-control-*")
+    # the AUDIT scratch shape (`browser-control-<stamp>-<rand>`), not the bare
+    # `browser-control-*`: the battery's throwaway roots match that glob too,
+    # and a concurrent battery run made this check fail for the wrong reason
+    # (a review flagged it)
+    pattern = os.path.join(
+        tempfile.gettempdir(),
+        "browser-control-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-"
+        "[0-9][0-9][0-9][0-9][0-9][0-9]-*")
     before = set(glob.glob(pattern))
     with tempfile.TemporaryDirectory() as tmp:
         env = {**os.environ,
@@ -2222,7 +2242,399 @@ def t_click_presses_at_the_proven_point() -> None:
     assert reply["under"] == "button#x", reply
 
 
+def _restore_root(keep: str | None) -> None:
+    """Put BROWSER_CONTROL_ROOT back the way the caller found it."""
+    if keep is None:
+        os.environ.pop("BROWSER_CONTROL_ROOT", None)
+    else:
+        os.environ["BROWSER_CONTROL_ROOT"] = keep
+
+
+def t_audit_redaction_beats_truncation() -> None:
+    """A secret longer than ARG_CAP is redacted BEFORE the cap truncates it.
+
+    The order was `_censor(_brief(...))`: a 5000-char secret became
+    `secret[:4096] + marker`, which no longer CONTAINED the secret, so
+    `_censor` passed it through and the first 4096 characters went to disk
+    still marked `redacted: true` (a review measured it).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            secret = "S" * 5000
+            audit.LOG.begin("tab")
+            audit.LOG.mark_secret(secret)
+            audit.LOG.write(action="tab", ok=True, args=["insert", secret])
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+            audit.LOG.begin("")
+        with open(path, encoding="utf-8") as handle:
+            line = handle.read().strip()
+        assert "S" * 64 not in line, "a prefix of the secret reached the log"
+        assert json.loads(line)["redacted"] is True, line
+        assert "<redacted: 5000 chars>" in line, line
+
+
+def t_audit_short_write_is_not_success() -> None:
+    """`os.write` may write fewer bytes; that is not a complete line."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        real_write = os.write
+
+        def half(fd: int, data: bytes) -> int:
+            return real_write(fd, data[:max(1, len(data) // 2)])
+
+        try:
+            os.write = half                      # type: ignore[assignment]
+            audit.LOG.begin("tab")
+            audit.LOG.write(action="tab", args=["x"])
+        finally:
+            os.write = real_write                # type: ignore[assignment]
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+            audit.LOG.begin("")
+        with open(path, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle]
+        assert len(rows) == 1 and rows[0]["action"] == "tab", rows
+
+
+def t_http_read_never_uses_a_proxy() -> None:
+    """`http_proxy` must not divert a loopback CDP read.
+
+    `build_opener(_LoopbackOnly)` kept urllib's environment-driven
+    ProxyHandler, so the answer parsed as CDP JSON came from the proxy — for a
+    DEAD port, too (a review measured it). With `ProxyHandler({})` the dead
+    port is a plain `cdp-unreachable` and the proxy is never asked.
+    """
+    server, proxy_port = _fake_endpoint([])
+    try:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            dead = probe.getsockname()[1]
+        keep = {name: os.environ.pop(name)
+                for name in ("http_proxy", "HTTP_PROXY", "no_proxy",
+                             "NO_PROXY")
+                if name in os.environ}
+        try:
+            os.environ["http_proxy"] = f"http://127.0.0.1:{proxy_port}"
+            refusal(lambda: cdp._get_bytes(f"http://127.0.0.1:{dead}/json"),
+                    "cdp-unreachable")
+        finally:
+            os.environ.update(keep)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def t_transport_typed_refusals() -> None:
+    """A malformed endpoint URL is `cdp-not-local`, not a raw ValueError."""
+    refusal(lambda: cdp._checked_ws("ws://[::1/x"), "cdp-not-local")
+    # a page's exception text is one bounded, escape-free line
+    result = {"exceptionDetails": {"exception": {
+        "description": "\x1b]52;c;AAAA\x07\n" + "A" * 5000}}}
+    try:
+        cdp._value_of(result)
+        raise AssertionError("expected ERR[js-error]")
+    except ControlError as e:
+        assert e.code == "js-error", e.code
+        assert "\x1b" not in e.message and "\n" not in e.message, e.message
+        assert len(e.message) <= 300, len(e.message)
+
+
+def t_text_cap_counts_characters() -> None:
+    """A CJK page is not refused because `json.dumps` escapes it 6x."""
+    value = "中" * 20_000
+    got = cdp._value_of({"result": {"value": json.dumps(
+        {"text": value}, ensure_ascii=False)}})
+    assert got["text"] == value
+
+
+def t_wait_own_port_requires_a_verified_owner() -> None:
+    """An answering endpoint that is not ours must not satisfy `open`."""
+    server, port = _fake_endpoint([
+        {"type": "page", "id": "S", "title": "stranger",
+         "url": "https://stranger/"}])
+    try:
+        with tempfile.TemporaryDirectory() as profile:
+            Path(profile, cdp.PORT_FILE).write_text(
+                f"{port}\n/devtools/browser/x\n")
+            assert browser._wait_port(profile, timeout=0.5) is True, \
+                "the fake endpoint answers"
+            assert browser._wait_own_port(profile, timeout=0.5) is False, \
+                "answering is not owning"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def t_tab_count_does_not_refuse_on_a_stranger() -> None:
+    """The read-back after a close sums what verified; it never refuses."""
+    row = {"pid": 1, "exe": "chrome", "path": "/x",
+           "profile": os.path.join(tempfile.gettempdir(), "stranger"),
+           "profile_from": "", "managed": False, "attached": False,
+           "cdp": {"port": 9222, "reachable": True, "verified": False,
+                   "reason": "not ours"}}
+    real = browser.browsers
+    browser.browsers = lambda: [row]              # type: ignore[assignment]
+    try:
+        assert browser._tab_count() == 0
+    finally:
+        browser.browsers = real                   # type: ignore[assignment]
+
+
+def t_unreadable_tab_list_is_not_absence() -> None:
+    """`close` must not read "cannot read the list" as "the ids are gone"."""
+    with tempfile.TemporaryDirectory() as profile:
+        Path(profile, cdp.PORT_FILE).write_text("1515\n")
+
+        def boom(path: str) -> list[dict]:
+            raise ControlError("cdp-error", "the endpoint answered no JSON")
+
+        real = browser._rows
+        browser._rows = boom                      # type: ignore[assignment]
+        try:
+            refusal(lambda: browser._wait_ids_gone(profile, ["A"],
+                                                   timeout=0.1),
+                    "close-tab-not-verified")
+        finally:
+            browser._rows = real                  # type: ignore[assignment]
+
+
+def t_page_titles_are_flat_in_refusals() -> None:
+    """A page title cannot forge stderr lines or inject escapes."""
+    rows = [{"id": "A", "title": "a\nERR[fake]", "url": "https://a/"},
+            {"id": "B", "title": "a\x1b]52;c;AAAA\x07", "url": "https://a/"}]
+    try:
+        browser.resolve_tab(rows, "a")
+        raise AssertionError("expected ERR[tab-ambiguous]")
+    except ControlError as e:
+        assert e.code == "tab-ambiguous", e.code
+        assert "\n" not in e.message and "\x1b" not in e.message, e.message
+
+
+def t_profile_symlink_target_is_refused() -> None:
+    """seed/reset never write or wipe THROUGH a symlinked target."""
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        real = os.path.join(root, "real")
+        os.makedirs(real)
+        link = os.path.join(root, "link")
+        os.symlink(real, link)
+        source = os.path.join(root, "source")
+        os.makedirs(source)
+        Path(source, "Cookies").write_text("login", encoding="utf-8")
+        refusal(lambda: profile_lib.seed(source=source, profile=link,
+                                         force=True), "not-managed")
+        refusal(lambda: profile_lib.reset(profile=link, force=True),
+                "not-managed")
+        refusal(lambda: profile_lib.info(profile=tempfile.gettempdir()),
+                "not-managed")
+        assert not os.path.exists(os.path.join(real, "Cookies")), \
+            "a seed wrote through the symlink"
+    finally:
+        _restore_root(keep_root)
+
+
+def t_seed_dry_writes_nothing() -> None:
+    """`--dry` promises "without writing anything" — it creates no target."""
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        source = os.path.join(root, "source")
+        os.makedirs(source)
+        Path(source, "Cookies").write_text("login", encoding="utf-8")
+        target = os.path.join(root, "fresh")
+        reply = profile_lib.seed(source=source, profile=target, dry=True)
+        assert reply["dry"] is True and reply["verified"] is False, reply
+        assert not os.path.exists(target), \
+            "a dry run created the target profile"
+    finally:
+        _restore_root(keep_root)
+
+
+def t_reset_guard_counts_skipped_content() -> None:
+    """A cache-only profile refuses `reset` without `--force` — and counts."""
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        target = os.path.join(root, "cache-only")
+        os.makedirs(os.path.join(target, "Cache"))
+        Path(target, "Cache", "data").write_bytes(b"x" * 4096)
+        refusal(lambda: profile_lib.reset(profile=target), "profile-exists")
+        reply = profile_lib.reset(profile=target, force=True)
+        assert reply["files"] >= 1 and reply["bytes_freed"] >= 4096, reply
+    finally:
+        _restore_root(keep_root)
+
+
+def t_screenshot_rules_and_symlinks() -> None:
+    """A relative screenshot path is refused; the temp name is O_NOFOLLOW."""
+    refusal(lambda: dom._shot_target("shot.png"), "bad-args")
+    with tempfile.TemporaryDirectory() as tmp:
+        victim = os.path.join(tmp, "victim")
+        Path(victim).write_bytes(b"keep")
+        target = os.path.join(tmp, "shot.png")
+        os.symlink(victim, f"{target}.bc-{os.getpid()}.part")
+        with contextlib.suppress(ControlError):
+            # the refusal is the fix's answer; a success is checked below by
+            # the victim's bytes, which must not move either way
+            dom._write_shot(target, b"\x89PNG\r\n\x1a\n", force=True)
+        assert Path(victim).read_bytes() == b"keep", \
+            "the write followed a planted symlink"
+
+
+def t_page_lists_are_guarded() -> None:
+    """`tab select` slices page answers only when they ARE lists."""
+    assert dom._list(["a", "b"]) == ["a", "b"]
+    assert dom._list(7) == []
+    assert dom._list({"labels": []}) == []
+    assert dom._list(None) == []
+
+
+def t_cli_flag_hardening() -> None:
+    """Empty names, repeated policies and dropped scopes are refused."""
+    for argv in (["--profile", "", "profile", "info"],
+                 ["--browser", "", "info"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    for argv in (["selftest", "--deny", "read", "--deny", "write"],
+                 ["selftest", "--allow=read", "--allow=code"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+    for argv in (["attach", "--list", "--profile",
+                  os.path.join(tempfile.gettempdir(), "stranger")],
+                 ["profile", "info", "--browser", "chrome"],
+                 ["tab", "click", "--at", "1,2", "--index", "3"],
+                 ["tab", "hover", "--at", "1,2", "--index", "3"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
+def t_cli_no_args_is_logged() -> None:
+    """The no-args refusal lands in the action log like every other."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            rc, _out, err = run_cli([])
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+        assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+        with open(path, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle]
+        assert rows and rows[-1]["code"] == "bad-args", rows
+
+
+def t_cli_broken_pipe_is_a_refusal() -> None:
+    """A closed stdout reader is ERR[broken-pipe]/2, not status 120."""
+    cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)                      # the reader is gone
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(cwd, "browser-control-cli"),
+             "selftest"],
+            stdout=write_fd, stderr=subprocess.PIPE, cwd=cwd,
+            check=False)
+    finally:
+        os.close(write_fd)
+    assert proc.returncode == 2, (proc.returncode, proc.stderr)
+    assert b"ERR[broken-pipe]" in proc.stderr, proc.stderr
+    assert b"Exception ignored" not in proc.stderr, proc.stderr
+
+
+def t_audit_modes_caps_redirect_and_symlink() -> None:
+    """The previous round's fixes each carry their own check.
+
+    The log's mode, a redirect off loopback, a symlink planted at a seed
+    destination, and the argv caps (a review found all four claimed in
+    docs/progress.md and none asserted).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "deep", "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            audit.LOG.begin("open")
+            audit.LOG.write(action="open", args=["x"])
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+            audit.LOG.begin("")
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(audit.scratch_dir()).st_mode) == 0o700
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            audit.LOG.begin("tab")
+            audit.LOG.write(action="tab", args=["x" * 9000, "y"])
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+            audit.LOG.begin("")
+        row = json.loads(Path(path).read_text(encoding="utf-8").strip())
+        assert len(row["args"][0]) < 4200, row
+        assert "<truncated: 9000 chars>" in row["args"][0], row
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", "http://example.com/json")
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as profile:
+            Path(profile, cdp.PORT_FILE).write_text(
+                f"{int(server.server_address[1])}\n")
+            refusal(lambda: cdp.page_rows(profile), "cdp-not-local")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "source")
+        target = os.path.join(tmp, "target")
+        os.makedirs(source)
+        os.makedirs(target)
+        Path(source, "Cookies").write_text("login", encoding="utf-8")
+        victim = os.path.join(tmp, "victim")
+        Path(victim).write_text("keep", encoding="utf-8")
+        os.symlink(victim, os.path.join(target, "Cookies"))
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+        os.environ["BROWSER_CONTROL_ROOT"] = tmp
+        try:
+            # the planted link is NOT written through: the copy skips it and
+            # the read-back refuses `seed-not-verified` instead of claiming a
+            # login that did not land
+            refusal(lambda: profile_lib.seed(source=source, profile=target,
+                                             force=True), "seed-not-verified")
+        finally:
+            _restore_root(keep_root)
+        assert Path(victim).read_text(encoding="utf-8") == "keep"
+
+
 def main() -> int:
+    global SUITE_LOG
+    # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
+    # log, root or policy must not change what the suite exercises — or let it
+    # append to the user's real log, or reach a real browser.
+    log_dir = (audit.scratch_dir()
+               or tempfile.mkdtemp(prefix="browser-control-"))
+    SUITE_LOG = os.path.join(log_dir, "hermetic-actions.jsonl")
+    os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+    os.environ["BROWSER_CONTROL_ROOT"] = tempfile.mkdtemp(
+        prefix="browser-control-hermetic-")
+    for name in ("BROWSER_CONTROL_ALLOW", "BROWSER_CONTROL_DENY"):
+        os.environ.pop(name, None)
     for name, fn in (
         ("safe_url policy", t_safe_url),
         ("resolve_tab refuses ambiguity", t_resolve_tab),
@@ -2264,6 +2676,31 @@ def main() -> int:
         ("attach opens the write gate", t_attach_bookkeeping),
         ("cli lists browsers and their info", t_cli_lists),
         ("cmdline flag values are read", t_cmdline_value),
+        ("audit redacts beyond the cap", t_audit_redaction_beats_truncation),
+        ("a short write is not a line", t_audit_short_write_is_not_success),
+        ("the CDP read never uses a proxy", t_http_read_never_uses_a_proxy),
+        ("malformed endpoints and page text refuse typed",
+         t_transport_typed_refusals),
+        ("the text cap counts characters", t_text_cap_counts_characters),
+        ("open needs its OWN endpoint",
+         t_wait_own_port_requires_a_verified_owner),
+        ("the close read-back tolerates a stranger",
+         t_tab_count_does_not_refuse_on_a_stranger),
+        ("an unreadable tab list is not absence",
+         t_unreadable_tab_list_is_not_absence),
+        ("page titles are flat in refusals",
+         t_page_titles_are_flat_in_refusals),
+        ("a symlinked profile target is refused",
+         t_profile_symlink_target_is_refused),
+        ("seed --dry writes nothing", t_seed_dry_writes_nothing),
+        ("reset counts skipped content",
+         t_reset_guard_counts_skipped_content),
+        ("screenshot rules and symlinks", t_screenshot_rules_and_symlinks),
+        ("prior fixes carry checks", t_audit_modes_caps_redirect_and_symlink),
+        ("page lists are guarded", t_page_lists_are_guarded),
+        ("cli flags refuse silent drops", t_cli_flag_hardening),
+        ("the no-args refusal is logged", t_cli_no_args_is_logged),
+        ("a broken pipe is a refusal", t_cli_broken_pipe_is_a_refusal),
         ("cli argv is strict", t_cli_argv_is_strict),
         ("selftest proves the install", t_selftest),
         ("pid liveness", t_pid_alive),

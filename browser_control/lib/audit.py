@@ -139,7 +139,13 @@ class ActionLog:
             return
         row: dict = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                      "src": SRC, "action": _oneline(action), "ok": bool(ok),
-                     "args": _bounded([self._censor(_brief(str(a)))
+                     # CENSOR FIRST, truncate after: `_censor` only replaces an
+                     # argument when the WHOLE secret is present, so truncating
+                     # first wrote the first 4096 characters of any longer
+                     # secret in cleartext (a review flagged it). Redacting to
+                     # `<redacted: N chars>` first also keeps the budget math
+                     # honest.
+                     "args": _bounded([_brief(self._censor(str(a)))
                                        for a in (args or [])])}
         if code:
             row["code"] = _oneline(code)
@@ -183,7 +189,18 @@ class ActionLog:
                         # than write it where it cannot be protected (a review
                         # flagged that the chmod could lose the record)
                         return False
-                os.write(handle, line.encode("utf-8"))
+                payload = line.encode("utf-8")
+                offset = 0
+                while offset < len(payload):
+                    # `os.write` may write fewer bytes than asked (a full
+                    # filesystem, RLIMIT_FSIZE); the return value was dropped,
+                    # so a short write silently truncated the line while
+                    # `_append` still said it succeeded — no scratch fallback,
+                    # no record (a review flagged it).
+                    written = os.write(handle, payload[offset:])
+                    if written <= 0:
+                        return False
+                    offset += written
             finally:
                 os.close(handle)
             return True

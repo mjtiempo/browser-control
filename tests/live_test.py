@@ -299,6 +299,10 @@ def cmdline(pid: int) -> str:
 # to a scan keyed on ROOT alone (a review measured that a killed run left one
 # running).
 THROWAWAY_PREFIX = "browser-control-live-"
+# A running battery writes its pid here, inside its root: `sweep_stale_roots`
+# skips any root whose marker names a live process, so a concurrent run is
+# never collected out from under itself.
+RUN_MARKER = ".browser-control-live.pid"
 FIXTURE_PROFILES: set[str] = set()
 
 
@@ -487,6 +491,17 @@ def sweep_stale_roots() -> list[str]:
                 continue                 # maybe a run starting up right now
         except OSError:
             continue
+        # a run that is ALIVE writes its pid here: mtime alone protected only a
+        # run younger than two minutes, and a two-minute-old battery in a
+        # browser-free window was fair game for another run's sweep (a review
+        # flagged it)
+        try:
+            owner = int(Path(path, RUN_MARKER).read_text(
+                encoding="utf-8").strip())
+        except (OSError, ValueError):
+            owner = 0
+        if owner and browser_lib._pid_alive(owner):  # noqa: SLF001
+            continue
         if procs_on(path):
             continue                     # a live browser still runs on it
         shutil.rmtree(path, ignore_errors=True)
@@ -546,7 +561,10 @@ def c_open_starts_a_browser() -> str:
     while time.time() < deadline and not listening(port):
         time.sleep(0.2)
     assert listening(port), f"port {port} accepts no connection"
-    assert "Chrome" in str(http_json(port, "/json/version").get("Browser")), \
+    version = str(http_json(port, "/json/version").get("Browser"))
+    assert version and any(tok in version.lower()
+                           for tok in ("chrome", "chromium", "brave", "edge",
+                                       "vivaldi")), \
         "the endpoint is not a Chromium"
     line = cmdline(pid)
     assert f"--user-data-dir={profile}" in line, f"pid {pid}: {line[:120]}"
@@ -847,7 +865,7 @@ def c_dom_press_reaches_the_page() -> str:
 
 def c_dom_upload_attaches_a_file() -> str:
     """`tab upload` fills the one control JavaScript cannot: a HIDDEN input."""
-    path = os.path.join(tempfile.gettempdir(), "browser-control-upload.txt")
+    path = os.path.join(ROOT, "upload-me.txt")
     Path(path).write_text("uploaded by the battery\n", encoding="utf-8")
     size = os.path.getsize(path)
     try:
@@ -869,6 +887,8 @@ def c_dom_password_never_reaches_the_log() -> str:
     ok_json("tab", "focus", "Password Field")
     inserted = ok_json("tab", "insert", secret)
     assert inserted["verified"] is True, inserted
+    assert secret not in json.dumps(inserted), \
+        "the secret rode home in the insert reply"
     log = Path(SUITE_LOG)
     assert log.exists(), "the battery's own action log was not written"
     text = log.read_text(encoding="utf-8")
@@ -1261,7 +1281,9 @@ def c_list_reports_the_listener() -> str:
     assert endpoint["reachable"] is True, endpoint
     assert endpoint["verified"] is True, endpoint
     assert endpoint["listener"]["pid"] == STATE["pid"], endpoint
-    assert "chrome" in str(endpoint["listener"]["exe"]), endpoint
+    assert any(tok in str(endpoint["listener"]["exe"]).lower()
+               for tok in ("chrome", "chromium", "brave", "edge",
+                           "vivaldi")), endpoint
     return (f'listener {endpoint["listener"]["pid"]} '
             f'({endpoint["listener"]["exe"]}) verified, and it is our pid')
 
@@ -1280,7 +1302,7 @@ def c_cdp_not_local() -> str:
                                              _quiet_handler())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     fake_port = int(server.server_address[1])
-    port_file = Path(ROOT, "google-chrome-stable", "DevToolsActivePort")
+    port_file = Path(str(STATE["profile"]), "DevToolsActivePort")
     original = port_file.read_text(encoding="utf-8")
     port_file.write_text(f"{fake_port}\n/devtools/browser/battery\n",
                          encoding="utf-8")
@@ -1497,14 +1519,6 @@ def c_frames() -> str:
     # dispatch and the point's reach are what this check stands behind; the
     # default-action oracle lives on the DOM page (where it passes) and §5.24
     # records the frames-page anomaly rather than asserting it either way.
-    return ("3 frames (2 separate): named by index and URL, driven inside; a "
-            "point dispatched through to the control")
-    # NOT asserted here: that the page's handler FIRES. Twice measured, on this
-    # fixture inside the battery, it did not — while the same page, the same
-    # order, live cross-origin frames, a background tab and the same commands
-    # all fire in isolation (five reproductions). The dispatch and the point's
-    # reach are what this check can stand behind; the anomaly is logged in
-    # docs/progress.md §5.24 rather than asserted either way.
     return ("3 frames (2 separate): named by index and URL, driven inside; a "
             "point dispatched through to the control")
 
@@ -2195,6 +2209,7 @@ def cleanup() -> None:
 def main() -> int:
     global ROOT, LOG_DIR, SUITE_LOG
     ROOT = fixture_profile()
+    Path(ROOT, RUN_MARKER).write_text(str(os.getpid()), encoding="utf-8")
     LOG_DIR = audit.scratch_dir() or ROOT
     SUITE_LOG = os.path.join(LOG_DIR, "live-actions.jsonl")
     reason = prereq()

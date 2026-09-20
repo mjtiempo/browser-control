@@ -1,6 +1,7 @@
 # browser-control — plan
 
-Status: agreed scope, not yet implemented.
+Status: slice 1 delivered — this file is the design, `docs/progress.md` is the
+state of the work (what exists, what it does not do yet, and what comes next).
 Derived from the `omctrl` browser-control review (see "Defects designed out").
 
 A Python library that drives this machine's Chromium over CDP on a **managed
@@ -219,11 +220,13 @@ or a bare word that is not a URL → `bad-args` (never dropped).
 
 Delivered so far: `open`, `close`, `list`, `info`, `attach`, `attach --list`,
 `detach`, `tab [URL…]`, `tab list`, `tab info`, `tab close`, `tab nav`,
-`tab back`, `tab forward`, `tab reload`, `tab js`, `tab wait`, `tab find`,
-`tab text`, `tab click`, `tab scroll`, `tab focus`, `tab press`, `tab insert`,
-`tab type`, `tab upload`, `tab media`, `selftest` — the rest of the list is
-the target
-surface; [`progress.md`](progress.md) is the state of the work.
+`tab back`, `tab forward`, `tab reload`, `tab activate`, `tab frames`, `tab js`,
+`tab wait`, `tab find`, `tab text`, `tab click`, `tab hover`, `tab check`,
+`tab scroll`, `tab select`, `tab focus`, `tab press`, `tab insert`,
+`tab type`, `tab upload`, `tab screenshot`, `tab dialog`, `tab media`,
+`profile info`, `profile seed`, `profile reset`, `selftest` — the rest of the
+list is the target surface; [`progress.md`](progress.md) is the state of the
+work.
 
 ## 4. Verification appetite
 
@@ -258,9 +261,12 @@ unclear oracle into a claim of absence.**
    already available.
 5. **L4 only where wrong-target is plausible.** Close-by-match, upload target,
    click hit-test.
-6. **`ok` ≠ `verified`.** Mutations never return `{ok: true, verified: false}`;
-   the honest alternative is `unverifiable` + a note, never a claim of
-   absence.
+6. **`ok` ≠ `verified`.** A mutation with a READ-BACK never returns
+   `{ok: true, verified: false}`; the honest alternative is `unverifiable` +
+   a note, never a claim of absence. A declared escape hatch (`tab js`,
+   `tab press`, the `--at` point input) is the exception and says so with
+   `verified: false` plus a note — rule 11 below, made explicit here because
+   the battery asserts exactly that pair (a review flagged the flat "never").
 7. **Unclear oracle ≠ absent effect.** Refuse only when the missing effect can
    be named; otherwise report `unverifiable` with the reason.
 8. **Every refusal carries its code.** `code` in the reply and the audit log,

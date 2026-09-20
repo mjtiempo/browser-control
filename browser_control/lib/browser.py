@@ -231,6 +231,19 @@ def _match_spec(tabs: list[dict], spec: str) -> list[dict]:
             or low in str(t.get("title") or "").lower()]
 
 
+def _flat(text: object, cap: int = 60) -> str:
+    """One bounded, single-line piece of PAGE text for a refusal message.
+
+    A page owns its titles; a title can carry newlines (which would forge
+    extra stderr lines) or terminal escape sequences, and refusal messages are
+    printed raw. The recipe is `audit._oneline`'s, plus a cap and the C0/DEL/C1
+    filter `cdp._foreign` uses.
+    """
+    line = " ".join(str(text or "").split())[:cap]
+    return "".join(ch for ch in line
+                   if ch >= " " and not "\x7f" <= ch <= "\x9f")
+
+
 def resolve_tab(rows: list[dict], spec: str) -> dict:
     """One page row for a spec, within ONE browser's tabs.
 
@@ -242,11 +255,11 @@ def resolve_tab(rows: list[dict], spec: str) -> dict:
         if needle.lower().startswith("id:"):
             fail("no-page-tab", f"no tab with id {needle[3:]!r} "
                                 "(the tab was probably closed)")
-        have = ", ".join(str(r.get("title") or "")[:30]
+        have = ", ".join(_flat(r.get("title"), 30)
                           for r in rows[:4]) or "none"
         fail("no-page-tab", f"no tab matches {needle!r} (have: {have})")
     if len(hits) > 1:
-        titles = ", ".join(str(r.get("title") or "")[:30] for r in hits[:5])
+        titles = ", ".join(_flat(r.get("title"), 30) for r in hits[:5])
         fail("tab-ambiguous", f"{needle!r} matches {len(hits)} tabs: {titles}")
     return hits[0]
 
@@ -275,22 +288,30 @@ def _proc_text(pid: int, name: str) -> str:
     browser whose `--user-data-dir=` fell past it looked like no browser at all
     (a review flagged it; measured here, the longest cmdline is 2344 bytes, so
     the cap was reachable in principle rather than in practice).
+
+    NULs are PRESERVED: they are the argv boundaries, and flattening them to
+    spaces made `_cmdline_value` cut a `--user-data-dir` containing a space at
+    the first space — the browser this CLI started became a stranger (a review
+    flagged it).
     """
     try:
         with open(f"/proc/{pid}/{name}", "rb") as f:
             raw = f.read()
     except OSError:
         return ""
-    return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    return raw.decode("utf-8", "replace").rstrip("\0\n")
 
 
 def _cmdline_value(cmd: str, flag: str) -> str:
     """The value of `--flag=value` (or `--flag value`) in a /proc cmdline.
 
     Both spellings: Chrome accepts both and a launcher may write either. ""
-    when the flag is absent.
+    when the flag is absent. Splits on NUL when it is there (the real argv
+    form), so a value containing spaces survives; the legacy space-joined
+    form is still parsed for a caller that passed one.
     """
-    parts = str(cmd).split()
+    text = str(cmd)
+    parts = text.split("\0") if "\0" in text else text.split()
     for index, part in enumerate(parts):
         if part.startswith(flag + "="):
             return part[len(flag) + 1:]
@@ -316,7 +337,18 @@ def _main_processes() -> list[tuple[int, str, str]]:
         except ValueError:
             continue
         cmd = _proc_text(pid, "cmdline")
-        if not cmd or "--type=" in cmd:
+        if not cmd:
+            continue
+        # Chrome rewrites a CHILD's cmdline in place (space-separated, one
+        # trailing NUL) while the main process keeps real argv boundaries. Both
+        # forms must be recognised: per-entry `startswith` for the NUL form, a
+        # substring only for the rewritten form — a main process whose URL
+        # argument merely CONTAINS `--type=` must stay a main process (a review
+        # flagged that), and a rewritten child title has no entries to check.
+        if "\0" in cmd:
+            if any(part.startswith("--type=") for part in cmd.split("\0")):
+                continue
+        elif "--type=" in cmd:
             continue
         exe = os.path.basename(os.path.realpath(f"/proc/{pid}/exe"))
         if exe in BROWSER_EXES:
@@ -838,10 +870,13 @@ def not_local_refusal(profile: str, port: int, reason: str) -> None:
     """
     fail("cdp-not-local",
          f"port {port} on {profile} answers, but it is not that profile's "
-         f"browser: {reason}. Nothing was sent to it. The port file is stale "
-         "or the port was taken — run `browser-control-cli close --force` "
+         f"browser: {reason}. Nothing was sent to it. Either the port file is "
+         "stale or the port was taken — run `browser-control-cli close --force` "
          "(it finds the profile's own process by its cmdline) and then "
-         "`open` again")
+         "`open` again — or the browser was started WITHOUT "
+         "`--user-data-dir`, so its command line does not name a profile and "
+         "this CLI cannot verify it: start it with "
+         "`--user-data-dir=<the profile>` to attach to it")
 
 
 def _drive_refusal(browser: str, rows: list[dict]) -> None:
@@ -1029,6 +1064,27 @@ def _wait_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
     return False
 
 
+def _wait_own_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
+    """The endpoint THIS call started must ANSWER and VERIFY.
+
+    `_wait_port` only proves something answers, and the port file it reads can
+    be the stale one the caller just decided to ignore: `open` then reported
+    `started: true` with a stranger's port and the stranger's tabs (a review
+    flagged it). The owner is re-judged on the CURRENT port file, memo evicted,
+    until it verifies — the browser this call spawned names the profile in its
+    own command line, so its endpoint is the one that can pass.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        port = cdp.port_of(profile)
+        if port:
+            _OWNER_CACHE.pop((profile, port), None)
+            if endpoint_owner(profile, port).get("verified"):
+                return True
+        time.sleep(0.25)
+    return False
+
+
 def _wait_rows(profile: str, timeout: float = TAB_WAIT_S) -> list[dict]:
     deadline = time.time() + timeout
     rows: list[dict] = []
@@ -1077,6 +1133,20 @@ def _wait_url(profile: str, url: str,
     return None
 
 
+def _require_tab_list_readable(profile: str, error: ControlError) -> None:
+    """Refuse to read "the list could not be read" as "the ids are gone".
+
+    Only an unreachable endpoint with no port file at all is the browser
+    having exited. A timeout, a malformed `/json` or an oversized body refuses
+    instead of claiming absence — the same class of bug `_tabs_or_fail` was
+    fixed for (a review flagged it).
+    """
+    if error.code != "cdp-unreachable" or cdp.port_of(profile):
+        fail("close-tab-not-verified",
+             f"the tab list could not be read back after the close: "
+             f"{error.message}")
+
+
 def _wait_ids_gone(profile: str, ids: list[str],
                    timeout: float = PORT_WAIT_S) -> list[str]:
     """The ids STILL in that browser's tab list after a bounded wait.
@@ -1089,7 +1159,8 @@ def _wait_ids_gone(profile: str, ids: list[str],
     while True:
         try:
             open_ids = {r["id"] for r in _rows(profile)}
-        except ControlError:
+        except ControlError as e:
+            _require_tab_list_readable(profile, e)
             open_ids = set()          # the browser is gone: so are its tabs
         left = [i for i in ids if i in open_ids]
         if not left or time.time() >= deadline:
@@ -1349,7 +1420,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
             first = wanted[0] if wanted else "about:blank"
             requests = [first, *wanted[1:]]
             _record_pid(profile, _spawn([path, *flags(profile), first]))
-            if not _wait_port(profile):
+            if not _wait_own_port(profile):
                 fail("launch-failed",
                      f"started {path} on {profile} but no CDP endpoint "
                      f"answered within {LAUNCH_WAIT_S:g}s")
@@ -1484,7 +1555,11 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
                  f"a browser answers on {target} but no Chromium process on "
                  "it can be identified — refusing to signal a process this "
                  "CLI did not start")
-        if row and not _pid_on_profile(target_pid, target):
+        if not _pid_on_profile(target_pid, target):
+            # re-verified IMMEDIATELY before the signal, on BOTH paths: the
+            # managed path took its pid before `_page_count` (an HTTP GET plus
+            # a /proc walk), so a browser that exited in that window could have
+            # its pid recycled under the SIGTERM (a review flagged it).
             fail("browser-not-stopped",
                  f"pid {target_pid} is gone, or no longer runs {target} — "
                  "nothing was signalled")
@@ -1593,7 +1668,7 @@ def _resolve_across(specs: list[str], browser: str,
         else:
             hits = _spec_hits(rows, tabs_of, spec)
         if not hits:
-            have = ", ".join(f'{t["title"][:20] or t["url"][:20]} '
+            have = ", ".join(f'{_flat(t["title"], 20) or _flat(t["url"], 20)} '
                              f'({r["exe"]})'
                              for r in rows for t in tabs_of[r["pid"]][:2])
             fail("no-page-tab",
@@ -1601,7 +1676,7 @@ def _resolve_across(specs: list[str], browser: str,
         if len(hits) > 1:
             # pid in the message: two browsers can share an executable name
             where = ", ".join(
-                f'{t["title"][:20] or t["id"][:8]} in {r["exe"]}'
+                f'{_flat(t["title"], 20) or _flat(t["id"], 8)} in {r["exe"]}'
                 f':{os.path.basename(str(r["profile"]))} (pid {r["pid"]})'
                 for r, t, _index in hits[:4])
             fail("tab-ambiguous",
@@ -1620,7 +1695,12 @@ def _resolve_across(specs: list[str], browser: str,
 
 def _tab_count() -> int:
     """How many page tabs the drivable browsers show right now."""
-    return sum(len(_tabs_or_fail(row)) for row in _drivable())
+    # a READ-BACK after a close must not turn into a refusal: `tab close --all`
+    # on the last tab makes the browser exit, and its endpoint can stop
+    # answering before the close is reported — the strict form then said
+    # `cdp-not-local` about an unrelated browser AFTER the tabs were gone (a
+    # review flagged it).
+    return sum(len(_tabs_or_fail(row)) for row in _drivable(strict=False))
 
 
 def tab_info(spec: str, browser: str = "") -> dict:
@@ -1759,7 +1839,7 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
                 else:
                     foreign.append(_foreign_row(row, tab))
         if not hits:
-            have = ", ".join(f'{t["title"][:20] or t["url"][:20]}'
+            have = ", ".join(f'{_flat(t["title"], 20) or _flat(t["url"], 20)}'
                              for r in rows for t in _tabs_or_fail(r)[:2])
             if loose:
                 fail("no-page-tab",
@@ -2046,7 +2126,7 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
              "no page tabs to act on — open one with "
              "`browser-control-cli tab URL`")
     if len(pairs) > 1:
-        where = ", ".join(f'{str(t["title"])[:20] or str(t["url"])[:30]} '
+        where = ", ".join(f'{_flat(t["title"], 20) or _flat(t["url"], 30)} '
                           f'({r["exe"]})' for r, t in pairs[:5])
         fail("tab-ambiguous",
              f"{len(pairs)} page tabs are open — name one with --tab SPEC "

@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 36 hermetic + 57 live checks passing.
+Repo `main`, worktree clean, 58 hermetic + 58 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -14,19 +14,19 @@ it and puts one console script on PATH.
 | File | Lines | Owns |
 | --- | --- | --- |
 | `pyproject.toml` | 31 | distribution `browser-control`, console script, `websockets`, MIT (SPDX) + `license-files` |
-| `README.md` | 190 | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
+| `README.md` | 155 | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
 | `LICENSE` | 21 | MIT, `Copyright (c) 2026 Mark Tiempo` |
 | `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 1060 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
-| `browser_control/lib/dom.py` | 2300 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
-| `browser_control/lib/audit.py` | 158 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<timestamp>`, and a proven secret written as a length |
-| `browser_control/lib/browser.py` | 2165 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
-| `browser_control/lib/cdp.py` | 740 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
+| `browser_control/cli/main.py` | 1260 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
+| `browser_control/lib/dom.py` | 2598 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
+| `browser_control/lib/audit.py` | 224 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<stamp>-<rand>`, and a proven secret written as a length |
+| `browser_control/lib/browser.py` | 2454 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
+| `browser_control/lib/cdp.py` | 887 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
 | `browser_control/lib/capabilities.py` | 217 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
-| `tests/test_unit.py` | 1616 | 36 hermetic checks, no browser needed |
-| `tests/live_test.py` | 1900 | 57 live checks on a throwaway root, skip ≠ pass |
-| `browser_control/lib/profile.py` | 360 | **the `profile` noun**: `info` (weight, age, liveness), `seed` (logins copied in, caches skipped, read back), `reset` (wipe, on purpose) |
+| `tests/test_unit.py` | 2714 | 58 hermetic checks, no browser needed |
+| `tests/live_test.py` | 2245 | 58 live checks on a throwaway root, skip ≠ pass |
+| `browser_control/lib/profile.py` | 491 | **the `profile` noun**: `info` (weight, age, liveness), `seed` (logins copied in, caches skipped, read back), `reset` (wipe, on purpose) |
 
 Five verbs, browser-only:
 
@@ -886,9 +886,9 @@ line is the record: the cause is still unknown, and the suspects ruled out are
 stray browsers occluding the window (four of mine were alive — cleaned up),
 a hidden tab, the command order, and OOPIF presence.
 
-Hermetic 36 (the scope is set AND cleared per invocation like `--profile`, the
+Hermetic 58 (the scope is set AND cleared per invocation like `--profile`, the
 point syntax with a refusal naming the verb that asked, and the verb list: only
-tab subcommands may claim a frame, and `nav`/`list`/`activate` may not), live 57
+tab subcommands may claim a frame, and `nav`/`list`/`activate` may not), live 58
 (three frames with two separate: driven by index and by URL, a click inside one
 fires its own handler, the census in `text`, the ambiguity named with indices,
 and the two refusals).
@@ -1029,8 +1029,8 @@ Nothing here blocks 5.6.
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser (29 checks)
-python3 tests/live_test.py            # the battery, needs a browser (45 checks)
+python3 tests/test_unit.py            # hermetic, no browser (58 checks)
+python3 tests/live_test.py            # the battery, needs a browser (58 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com
 browser-control-cli tab list
@@ -1047,7 +1047,7 @@ Set `BROWSER_CONTROL_ROOT` to keep a session's profiles out of
 **Where the logs go.** The action log is `BROWSER_CONTROL_LOG`, by default
 `~/.local/state/browser-control/actions.jsonl`; its directory is created on the
 first write, and when that cannot be written the line lands in a scratch
-directory instead — `/tmp/browser-control-<timestamp>/actions.jsonl`
+directory instead — `/tmp/browser-control-<stamp>-<rand>/actions.jsonl`
 (`audit.scratch_dir()`). Both suites log into such a directory rather than
 `off`, so the log is exercised on every run and the user's own log is never
 touched: the hermetic suite at `<scratch>/hermetic-actions.jsonl`, the battery

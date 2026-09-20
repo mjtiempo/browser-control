@@ -54,9 +54,8 @@ from typing import Any
 # The private helpers below are this layer's contract with lib.browser: the
 # tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
-from browser_control.lib import audit
+from browser_control.lib import audit, cdp
 from browser_control.lib import browser as tabs
-from browser_control.lib import cdp
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ControlError,
     fail,
@@ -193,7 +192,12 @@ PRELUDE = r"""
     (el.innerText === undefined ? el.textContent : el.innerText) || '';
   const label = (el) => [
       attr(el, 'aria-label'), attr(el, 'placeholder'), attr(el, 'title'),
-      attr(el, 'alt'), attr(el, 'name'), el.value, textOf(el),
+      attr(el, 'alt'), attr(el, 'name'),
+      // NEVER a password field's value: `describe` rides into replies and
+      // refusals, so including it handed the secret the verb was told not to
+      // echo straight back to the caller (a review flagged it). Other values
+      // stay — `find` matches an input by them.
+      (el.type === 'password' ? '' : el.value), textOf(el),
     ].filter((v) => typeof v === 'string' && v.trim() !== '')
      .join(' ').replace(/\s+/g, ' ').trim();
   const role = (el) => attr(el, 'role') || el.tagName.toLowerCase();
@@ -1640,14 +1644,14 @@ def select(text: str | None = None, selector: str | None = None,
         matched = _int(probe.get("matched"))
         if not matched:
             names = [_safe(name, 30)
-                     for name in (probe.get("labels") or [])[:12]]
+                     for name in _list(probe.get("labels"))[:12]]
             labels = ", ".join(names)
             fail("no-match",
                  f"no <option> in {_describe(element)} has value or label "
                  f"{wanted!r} (have: {labels or 'none'})")
         if matched > 1:
             candidates = ", ".join(_safe(name, 30) for name in
-                                   (probe.get("candidates") or [])[:5])
+                                   _list(probe.get("candidates"))[:5])
             fail("ambiguous-option",
                  f"{matched} options in {_describe(element)} match "
                  f"{wanted!r}: {candidates} — their VALUES are what tell them "
@@ -1868,7 +1872,15 @@ def _pixels(css: int, dpr: float) -> int:
 
 def _shot_target(path: str) -> str:
     """The absolute path a screenshot may be written to, or a refusal."""
-    target = os.path.abspath(os.path.expanduser(str(path or "")))
+    expanded = os.path.expanduser(str(path or ""))
+    if not os.path.isabs(expanded):
+        # the help and this function's own docstring say ABSOLUTE; a relative
+        # path used to be silently resolved against the CLI's cwd (a review
+        # flagged the mismatch with `tab upload`, which refuses one)
+        fail("bad-args",
+             f"tab screenshot: {path!r} must be an absolute path — this tool "
+             "writes where it was told, not where it happens to be run from")
+    target = os.path.abspath(expanded)
     if os.path.isdir(target):
         fail("bad-args", f"tab screenshot: {target} is a directory")
     if not target.lower().endswith(".png"):
@@ -1900,12 +1912,34 @@ def _write_shot(target: str, data: bytes, force: bool) -> None:
                  "replace it")
         except OSError as e:
             fail("write-failed", f"tab screenshot: {target}: {e}")
-        with os.fdopen(handle, "wb") as out:
-            out.write(data)
+        try:
+            with os.fdopen(handle, "wb") as out:
+                out.write(data)
+        except OSError as e:
+            # the exclusive open succeeded, but the WRITE failed (ENOSPC,
+            # EFBIG…): without this the OSError escaped as ERR[internal] and
+            # left a truncated file at a path the caller was told was not
+            # written (a review flagged it)
+            with contextlib.suppress(OSError):
+                os.remove(target)
+            fail("write-failed", f"tab screenshot: {target}: {e}")
         return
     temp = f"{target}.bc-{os.getpid()}.part"
     try:
-        with open(temp, "wb") as out:
+        # EXCLUSIVE and never through a link: the predictable temp name was a
+        # pre-creatable symlink, and `open(..., "wb")` truncated whatever it
+        # pointed at (a review flagged CWE-377). A leftover temp is refused,
+        # not silently adopted.
+        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | os.O_NOFOLLOW, 0o644)
+    except FileExistsError:
+        fail("write-failed",
+             f"tab screenshot: a leftover temporary file is in the way "
+             f"({temp}) — remove it and try again")
+    except OSError as e:
+        fail("write-failed", f"tab screenshot: {target}: {e}")
+    try:
+        with os.fdopen(handle, "wb") as out:
             out.write(data)
         os.replace(temp, target)
     except OSError as e:
@@ -2048,6 +2082,18 @@ def _ints(value: object, count: int = 0) -> list[int]:
         return []
     out = [_int(item) for item in value]
     return out[:count] if count else out
+
+
+def _list(value: object) -> list:
+    """A page-supplied list, or [] — never a TypeError out of a verb.
+
+    The sibling of `_ints` for sequences of NAMES: `tab select` sliced
+    `probe["labels"]` and `probe["candidates"]` unguarded, so a page that
+    answered a number or an object raised `TypeError` instead of the intended
+    `no-match`/`ambiguous-option` refusal (a review flagged it). A dict is not
+    a list here: its keys would be read as labels.
+    """
+    return list(value) if isinstance(value, (list, tuple)) else []
 
 
 def _point(at: str | None, viewport: list[int],

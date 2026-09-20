@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import os
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -44,6 +45,10 @@ GET_CAP = 8 * 1024 * 1024
 # past this the caller should narrow the expression rather than reason about
 # half a value — `tab text` truncates IN the page, so its cap is separate.
 EVAL_RESULT_CAP = 64_000
+# One WALL-CLOCK budget for a CDP HTTP read, not one per socket operation: a
+# peer that drips a byte every four seconds kept the per-operation timeout from
+# ever firing (a review flagged it).
+GET_DEADLINE_S = 5.0
 
 
 def port_of(profile: str) -> int:
@@ -78,14 +83,38 @@ class _LoopbackOnly(urllib.request.HTTPRedirectHandler):
 
 
 def _get_bytes(url: str) -> bytes:
-    """The body at `url`, capped, or a refusal — never a bare exception."""
+    """The body at `url`, capped, or a refusal — never a bare exception.
+
+    Two hardening rules live here. The opener carries an EMPTY ProxyHandler:
+    `build_opener` keeps urllib's environment-driven default otherwise, so
+    `http_proxy` diverted this request — whose answer is parsed as CDP JSON —
+    off loopback, to whoever answered the proxy (a review flagged it; measured
+    with a fake proxy that answered for a dead port). And the read runs under
+    a wall-clock deadline: `timeout=5` bounds one socket operation, not a peer
+    that drips a byte every four seconds.
+    """
     body = b""
+    chunks: list[bytes] = []
     try:
-        # loopback by construction, and a redirect is refused rather than
-        # followed (semgrep: ignore)
-        opener = urllib.request.build_opener(_LoopbackOnly)   # noqa: S310
+        # loopback by construction; redirects and proxies are refused rather
+        # than followed or consulted (semgrep: ignore)
+        opener = urllib.request.build_opener(   # noqa: S310
+            _LoopbackOnly, urllib.request.ProxyHandler({}))
         with opener.open(url, timeout=5) as r:
-            body = r.read(GET_CAP + 1)
+            # a reader thread plus a join bounds the TOTAL time: reading in the
+            # caller cannot be interrupted, and `http.client` loops internally
+            # under the per-operation timeout, so a drip-feeding endpoint held
+            # a verb open indefinitely (a review flagged it)
+            reader = threading.Thread(
+                target=lambda: chunks.append(r.read(GET_CAP + 1)),
+                daemon=True)
+            reader.start()
+            reader.join(GET_DEADLINE_S)
+            if reader.is_alive():
+                fail("cdp-unreachable",
+                     f"{url}: the endpoint did not finish answering within "
+                     f"{GET_DEADLINE_S:g}s")
+            body = chunks[0] if chunks else b""
     except ControlError:
         raise
     except Exception as e:                                     # noqa: BLE001
@@ -117,10 +146,16 @@ def get_json(profile: str, path: str) -> Any:
 
 
 def _proc_text(pid: str, name: str) -> str:
-    """One /proc file of a pid as text, or "" — cmdline NULs become spaces."""
+    """One /proc file of a pid as text, or "" — argv NULs PRESERVED.
+
+    Chrome rewrites a child's cmdline in place (spaces between entries, one
+    trailing NUL) while the main process keeps real argv boundaries; callers
+    handle both forms. Flattening here made `--user-data-dir` containing a
+    space lose its tail in the ownership check (a review flagged it).
+    """
     try:
         with open(f"/proc/{pid}/{name}", "rb") as handle:
-            return handle.read().decode("utf-8", "replace").replace("\0", " ")
+            return handle.read().decode("utf-8", "replace").rstrip("\0\n")
     except OSError:
         return ""
 
@@ -340,7 +375,13 @@ def _checked_ws(url: str, where: str = "endpoint") -> str:
     would receive everything this tool sends while serving fabricated
     answers, so anything but loopback is refused.
     """
-    host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
+    try:
+        host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
+    except ValueError as e:
+        # a malformed endpoint (`ws://[::1/x`) raised a raw ValueError out of
+        # every public transport call; it is a refusal like any other (a
+        # review flagged it)
+        fail("cdp-not-local", f"{where}: {url!r} is not a usable endpoint ({e})")
     if host not in ("127.0.0.1", "localhost", "::1"):
         fail("cdp-not-local",
              f"{where}: the endpoint names a websocket on {host!r} — refusing "
@@ -367,6 +408,7 @@ def browser_call(profile: str, method: str, params: dict) -> dict:
 async def _call(ws_url: str, method: str, params: dict,
                 timeout: float) -> dict:
     try:
+        # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
         async with websockets.connect(ws_url, max_size=2 ** 24,
                                       open_timeout=10) as ws:
             # one request, one reply: a mutation must not be replayed, so
@@ -382,8 +424,8 @@ async def _call(ws_url: str, method: str, params: dict,
                     err = msg.get("error")
                     if err:
                         fail("cdp-error",
-                             f"{method}: {err.get('message')} "
-                             f"(code {err.get('code')})")
+                             f"{method}: {_foreign(err.get('message'))} "
+                             f"(code {_foreign(err.get('code'), 40)})")
                     return msg.get("result") or {}
                 if time.time() >= deadline:
                     fail("cdp-error",
@@ -406,6 +448,21 @@ def call(ws_url: str, method: str, params: dict | None = None,
     return asyncio.run(_call(ws_url, method, params or {}, timeout))
 
 
+def _foreign(text: object, cap: int = 200) -> str:
+    """One bounded, escape-free line of text THIS TOOL did not write.
+
+    A page or a browser can put newlines, terminal control sequences (OSC 52,
+    CSI) or megabytes into an exception description, and the CLI prints
+    refusal messages verbatim. Untrusted text is flattened and capped here
+    rather than reaching the terminal raw; C0, DEL and C1 controls are
+    dropped, ordinary Unicode text is kept (a review flagged the injection
+    and the unbounded size).
+    """
+    line = " ".join(str(text or "").split())[:cap]
+    return "".join(ch for ch in line
+                   if ch >= " " and not "\x7f" <= ch <= "\x9f")
+
+
 def _value_of(result: dict) -> Any:
     """The value one Runtime.evaluate reply carries, or a refusal.
 
@@ -418,10 +475,15 @@ def _value_of(result: dict) -> Any:
         exception = details.get("exception") or {}
         text = str(exception.get("description") or details.get("text")
                    or "page JS exception")
-        fail("js-error", f"Runtime.evaluate: {text.splitlines()[0]}")
+        fail("js-error", f"Runtime.evaluate: {_foreign(text)}")
     value = (result.get("result") or {}).get("value")
     try:
-        size = len(json.dumps(value))
+        # A string's cap is about the TEXT the page produced, not its JSON
+        # escaping: `json.dumps` expands each non-ASCII character to a
+        # `\uXXXX` escape (6x) or a surrogate pair (12x), so `tab text`
+        # refused on a CJK page far below its declared 40 000-char cap (a
+        # review flagged it).
+        size = len(value) if isinstance(value, str) else len(json.dumps(value))
     except (TypeError, ValueError):
         size = 0
     if size > EVAL_RESULT_CAP:
@@ -515,6 +577,7 @@ async def _sample(ws, rid: int, expression: str, budget: float) -> Any:
 
 async def _evaluate(ws_url: str, expression: str, timeout: float) -> Any:
     try:
+        # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
         async with websockets.connect(ws_url, max_size=2 ** 24,
                                       open_timeout=10) as ws:
             await _page_enable(ws, 1)      # dialogs must be real, not wedges
@@ -544,6 +607,7 @@ async def _evaluate_until(ws_url: str, expression: str, accept: Any,
     value: Any = None
     samples = 0
     try:
+        # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
         async with websockets.connect(ws_url, max_size=2 ** 24,
                                       open_timeout=10) as ws:
             # a dialog the samples outlive is ANNOUNCED once the domain is on
@@ -640,6 +704,7 @@ class Session:
             self._loop = asyncio.new_event_loop()
             try:
                 self._ws = self._loop.run_until_complete(
+                    # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
                     websockets.connect(self._ws_url, max_size=2 ** 24,
                                        open_timeout=10))
             except Exception as e:                             # noqa: BLE001
@@ -746,8 +811,8 @@ class Session:
                 err = msg.get("error")
                 if err:
                     raise ControlError(
-                        "cdp-error", f"{method}: {err.get('message')} "
-                        f"(code {err.get('code')})")
+                        "cdp-error", f"{method}: {_foreign(err.get('message'))} "
+                        f"(code {_foreign(err.get('code'), 40)})")
                 return msg.get("result") or {}
             if msg.get("method"):
                 self.events.append({"method": msg["method"],
@@ -802,7 +867,7 @@ class Session:
             exception = details.get("exception") or {}
             text = str(exception.get("description") or details.get("text")
                        or "page JS exception")
-            fail("js-error", f"Runtime.evaluate: {text.splitlines()[0]}")
+            fail("js-error", f"Runtime.evaluate: {_foreign(text)}")
         return str((result.get("result") or {}).get("objectId") or "")
 
     def close(self) -> None:

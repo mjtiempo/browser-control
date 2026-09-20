@@ -11,6 +11,7 @@ import contextlib
 import difflib
 import json
 import math
+import os
 import platform
 import shutil
 import sys
@@ -20,10 +21,7 @@ from collections.abc import Callable
 # index does not see the sibling modules, and the per-line ignores it wanted
 # pushed every line past the formatter's limit, so they are gone.
 from browser_control import __version__
-from browser_control.lib import audit
-from browser_control.lib import capabilities
-from browser_control.lib import cdp
-from browser_control.lib import dom
+from browser_control.lib import audit, capabilities, cdp, dom
 from browser_control.lib import browser as browser_lib
 from browser_control.lib import profile as profile_lib
 from browser_control.lib.browser import (
@@ -256,6 +254,13 @@ def cmd_attach(rest: list[str], browser: str) -> dict:
     _no_browser_flag("attach", browser)
     selector = _selector(rest, "attach", ("list",))
     if selector["list"]:
+        if browser_lib.scope():
+            # a scope that cannot apply is REFUSED, by every verb: this one
+            # dropped --profile silently and answered a broader question
+            # (a review flagged it)
+            fail("bad-args",
+                 "attach --list: --profile narrows an instance and --list "
+                 "answers for every attachment — drop one of the two")
         return attachments()
     return attach(port=selector["port"], pid=selector["pid"],
                   profile=browser_lib.scope())
@@ -553,10 +558,10 @@ def cmd_tab_hover(rest: list[str], browser: str) -> dict:
         fail("bad-args", f"tab hover: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
     if at is not None:
-        if needle is not None or selector is not None:
+        if needle is not None or selector is not None or index is not None:
             fail("bad-args",
                  "tab hover: --at is a POINT — give that or a TEXT/"
-                 "--selector, not both")
+                 "--selector (with --index), not both")
         return dom.hover(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
         fail("bad-args", "tab hover: give TEXT, --selector CSS, or --at X,Y")
@@ -732,10 +737,10 @@ def cmd_tab_click(rest: list[str], browser: str) -> dict:
     needle = rest[0] if rest else None
     # `--at X,Y` is a POINT: it replaces the spec instead of joining it
     if at is not None:
-        if needle is not None or selector is not None:
+        if needle is not None or selector is not None or index is not None:
             fail("bad-args",
                  "tab click: --at is a POINT — give that or a TEXT/"
-                 "--selector, not both")
+                 "--selector (with --index), not both")
         return dom.click(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
         fail("bad-args", "tab click: give TEXT, --selector CSS, or --at X,Y")
@@ -863,6 +868,11 @@ def cmd_tab_media(rest: list[str], browser: str) -> dict:
 def cmd_profile_info(rest: list[str], browser: str) -> dict:
     """`profile info [--profile DIR]`."""
     _none(rest, "profile info")
+    if browser:
+        fail("bad-args",
+             "profile info: --browser does not narrow it — the instance is "
+             "named with --profile DIR, and a scope that cannot apply is "
+             "refused rather than dropped")
     return profile_lib.info()
 
 
@@ -973,12 +983,27 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
         if arg in FLAG_KEY:
             if index + 1 >= len(args):
                 fail("bad-args", f"{arg} needs a value")
+            if arg in ("--allow", "--deny") \
+                    and found[FLAG_KEY[arg]] is not None:
+                # last-wins DROPPED an earlier class in the unsafe direction:
+                # `--deny read --deny write` denied only `write`, allowing the
+                # read it was told to deny (a review flagged it). The repeatable
+                # per-verb flags have the opposite contract, so a repeat here is
+                # refused rather than silently merged.
+                fail("bad-args",
+                     f"{arg}: given twice — name every class once "
+                     f"({arg} read,write …)")
             found[FLAG_KEY[arg]] = args[index + 1]
             index += 2
             continue
         named = [key for key in FLAG_KEY
                  if arg.startswith(key + "=")]
         if named:
+            if named[0] in ("--allow", "--deny") \
+                    and found[FLAG_KEY[named[0]]] is not None:
+                fail("bad-args",
+                     f"{named[0]}: given twice — name every class once "
+                     f"({named[0]}=read,write …)")
             found[FLAG_KEY[named[0]]] = arg.split("=", 1)[1]
             index += 1
             continue
@@ -1100,15 +1125,21 @@ def main(argv: list[str] | None = None) -> int:
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0
-    if not args:
-        print(USAGE, file=sys.stderr)
-        print("ERR[bad-args]: a verb is required "
-              f"(have: {', '.join(HANDLERS)})", file=sys.stderr)
-        return 2
     verb = ""
+    rest: list[str] = []
     ok = False
     code: str | None = None
     try:
+        if not args:
+            # INSIDE the try, so the `finally` writes the audit line: this
+            # refusal used to return before the log existed, while the
+            # flags-only refusal below was fixed for exactly this (a review
+            # flagged it)
+            print(USAGE, file=sys.stderr)
+            print("ERR[bad-args]: a verb is required "
+                  f"(have: {', '.join(HANDLERS)})", file=sys.stderr)
+            code = "bad-args"
+            return 2
         rest, flags = _flags(args)
         if not rest:
             # every token was a GLOBAL flag, so there is no verb to run: this
@@ -1124,6 +1155,17 @@ def main(argv: list[str] | None = None) -> int:
             code = "bad-args"           # so the audit line carries the code
             return 2
         verb, rest = rest[0], rest[1:]
+        # a flag given an EMPTY value is a MISTAKE, not an absent flag: every
+        # other value-carrying flag refuses one (--tab "", --frame "", a
+        # policy that names no class), while `--profile ""` silently cleared
+        # the instance scope and `--browser ""` fell back to the default
+        # (a review flagged the asymmetry)
+        for name, value in (("--browser", flags["browser"]),
+                            ("--profile", flags["profile"])):
+            if value is not None and not str(value).strip():
+                fail("bad-args",
+                     f"{name}: an empty value is not a name — name a browser "
+                     "or a profile, or leave the flag off")
         # the globals, in the order they matter: the instance, the frame, the
         # policy. Each is SET OR CLEARED per invocation, so no verb inherits
         # another call's scope.
@@ -1176,6 +1218,11 @@ def main(argv: list[str] | None = None) -> int:
             if resolved is not None:
                 reply["frame_resolved"] = resolved
         print(json.dumps(reply))
+        # flush HERE, where BrokenPipeError is still catchable: a reply under
+        # stdio's buffer raised nothing at `print`, and the failure surfaced at
+        # interpreter shutdown as "Exception ignored" with exit status 120
+        # instead of ERR[broken-pipe]/2 (a review measured it)
+        sys.stdout.flush()
         ok = True
         return 0
     except ControlError as e:
@@ -1186,6 +1233,13 @@ def main(argv: list[str] | None = None) -> int:
         # a closed reader (`| head`) is not a crash: the verb already did its
         # work, and the caller gets a code instead of a traceback
         code = "broken-pipe"
+        # point stdout at the null device: bytes still buffered in stdio are
+        # flushed at shutdown, and a SECOND failure there overrides the `2`
+        # returned below with 120 (measured; a review flagged it)
+        with contextlib.suppress(OSError, ValueError):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
         with contextlib.suppress(OSError):
             print("ERR[broken-pipe]: the reader of stdout went away",
                   file=sys.stderr)

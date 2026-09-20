@@ -31,6 +31,7 @@ to another machine needs that key too, and this verb does not pretend to.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import stat
@@ -63,7 +64,7 @@ SEED_SKIP = frozenset({
 })
 
 
-def _tree(source: str) -> dict:
+def _tree(source: str, count_skips: bool = False) -> dict:
     """Everything a naive copy would touch: bytes, files, dirs, skips, links.
 
     Walks by hand rather than with `copytree` for four reasons: the skips are by
@@ -73,6 +74,12 @@ def _tree(source: str) -> dict:
     silently (it used to make a partial copy verify: neither the walk nor the
     check saw it — a review flagged it), and the numbers are what the reply
     reports.
+
+    `count_skips` descends into SEED_SKIP directories so a caller about to
+    DELETE the tree (`profile reset`) sees and reports what the skip list would
+    otherwise hide — a half-gigabyte `Cache` used to be wiped as "0 files,
+    0 bytes" (a review flagged it). `seed` keeps the default: it copies nothing
+    from there, so those bytes are not part of its manifest.
     """
     facts = {"bytes": 0, "files": 0, "dirs": 0, "links": 0, "special": 0,
              "links_planted": 0, "unreadable": [], "skipped": [],
@@ -88,6 +95,8 @@ def _tree(source: str) -> dict:
         for child in children:
             if child.name in SEED_SKIP:
                 facts["skipped"].append(child.name)
+                if count_skips and child.is_dir(follow_symlinks=False):
+                    stack.append(child.path)
                 continue
             if child.is_symlink():
                 facts["links"] += 1
@@ -226,8 +235,18 @@ def _target(profile: str = "", browser: str = "") -> str:
                  f"{path} is not under {root()} — this CLI only manages the "
                  "profiles in its own root (BROWSER_CONTROL_ROOT); it will not "
                  "reset or seed into somebody's real browser profile")
-        return path
-    return profile_dir(binary(browser))
+    else:
+        path = profile_dir(binary(browser))
+    if os.path.islink(path):
+        # a symlinked DIRECTORY is a tree this CLI did not make: the per-child
+        # guard in `_copy` cannot see the top level, and a wipe would follow
+        # the link. Checked for the DEFAULT instance too, not only a named one
+        # (a review found `seed` wrote through such a link into a live profile).
+        fail("not-managed",
+             f"{path} is a symlink — this CLI manages real profile "
+             "directories, and a link can point a seed or a wipe at a tree "
+             "it does not own")
+    return path
 
 
 def _live_pid(profile: str) -> int:
@@ -262,12 +281,19 @@ def info(profile: str = "") -> dict:
     A read. Each profile is reported with its weight, when it last changed,
     whether a browser is on it (pid, port, exe), whether this CLI is attached to
     it, and whether it is the DEFAULT instance for a browser binary — which is
-    the name `open` keys it by.
+    the name `open` keys it by. A scoped path outside the root is refused
+    `not-managed` rather than walked: an unbounded walk of a caller-named tree
+    was a review finding, and the verb is about the profiles this CLI manages.
     """
     wanted = str(profile or "").strip() or scope()
+    if wanted:
+        wanted = os.path.abspath(os.path.expanduser(wanted))
+        if not _is_managed(wanted):
+            fail("not-managed",
+                 f"{wanted} is not under {root()} — `profile info` reports "
+                 "the profiles this CLI manages; name one under the root")
     rows: list[dict] = []
-    for path in profiles() if not wanted else [
-            os.path.abspath(os.path.expanduser(wanted))]:
+    for path in profiles() if not wanted else [wanted]:
         facts = _tree(path)
         live = next((r for r in browser_lib.browsers()
                      if browser_lib._norm(str(r["profile"]))
@@ -334,15 +360,24 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     # is copied can lag the live state by a few seconds
     source_pid = _live_pid(src)
     held = True
+    # `--dry` must not write anything: taking the target's lock CREATES the
+    # target directory and its lock file, and the docstring promises "without
+    # writing anything" (a review flagged it). The root lock still orders the
+    # read; a dry run touches no profile.
+    target_lock = (contextlib.nullcontext({"held": True, "warning": ""})
+                   if dry else
+                   browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001
+                                     "profile seed"))
     with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
                             "profile seed") as lock,
-          browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001
-                            "profile seed") as profile_lock):
-        # the TARGET's own lock — the one `open` and `close` hold. The root lock
-        # orders the attach records; this one orders the PROFILE, and without it
-        # a concurrent `open` was not excluded at all: `seed` could copy into a
-        # profile a browser had just been started on (a review measured it).
-        _refuse_live(target, "seeding")         # re-checked UNDER the lock
+          target_lock as profile_lock):
+        if not dry:
+            # the TARGET's own lock — the one `open` and `close` hold. The
+            # root lock orders the attach records; this one orders the
+            # PROFILE, and without it a concurrent `open` was not excluded at
+            # all: `seed` could copy into a profile a browser had just been
+            # started on (a review measured it). Re-checked UNDER the lock.
+            _refuse_live(target, "seeding")
         existing = _has_content(target)
         if existing and not force and not dry:
             fail("profile-exists",
@@ -408,11 +443,10 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         return {"ok": True, "profile": target, "reset": False,
                 "reason": "there was no profile to reset"}
     if os.path.islink(target):
-        # a symlinked DIRECTORY is a tree this CLI did not make: seed would write
-        # through it (the per-child guard cannot see the top level) and reset
-        # would follow it — both refuse (a review found the top-level hole after
-        # the child one was closed)
-        fail("reset-failed",
+        # unreachable: `_target` refuses a symlinked profile before this verb
+        # runs. Kept as a second line of defence for a link planted between
+        # that check and here.
+        fail("not-managed",
              f"{target} is a symlink — this CLI wipes a profile directory, "
              "not a link to somebody else's")
     with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
@@ -427,8 +461,9 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         # …and the CONTENT guard belongs under it too: checked outside, a
         # profile could gain its first file between the check and the wipe, and
         # `--force` would then destroy a login nobody agreed to lose
-        facts = _tree(target)
-        if facts["files"] and not force:
+        facts = _tree(target, count_skips=True)
+        if (facts["files"] or facts["dirs"] or facts["links"]
+                or facts["special"]) and not force:
             fail("profile-exists",
                  f"{target} holds {facts['files']} file(s), {facts['bytes']} "
                  "bytes — `profile reset --force` wipes it, logins included; "

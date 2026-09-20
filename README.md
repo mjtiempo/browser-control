@@ -69,7 +69,8 @@ by the binary's name.
 
 ## Verbs
 
-Browser level — `open`, `close`, `list`, `info`, `attach`, `detach`, `selftest`.
+Browser level — `open`, `close`, `list`, `info`, `attach`, `detach`,
+`profile info|seed|reset`, `selftest`.
 
 Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
 `reload`, `activate`, `frames`, `find`, `text`, `js`, `wait`, `click`,
@@ -103,7 +104,11 @@ Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
   text`, but it is never written to unless you say so.
 - **`attach` is that consent.** `attach --port N` (or `--pid`, `--profile`)
   makes a browser this CLI did not start writable — **tab writes only**:
-  `close` never stops an attached browser.
+  `close` never stops an attached browser. The verification is the browser's
+  own command line naming the profile (`--user-data-dir=<profile>`), so a
+  browser started on its vendor default profile — with no such flag — cannot
+  be verified and `attach` refuses it; start it with an explicit
+  `--user-data-dir` to make it attachable.
 - **`close` asks before it takes tabs.** A browser with page tabs refuses
   `tabs-open` unless `--force`, because Chromium exits with its last window.
   Nothing is ever `SIGKILL`ed; a process that ignores `SIGTERM` is reported,
@@ -134,6 +139,11 @@ check or a reviewer does not have to hardcode a verb list:
 | `code` | runs caller-supplied code: `tab js`, `tab wait --for js` |
 | `file` | a path the CALLER named: `screenshot`, `upload` |
 | `egress` | would reach the network — nothing today |
+
+Two notes on the policy inputs, so a deny never *looks* wider than it is:
+`--deny egress` is accepted but currently names no action — nothing carries
+that class yet; and `tab wait --for js` is classified `code` alone, so
+`--deny write` does not stop it (`--deny code` stops both escape hatches).
 
 ```bash
 browser-control-cli selftest | jq '.capabilities.by_class'
