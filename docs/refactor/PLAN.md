@@ -722,7 +722,7 @@ blocking; if the architect overrides one, record the override here before the af
 ## Phase 5 — CLI package + plugins/profiles
 
 ### RF-31 — `cli/` package + `VerbArgs` argv reader
-- status: todo
+- status: done (commit 188907c)
 - priority: P1
 - category: package/dedup
 - findings: lane-4 F-4.2 + F-4.5, lane-6 F-6.6
@@ -743,7 +743,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-4-cli.md#F-4.2`, `lane-4-cli.md#F-4.5`, `lane-6-crosscutting.md#F-6.6`
 
 ### RF-32 — one `Verb` record and one action resolver
-- status: todo
+- status: done (commit 0c89bbd)
 - priority: P1
 - category: class/dedup
 - findings: lane-4 F-4.3 + F-4.4, lane-5 F-5.7
@@ -761,7 +761,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-4-cli.md#F-4.3`, `lane-4-cli.md#F-4.4`
 
 ### RF-33 — `lib/plugins/` package, typed actions, no module globals
-- status: todo
+- status: done (commit 74d5149)
 - priority: P1
 - category: package/class
 - findings: lane-5 F-5.4 + F-5.5, lane-6 F-6.14, lane-5 F-5.9 (plugins half)
@@ -793,7 +793,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-5-profile-plugins.md#F-5.6`
 
 ### RF-35 — `Invocation` + `Reporter`: split `main()`; drop the last globals
-- status: todo
+- status: done (commit c258ca0)
 - priority: P1
 - category: class
 - findings: lane-4 F-4.1, lane-5 F-5.5 (CLI half), lane-6 F-6.1 (PLUGINS)
@@ -830,7 +830,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-5-profile-plugins.md#F-5.8`, `lane-5-profile-plugins.md#F-5.9`
 
 ### RF-37 — test-seam sweep (final audit)
-- status: todo
+- status: done (commit 188907c)
 - priority: P1
 - category: tests
 - findings: lane-6 F-6.11, lane-2 F-2.9, lane-3 F-3.12, lane-4 F-4.6
@@ -937,12 +937,12 @@ blocking; if the architect overrides one, record the override here before the af
  {"id":"RF-28","phase":4,"title":"hover/changed dedup","status":"done (commit fe8ab46)","deps":["RF-24","RF-25","RF-27"],"risk":"low","priority":"P2","findings":["F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/actions.py"]},
  {"id":"RF-29","phase":4,"title":"dom.frames resolves internally","status":"done (commit 6506468)","deps":["RF-23"],"risk":"low","priority":"P1","findings":["F-4.9","F-6.15","F-3.11"],"files":["browser_control/cli/main.py","browser_control/lib/dom/"],"target":["browser_control/lib/dom/frames.py"]},
  {"id":"RF-30","phase":4,"title":"dom/keys.py one key-triple source","status":"done (commit 6506468)","deps":["RF-23"],"risk":"medium","priority":"P2","findings":["F-3.10"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/keys.py"]},
- {"id":"RF-31","phase":5,"title":"cli/ package + VerbArgs","status":"todo","deps":["RF-10"],"risk":"medium","priority":"P1","findings":["F-4.2","F-4.5","F-6.6"],"files":["browser_control/cli/main.py","plugins/x_reader.py"],"target":["browser_control/cli/argv.py","browser_control/cli/verbs/"]},
- {"id":"RF-32","phase":5,"title":"Verb record + single action resolver","status":"todo","deps":["RF-31","RF-09"],"risk":"medium","priority":"P1","findings":["F-4.3","F-4.4","F-5.7"],"files":["browser_control/cli/"],"target":["browser_control/cli/registry.py","browser_control/cli/usage.py"]},
- {"id":"RF-33","phase":5,"title":"lib/plugins/ package, typed actions","status":"todo","deps":["RF-09"],"risk":"low","priority":"P1","findings":["F-5.4","F-5.5","F-5.9","F-6.14"],"files":["browser_control/lib/plugins.py","browser_control/cli/main.py"],"target":["browser_control/lib/plugins/"]},
+ {"id":"RF-31","phase":5,"title":"cli/ package + VerbArgs","status":"done (commit 188907c)","deps":["RF-10"],"risk":"medium","priority":"P1","findings":["F-4.2","F-4.5","F-6.6"],"files":["browser_control/cli/main.py","plugins/x_reader.py"],"target":["browser_control/cli/argv.py","browser_control/cli/verbs/"]},
+ {"id":"RF-32","phase":5,"title":"Verb record + single action resolver","status":"done (commit 0c89bbd)","deps":["RF-31","RF-09"],"risk":"medium","priority":"P1","findings":["F-4.3","F-4.4","F-5.7"],"files":["browser_control/cli/"],"target":["browser_control/cli/registry.py","browser_control/cli/usage.py"]},
+ {"id":"RF-33","phase":5,"title":"lib/plugins/ package, typed actions","status":"done (commit 74d5149)","deps":["RF-09"],"risk":"low","priority":"P1","findings":["F-5.4","F-5.5","F-5.9","F-6.14"],"files":["browser_control/lib/plugins.py","browser_control/cli/main.py"],"target":["browser_control/lib/plugins/"]},
  {"id":"RF-34","phase":5,"title":"plugin_api.py named seam","status":"done (commit 9df582b)","deps":["RF-33"],"risk":"medium","priority":"P2","findings":["F-5.6"],"files":["plugins/x_reader.py","plugins/README.md","browser_control/lib/plugins.py"],"target":["browser_control/plugin_api.py"]},
- {"id":"RF-35","phase":5,"title":"Invocation + Reporter; main() facade","status":"todo","deps":["RF-31","RF-32","RF-33","RF-09","RF-08"],"risk":"medium","priority":"P1","findings":["F-4.1","F-5.5","F-6.1"],"files":["browser_control/cli/main.py"],"target":["browser_control/cli/runner.py","browser_control/cli/emit.py"]},
+ {"id":"RF-35","phase":5,"title":"Invocation + Reporter; main() facade","status":"done (commit c258ca0)","deps":["RF-31","RF-32","RF-33","RF-09","RF-08"],"risk":"medium","priority":"P1","findings":["F-4.1","F-5.5","F-6.1"],"files":["browser_control/cli/main.py"],"target":["browser_control/cli/runner.py","browser_control/cli/emit.py"]},
  {"id":"RF-36","phase":5,"title":"lib/profile/ package + seedtree.py","status":"done (commit 70e2074)","deps":["RF-12","RF-14"],"risk":"low","priority":"P2","findings":["F-5.8","F-5.9"],"files":["browser_control/lib/profile.py"],"target":["browser_control/lib/profile/","browser_control/lib/seedtree.py"]},
- {"id":"RF-37","phase":5,"title":"test-seam sweep (final audit)","status":"todo","deps":["RF-01","RF-02","RF-03","RF-04","RF-05","RF-06","RF-07","RF-08","RF-09","RF-10","RF-11","RF-12","RF-13","RF-14","RF-15","RF-16","RF-17","RF-18","RF-19","RF-20","RF-21","RF-22","RF-23","RF-24","RF-25","RF-26","RF-27","RF-28","RF-29","RF-30","RF-31","RF-32","RF-33","RF-34","RF-35","RF-36"],"risk":"medium","priority":"P1","findings":["F-2.9","F-3.12","F-4.6","F-6.11"],"files":["tests/test_unit.py","tests/live_test.py"],"target":["tests/"]}
+ {"id":"RF-37","phase":5,"title":"test-seam sweep (final audit)","status":"done (commit 188907c)","deps":["RF-01","RF-02","RF-03","RF-04","RF-05","RF-06","RF-07","RF-08","RF-09","RF-10","RF-11","RF-12","RF-13","RF-14","RF-15","RF-16","RF-17","RF-18","RF-19","RF-20","RF-21","RF-22","RF-23","RF-24","RF-25","RF-26","RF-27","RF-28","RF-29","RF-30","RF-31","RF-32","RF-33","RF-34","RF-35","RF-36"],"risk":"medium","priority":"P1","findings":["F-2.9","F-3.12","F-4.6","F-6.11"],"files":["tests/test_unit.py","tests/live_test.py"],"target":["tests/"]}
 ]
 ```
