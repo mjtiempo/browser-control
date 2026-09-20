@@ -10,7 +10,8 @@ import asyncio
 import json
 import time
 import urllib.parse
-from typing import Any
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BLOCKED,
@@ -38,6 +39,56 @@ websockets = _websockets
 
 EVAL_RESULT_CAP = 64_000
 
+async def _await_reply(ws: Any, rid: int, method: str, params: dict,
+                       budget: float, *, error_text: Callable[[dict], str],
+                       on_timeout: Callable[[BaseException], None] | None = None,
+                       on_deadline: Callable[[], None] | None = None,
+                       on_frame: Callable[[dict], None] | None = None,
+                       wait_hook: Callable[[float], float] | None = None,
+                       bad_frame: Callable[[BaseException], None] | None = None,
+                       ) -> dict:
+    """One request, one reply: send, receive, demux by id, map the errors.
+
+    The ONE place this package frames a call and reads a reply. Each caller
+    supplies its own vocabulary: `error_text(err)` builds the refusal for a
+    protocol `error`; `on_timeout(e)` / `on_deadline()` raise the caller's
+    timeout refusal (a blocked renderer, a sample that ran out, an eval that
+    will not answer); `on_frame(msg)` sees every frame that is not the reply
+    (Session's dialog watch); `wait_hook` shortens a wait (a parked renderer);
+    `bad_frame(e)` maps a non-JSON frame. A hook that returns lets the
+    TimeoutError propagate, which is what the polling sample wants.
+    """
+    await ws.send(json.dumps({"id": rid, "method": method, "params": params}))
+    deadline = time.time() + budget
+    while True:
+        wait = max(0.1, deadline - time.time())
+        if wait_hook is not None:
+            wait = wait_hook(wait)
+        try:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=wait))
+        except TimeoutError as e:
+            if on_timeout is not None:
+                on_timeout(e)
+            raise
+        except (ValueError, TypeError) as e:
+            if bad_frame is not None:
+                bad_frame(e)
+            raise ControlError(ERR_CDP_ERROR,
+                               f"{method}: a frame that is not JSON "
+                               f"({e})") from e
+        if msg.get("id") == rid:
+            err = msg.get("error")
+            if err:
+                raise ControlError(ERR_CDP_ERROR, error_text(err))
+            return msg.get("result") or {}
+        if on_frame is not None:
+            on_frame(msg)
+        if time.time() >= deadline:
+            if on_deadline is not None:
+                on_deadline()
+            raise TimeoutError(f"no reply for id {rid} within {budget:g}s")
+
+
 async def _call(ws_url: str, method: str, params: dict,
                 timeout: float) -> dict:
     try:
@@ -47,28 +98,21 @@ async def _call(ws_url: str, method: str, params: dict,
             # one request, one reply: a mutation must not be replayed, so
             # there is no retry loop here — the caller's read-back is the
             # recovery
-            await ws.send(json.dumps({"id": 1, "method": method,
-                                      "params": params}))
-            deadline = time.time() + timeout
-            while True:
-                msg = json.loads(await asyncio.wait_for(
-                    ws.recv(), timeout=max(0.1, deadline - time.time())))
-                if msg.get("id") == 1:
-                    err = msg.get("error")
-                    if err:
-                        fail(ERR_CDP_ERROR,
-                             f"{method}: {foreign(err.get('message'))} "
-                             f"(code {foreign(err.get('code'), 40)})")
-                    return msg.get("result") or {}
-                if time.time() >= deadline:
-                    fail(ERR_CDP_ERROR,
-                         f"{method}: no reply for id 1 within {timeout:g}s")
+            return await _await_reply(
+                ws, 1, method, params, timeout,
+                error_text=lambda err: (
+                    f"{method}: {foreign(err.get('message'))} "
+                    f"(code {foreign(err.get('code'), 40)})"),
+                on_timeout=lambda e: fail(ERR_CDP_ERROR, f"{method}: {e}"),
+                on_deadline=lambda: fail(
+                    ERR_CDP_ERROR,
+                    f"{method}: no reply for id 1 within {timeout:g}s"),
+                bad_frame=lambda e: fail(ERR_CDP_ERROR, f"{method}: {e}"))
     except ControlError:
         raise                       # the protocol answered; not a transport hiccup
     except Exception as e:                                     # noqa: BLE001
         raise ControlError(ERR_CDP_ERROR, f"{method}: {e}") from e
-    raise ControlError(ERR_CDP_ERROR,
-                       f"{method}: did not answer within {timeout:g}s")
+
 
 def call(ws_url: str, method: str, params: dict | None = None,
          timeout: float = 15.0) -> dict:
@@ -140,52 +184,25 @@ async def _page_enable(ws: Any, rid: int) -> None:
     was suppressed before any client enabled the domain): that refusal says so
     and names the way out.
     """
-    await ws.send(json.dumps({"id": rid, "method": "Page.enable",
-                              "params": {}}))
-    deadline = time.time() + PAGE_ENABLE_S
-    while True:
-        try:
-            msg = json.loads(await asyncio.wait_for(
-                ws.recv(), timeout=max(0.1, deadline - time.time())))
-        except TimeoutError as e:
-            raise ControlError(ERR_BLOCKED, BLOCKED_HINT) from e
-        except (ValueError, TypeError) as e:
-            raise ControlError(ERR_CDP_ERROR,
-                f"Page.enable: a frame that is not JSON ({e})") from e
-        if msg.get("id") == rid:
-            err = msg.get("error")
-            if err:
-                raise ControlError(ERR_CDP_ERROR,
-                    f"Page.enable: {err.get('message')} "
-                    f"(code {err.get('code')})")
-            return
-        if time.time() >= deadline:
-            raise ControlError(ERR_BLOCKED, BLOCKED_HINT)
+    def blocked(_e: BaseException | None = None) -> NoReturn:
+        raise ControlError(ERR_BLOCKED, BLOCKED_HINT)
+
+    await _await_reply(
+        ws, rid, "Page.enable", {}, PAGE_ENABLE_S,
+        error_text=lambda err: (f"Page.enable: {err.get('message')} "
+                                f"(code {err.get('code')})"),
+        on_timeout=blocked, on_deadline=blocked)
+
 
 async def _sample(ws, rid: int, expression: str, budget: float) -> Any:
     """One evaluate on an ALREADY open connection, or TimeoutError."""
-    await ws.send(json.dumps({"id": rid, "method": "Runtime.evaluate",
-                              "params": {"expression": expression,
-                                         "returnByValue": True}}))
-    deadline = time.time() + budget
-    while True:
-        try:
-            msg = json.loads(await asyncio.wait_for(
-                ws.recv(), timeout=max(0.1, deadline - time.time())))
-        except TimeoutError:
-            raise                       # the caller decides: poll again, or
-        except (ValueError, TypeError) as e:   # refuse `eval-timeout`
-            raise ControlError(ERR_CDP_ERROR,
-                f"Runtime.evaluate: a frame that is not JSON ({e})") from e
-        if msg.get("id") == rid:
-            err = msg.get("error")
-            if err:
-                fail(ERR_CDP_ERROR,
-                     f"Runtime.evaluate: {err.get('message')} "
-                     f"(code {err.get('code')})")
-            return _value_of(msg.get("result") or {})
-        if time.time() >= deadline:
-            raise TimeoutError(f"no reply for id {rid} within {budget:g}s")
+    result = await _await_reply(
+        ws, rid, "Runtime.evaluate",
+        {"expression": expression, "returnByValue": True}, budget,
+        error_text=lambda err: (f"Runtime.evaluate: {err.get('message')} "
+                                f"(code {err.get('code')})"))
+    return _value_of(result)
+
 
 async def _evaluate(ws_url: str, expression: str, timeout: float) -> Any:
     try:

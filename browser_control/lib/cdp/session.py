@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 from browser_control.lib.cdp import rpc  # pyright: ignore[reportMissingImports]
 from browser_control.lib.cdp.rpc import (  # pyright: ignore[reportMissingImports]
     DIALOG_EVENT,
     DIALOG_GRACE_S,
     PARKED_BUDGET_S,
+    _await_reply,
     _checked_ws,
     _page_enable,
     _value_of,
@@ -143,54 +143,54 @@ class Session:
         ws = self._ws
         self._rid += 1
         rid = self._rid
-        await ws.send(json.dumps({"id": rid, "method": method,
-                                  "params": params}))
-        deadline = time.time() + budget
         parked_at = 0.0
-        while True:
-            wait = max(0.1, deadline - time.time())
+
+        def saw(msg: dict) -> None:
+            """Every frame that is not the reply: keep it, watch for a dialog."""
+            nonlocal parked_at
+            if not msg.get("method"):
+                return
+            self.events.append({"method": msg["method"],
+                                "params": msg.get("params") or {}})
+            del self.events[:-20]
+            if not parked_at and msg["method"] == DIALOG_EVENT:
+                parked_at = time.time() + DIALOG_GRACE_S
+
+        def wait_hook(wait: float) -> float:
             if parked_at:
                 # a dialog this session SAW open parks the renderer: the reply
                 # cannot come until somebody answers it, so waiting the whole
                 # budget buys nothing but a slower refusal
-                wait = min(wait, max(0.1, parked_at - time.time()))
-            try:
-                msg = json.loads(await asyncio.wait_for(ws.recv(),
-                                                        timeout=wait))
-            except TimeoutError as e:
-                if self._parked_now(parked_at):
-                    raise ControlError(ERR_BLOCKED,
-                        f"{method}: no reply — the renderer is parked by a "
-                        f"JavaScript dialog{self._blocked_hint()}") from e
-                code = (ERR_EVAL_TIMEOUT if method.startswith("Runtime.evaluate")
-                        else ERR_CDP_ERROR)
-                if self.parked:
-                    # the tab was parked before this session opened: one code
-                    # for "the renderer is not answering", whatever the call
-                    code = ERR_BLOCKED
-                raise ControlError(
-                    code, f"{method}: no reply within {budget:g}s"
-                    f"{self._blocked_hint()}") from e
-            except (ValueError, TypeError) as e:
-                raise ControlError(ERR_CDP_ERROR,
-                                   f"{method}: a frame that is not JSON "
-                                   f"({e})") from e
-            if msg.get("id") == rid:
-                err = msg.get("error")
-                if err:
-                    raise ControlError(ERR_CDP_ERROR, f"{method}: {foreign(err.get('message'))} "
-                        f"(code {foreign(err.get('code'), 40)})")
-                return msg.get("result") or {}
-            if msg.get("method"):
-                self.events.append({"method": msg["method"],
-                                    "params": msg.get("params") or {}})
-                del self.events[:-20]
-                if not parked_at and msg["method"] == DIALOG_EVENT:
-                    parked_at = time.time() + DIALOG_GRACE_S
-            if time.time() >= deadline:
-                raise ControlError(ERR_CDP_ERROR,
-                                   f"{method}: no reply for id {rid} within "
-                                   f"{budget:g}s{self._blocked_hint()}")
+                return min(wait, max(0.1, parked_at - time.time()))
+            return wait
+
+        def timed_out(e: BaseException | None = None) -> NoReturn:
+            if self._parked_now(parked_at):
+                raise ControlError(ERR_BLOCKED,
+                    f"{method}: no reply — the renderer is parked by a "
+                    f"JavaScript dialog{self._blocked_hint()}") from e
+            code = (ERR_EVAL_TIMEOUT if method.startswith("Runtime.evaluate")
+                    else ERR_CDP_ERROR)
+            if self.parked:
+                # the tab was parked before this session opened: one code
+                # for "the renderer is not answering", whatever the call
+                code = ERR_BLOCKED
+            raise ControlError(
+                code, f"{method}: no reply within {budget:g}s"
+                f"{self._blocked_hint()}") from e
+
+        def past_deadline() -> NoReturn:
+            raise ControlError(ERR_CDP_ERROR,
+                               f"{method}: no reply for id {rid} within "
+                               f"{budget:g}s{self._blocked_hint()}")
+
+        return await _await_reply(
+            ws, rid, method, params, budget,
+            error_text=lambda err: (
+                f"{method}: {foreign(err.get('message'))} "
+                f"(code {foreign(err.get('code'), 40)})"),
+            on_timeout=timed_out, on_deadline=past_deadline,
+            on_frame=saw, wait_hook=wait_hook)
 
     def call(self, method: str, params: dict | None = None,
              timeout: float = 0.0) -> dict:
