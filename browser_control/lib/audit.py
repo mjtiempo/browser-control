@@ -29,6 +29,7 @@ import tempfile
 import time
 from typing import Any
 
+from browser_control.lib.paths import expand  # pyright: ignore[reportMissingImports]
 from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 LOG_ENV = "BROWSER_CONTROL_LOG"
@@ -120,7 +121,7 @@ class ActionLog:
         raw = os.environ.get(LOG_ENV, "").strip()
         if raw.lower() in ("off", "0", "none"):
             return ""
-        return os.path.abspath(os.path.expanduser(raw or DEFAULT_LOG))
+        return expand(raw or DEFAULT_LOG)
 
     def _censor(self, argument: str) -> str:
         if self._secret and self._secret in argument:

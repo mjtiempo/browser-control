@@ -43,7 +43,23 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
+from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
+    expand,
+    is_managed,
+    lock_path,
+    norm,
+    pid_file,
+    profile_dir,
+    root,
+)
 from browser_control.lib.text import flat  # pyright: ignore[reportMissingImports]
+
+# The private spellings this module grew up with; the implementations live in
+# lib/paths.py. `_pid_file` stays reachable because the live battery calls it.
+_norm = norm
+_is_managed = is_managed
+_pid_file = pid_file
+_lock_path = lock_path
 
 # The PATH names, in preference order. The profile is keyed off the basename
 # of whichever resolves, so the same browser cannot end up with two profiles.
@@ -73,9 +89,6 @@ DEFAULT_PROFILES = {
     "vivaldi": "~/.config/vivaldi",
     "vivaldi-bin": "~/.config/vivaldi",
 }
-DEFAULT_ROOT = "~/.local/share/browser-control/cdp-profiles"
-ROOT_ENV = "BROWSER_CONTROL_ROOT"
-PID_FILE = ".pid"
 LAUNCH_WAIT_S = 20.0
 TAB_WAIT_S = 10.0
 STOP_WAIT_S = 10.0
@@ -83,12 +96,6 @@ PORT_WAIT_S = 5.0
 
 
 # ------------------------------------------------------------------ resolve
-def root() -> str:
-    """Where the managed profiles live (`BROWSER_CONTROL_ROOT` moves it)."""
-    return os.path.abspath(os.path.expanduser(
-        os.environ.get(ROOT_ENV) or DEFAULT_ROOT))
-
-
 def binary(name: str = "") -> str:
     """The browser to drive: the one named, else the first on PATH.
 
@@ -109,12 +116,6 @@ def binary(name: str = "") -> str:
         + ", ".join(BROWSER_BINS) + ")")
 
 
-def profile_dir(binary_path: str) -> str:
-    """The managed profile for a browser, keyed by the binary we run."""
-    return os.path.join(root(), os.path.basename(binary_path))
-
-
-# The INSTANCE a call is about, set once per process by the CLI from
 # `--profile DIR` — the same selector `attach`, `detach` and `close` already
 # take. Every verb that narrows by `--browser` funnels through `_narrow`, so
 # this one value addresses ONE instance everywhere: which is what makes two
@@ -133,8 +134,7 @@ def scope(profile: str | None = None) -> str:
     """
     if profile is not None:
         text = str(profile).strip()
-        SCOPE["profile"] = (os.path.abspath(os.path.expanduser(text))
-                            if text else "")
+        SCOPE["profile"] = norm(text) if text else ""
     return SCOPE["profile"]
 
 
@@ -171,11 +171,6 @@ def profiles() -> list[str]:
 def live_profiles() -> list[str]:
     """The managed profiles a browser is answering CDP on right now."""
     return [path for path in profiles() if cdp.reachable(path)]
-
-
-def _norm(path: object) -> str:
-    """One identity for a profile path: absolute, `~` expanded."""
-    return os.path.abspath(os.path.expanduser(str(path or "")))
 
 
 def ensure_up(profile: str) -> None:
@@ -254,10 +249,6 @@ def resolve_tab(rows: list[dict], spec: str) -> dict:
 
 
 # ------------------------------------------------------------------ the pid
-def _pid_file(profile: str) -> str:
-    return os.path.join(profile, PID_FILE)
-
-
 def _pid_alive(pid: int) -> bool:
     """A live process, and not a zombie: an unreaped child still answers
     `kill(pid, 0)`, which would refuse a stop that actually worked."""
@@ -436,23 +427,8 @@ def _default_profile(exe: str) -> str:
     raw = DEFAULT_PROFILES.get(exe, "")
     if not raw:
         return ""
-    path = os.path.abspath(os.path.expanduser(raw))
+    path = expand(raw)
     return path if os.path.isdir(path) else ""
-
-
-def _is_managed(profile: str) -> bool:
-    """Is this profile one of ours? Prefix-safe, so a sibling root is not.
-
-    Compared by REAL path: a symlink under the root that points somewhere else
-    (the user's own Chrome profile, say) is not one of ours, and `profile seed`
-    writing through it is the one thing this tool promises never to do — a
-    review measured that `abspath` alone accepted it, because the lexical path
-    still LOOKED managed.
-    """
-    text = str(profile or "")
-    if not text:
-        return False
-    return os.path.realpath(text).startswith(os.path.realpath(root()) + os.sep)
 
 
 def browsers() -> list[dict]:
@@ -1203,12 +1179,7 @@ def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
 # exists to prevent. These verbs serialize it themselves: `flock` on a file in
 # the profile (or in the root, for the attach records), which the kernel
 # releases when the holder dies, so there is no stale lock to clean up.
-LOCK_FILE = ".browser-control.lock"
 LOCK_WAIT_S = 20.0          # as long as a cold launch is given
-
-
-def _lock_path(profile: str) -> str:
-    return os.path.join(profile, LOCK_FILE)
 
 
 def _lock_holder(handle: Any) -> str:

@@ -53,6 +53,7 @@ import re
 from typing import Any
 
 from browser_control.lib import capabilities  # noqa: E402
+from browser_control.lib.paths import expand  # pyright: ignore[reportMissingImports]
 
 PLUGIN_API = 1
 PLUGIN_ENV = "BROWSER_CONTROL_PLUGIN_PATH"
@@ -85,10 +86,10 @@ def _dirs() -> list[str]:
     """
     raw = os.environ.get(PLUGIN_ENV, "")
     if raw.strip():
-        out = [os.path.abspath(os.path.expanduser(part.strip()))
+        out = [expand(part.strip())
                for part in raw.split(os.pathsep) if part.strip()]
         return list(dict.fromkeys(out))
-    return [os.path.abspath(os.path.expanduser(DEFAULT_PLUGIN_DIR))]
+    return [expand(DEFAULT_PLUGIN_DIR)]
 
 
 def load(reserved: set[str] | None = None) -> Registry:

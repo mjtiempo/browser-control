@@ -39,7 +39,6 @@ import time
 
 from browser_control.lib import browser as browser_lib
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
-    _is_managed,
     binary,
     profile_dir,
     profiles,
@@ -48,6 +47,14 @@ from browser_control.lib.browser import (  # pyright: ignore[reportMissingImport
 )
 from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import fail  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
+    LOCK_FILE,
+    PID_FILE,
+    expand,
+    is_managed,
+    norm,
+    pid_file,
+)
 
 # Never copied, at any depth, by NAME: the lock files that make a profile look
 # in use, our own records, and the caches that are hundreds of megabytes of
@@ -196,7 +203,7 @@ def _has_content(path: str) -> bool:
     occupied, so `profile seed` into a new directory refused `profile-exists` —
     measured while fixing the lock order, and the reason this filters them out.
     """
-    ours = (browser_lib.LOCK_FILE, browser_lib.PID_FILE)      # noqa: SLF001
+    ours = (LOCK_FILE, PID_FILE)
     try:
         return bool([name for name in os.listdir(path) if name not in ours])
     except OSError:
@@ -223,8 +230,8 @@ def _target(profile: str = "", browser: str = "") -> str:
     """
     wanted = str(profile or "").strip() or scope()
     if wanted:
-        path = os.path.abspath(os.path.expanduser(wanted))
-        if not _is_managed(path):
+        path = expand(wanted)
+        if not is_managed(path):
             fail("not-managed",
                  f"{path} is not under {root()} — this CLI only manages the "
                  "profiles in its own root (BROWSER_CONTROL_ROOT); it will not "
@@ -253,9 +260,9 @@ def _live_pid(profile: str) -> int:
     """
     if not profile:
         return 0
-    wanted = browser_lib._norm(profile)                       # noqa: SLF001
+    wanted = norm(profile)
     for row in browser_lib.browsers():
-        if row["pid"] and browser_lib._norm(str(row["profile"])) == wanted:
+        if row["pid"] and norm(str(row["profile"])) == wanted:
             return as_int(row["pid"])
     return 0
 
@@ -281,8 +288,8 @@ def info(profile: str = "") -> dict:
     """
     wanted = str(profile or "").strip() or scope()
     if wanted:
-        wanted = os.path.abspath(os.path.expanduser(wanted))
-        if not _is_managed(wanted):
+        wanted = expand(wanted)
+        if not is_managed(wanted):
             fail("not-managed",
                  f"{wanted} is not under {root()} — `profile info` reports "
                  "the profiles this CLI manages; name one under the root")
@@ -290,14 +297,14 @@ def info(profile: str = "") -> dict:
     for path in profiles() if not wanted else [wanted]:
         facts = _tree(path)
         live = next((r for r in browser_lib.browsers()
-                     if browser_lib._norm(str(r["profile"]))
-                     == browser_lib._norm(path)), None)      # noqa: SLF001
+                     if norm(str(r["profile"]))
+                     == norm(path)), None)
         name = os.path.basename(path)
         row: dict = {
             "name": name,
             "path": path,
             "exists": os.path.isdir(path),
-            "managed": _is_managed(path),
+            "managed": is_managed(path),
             "default_for": (name if name in browser_lib.BROWSER_BINS
                             and shutil.which(name) else ""),
             "attached": browser_lib.is_attached(path),
@@ -367,7 +374,7 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              "(usually ~/.config/google-chrome/Default, or the whole "
              "~/.config/google-chrome user-data directory); this CLI will "
              "not guess which of your profiles to read")
-    src = os.path.abspath(os.path.expanduser(str(source)))
+    src = expand(source)
     if not os.path.isdir(src):
         fail("bad-args", f"profile seed: {src} is not a directory")
     target = _target(profile, browser)
@@ -495,13 +502,13 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         detached = browser_lib.is_attached(target)
         if detached:
             records = browser_lib._attached()                # noqa: SLF001
-            records.pop(browser_lib._norm(target), None)      # noqa: SLF001
+            records.pop(norm(target), None)
             browser_lib._write_attached(records)             # noqa: SLF001
         try:
             shutil.rmtree(target)
         except OSError as e:
             fail("reset-failed", f"cannot remove {target}: {e}")
-        _remove(browser_lib._pid_file(target))               # noqa: SLF001
+        _remove(pid_file(target))
     if os.path.exists(target):
         fail("reset-not-verified",
              f"{target} still exists after the wipe — something recreated it")
