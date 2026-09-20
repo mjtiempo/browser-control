@@ -605,7 +605,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-3-dom.md#F-3.1`, `lane-3-dom.md#F-3.12`
 
 ### RF-24 — `dom/scripts.py`: one home for page-side JS + `fill()`
-- status: todo
+- status: done (commit 6e142f9)
 - priority: P1
 - category: lib/dedup
 - findings: lane-3 F-3.4, lane-3 F-3.8 (probes), lane-6 F-6.9 (inline literals)
@@ -622,7 +622,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-3-dom.md#F-3.4`, `lane-3-dom.md#F-3.8`
 
 ### RF-25 — `Verdict` + `PageState`: one reply/verdict convention
-- status: todo
+- status: done (commit 789331f)
 - priority: P1
 - category: class
 - findings: lane-3 F-3.5, lane-3 F-3.8 (`changed`)
@@ -639,7 +639,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-3-dom.md#F-3.5`
 
 ### RF-26 — one page-session factory (+ browser connection reuse)
-- status: todo
+- status: done (commit 35489ff)
 - priority: P1
 - category: class/dedup
 - findings: lane-6 F-6.10
@@ -654,7 +654,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-6-crosscutting.md#F-6.10`
 
 ### RF-27 — `Tab`: one per-verb prelude instead of 21 copy-pastes
-- status: todo
+- status: done (commit fe8ab46)
 - priority: P1
 - category: class
 - findings: lane-3 F-3.2, lane-6 F-6.9
@@ -675,7 +675,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-3-dom.md#F-3.2`, `lane-6-crosscutting.md#F-6.9`
 
 ### RF-28 — hover/changed dedup through `Tab` + `PageState`
-- status: todo
+- status: done (commit fe8ab46)
 - priority: P2
 - category: dedup
 - findings: lane-3 F-3.8
@@ -689,7 +689,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-3-dom.md#F-3.8`
 
 ### RF-29 — `dom.frames(tab=…, browser=…)` resolves internally
-- status: todo
+- status: done (commit 6506468)
 - priority: P1
 - category: lib
 - findings: lane-4 F-4.9, lane-6 F-6.15, lane-3 F-3.11
@@ -703,7 +703,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-4-cli.md#F-4.9`, `lane-6-crosscutting.md#F-6.15`
 
 ### RF-30 — `dom/keys.py`: one key-triple source
-- status: todo
+- status: done (commit 6506468)
 - priority: P2
 - category: lib/dedup
 - findings: lane-3 F-3.10
@@ -777,7 +777,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-5-profile-plugins.md#F-5.4`, `lane-6-crosscutting.md#F-6.14`
 
 ### RF-34 — `browser_control/plugin_api.py`: the named plugin seam (D-4)
-- status: todo
+- status: done (commit 9df582b)
 - priority: P2
 - category: lib
 - findings: lane-5 F-5.6
@@ -812,7 +812,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-4-cli.md#F-4.1`
 
 ### RF-36 — `lib/profile/` package + `seedtree.py`
-- status: todo
+- status: done (commit 70e2074)
 - priority: P2
 - category: package
 - findings: lane-5 F-5.8 + F-5.9 (profile half)
@@ -930,19 +930,19 @@ blocking; if the architect overrides one, record the override here before the af
  {"id":"RF-21","phase":3,"title":"one write/read authorisation predicate","status":"done (commit 7740e55)","deps":["RF-19","RF-20"],"risk":"low","priority":"P1","findings":["F-2.7"],"files":["browser_control/lib/browser/"],"target":["browser_control/lib/browser/machine.py"]},
  {"id":"RF-22","phase":3,"title":"EndpointGuard object with forget()","status":"done (commit 7740e55)","deps":["RF-19","RF-03"],"risk":"medium","priority":"P1","findings":["F-2.2","F-6.1"],"files":["browser_control/lib/browser/"],"target":["browser_control/lib/browser/owners.py"]},
  {"id":"RF-23","phase":4,"title":"lib/dom/ package behind facade","status":"todo","deps":["RF-10"],"risk":"medium","priority":"P1","findings":["F-3.1","F-3.12"],"files":["browser_control/lib/dom.py"],"target":["browser_control/lib/dom/"]},
- {"id":"RF-24","phase":4,"title":"dom/scripts.py + fill()","status":"todo","deps":["RF-23"],"risk":"medium","priority":"P1","findings":["F-3.4","F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/scripts.py"]},
- {"id":"RF-25","phase":4,"title":"Verdict + PageState reply convention","status":"todo","deps":["RF-23"],"risk":"medium","priority":"P1","findings":["F-3.5","F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/result.py"]},
- {"id":"RF-26","phase":4,"title":"one page-session factory + connection reuse","status":"todo","deps":["RF-18","RF-23"],"risk":"medium","priority":"P1","findings":["F-6.10"],"files":["browser_control/lib/dom/","browser_control/lib/browser/"],"target":["browser_control/lib/dom/tab.py"]},
- {"id":"RF-27","phase":4,"title":"Tab: one per-verb prelude","status":"todo","deps":["RF-24","RF-25","RF-26"],"risk":"high","priority":"P1","findings":["F-3.2","F-3.3","F-6.9"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/tab.py","browser_control/lib/dom/actions.py"]},
- {"id":"RF-28","phase":4,"title":"hover/changed dedup","status":"todo","deps":["RF-24","RF-25","RF-27"],"risk":"low","priority":"P2","findings":["F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/actions.py"]},
- {"id":"RF-29","phase":4,"title":"dom.frames resolves internally","status":"todo","deps":["RF-23"],"risk":"low","priority":"P1","findings":["F-4.9","F-6.15","F-3.11"],"files":["browser_control/cli/main.py","browser_control/lib/dom/"],"target":["browser_control/lib/dom/frames.py"]},
- {"id":"RF-30","phase":4,"title":"dom/keys.py one key-triple source","status":"todo","deps":["RF-23"],"risk":"medium","priority":"P2","findings":["F-3.10"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/keys.py"]},
+ {"id":"RF-24","phase":4,"title":"dom/scripts.py + fill()","status":"done (commit 6e142f9)","deps":["RF-23"],"risk":"medium","priority":"P1","findings":["F-3.4","F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/scripts.py"]},
+ {"id":"RF-25","phase":4,"title":"Verdict + PageState reply convention","status":"done (commit 789331f)","deps":["RF-23"],"risk":"medium","priority":"P1","findings":["F-3.5","F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/result.py"]},
+ {"id":"RF-26","phase":4,"title":"one page-session factory + connection reuse","status":"done (commit 35489ff)","deps":["RF-18","RF-23"],"risk":"medium","priority":"P1","findings":["F-6.10"],"files":["browser_control/lib/dom/","browser_control/lib/browser/"],"target":["browser_control/lib/dom/tab.py"]},
+ {"id":"RF-27","phase":4,"title":"Tab: one per-verb prelude","status":"done (commit fe8ab46)","deps":["RF-24","RF-25","RF-26"],"risk":"high","priority":"P1","findings":["F-3.2","F-3.3","F-6.9"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/tab.py","browser_control/lib/dom/actions.py"]},
+ {"id":"RF-28","phase":4,"title":"hover/changed dedup","status":"done (commit fe8ab46)","deps":["RF-24","RF-25","RF-27"],"risk":"low","priority":"P2","findings":["F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/actions.py"]},
+ {"id":"RF-29","phase":4,"title":"dom.frames resolves internally","status":"done (commit 6506468)","deps":["RF-23"],"risk":"low","priority":"P1","findings":["F-4.9","F-6.15","F-3.11"],"files":["browser_control/cli/main.py","browser_control/lib/dom/"],"target":["browser_control/lib/dom/frames.py"]},
+ {"id":"RF-30","phase":4,"title":"dom/keys.py one key-triple source","status":"done (commit 6506468)","deps":["RF-23"],"risk":"medium","priority":"P2","findings":["F-3.10"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/keys.py"]},
  {"id":"RF-31","phase":5,"title":"cli/ package + VerbArgs","status":"todo","deps":["RF-10"],"risk":"medium","priority":"P1","findings":["F-4.2","F-4.5","F-6.6"],"files":["browser_control/cli/main.py","plugins/x_reader.py"],"target":["browser_control/cli/argv.py","browser_control/cli/verbs/"]},
  {"id":"RF-32","phase":5,"title":"Verb record + single action resolver","status":"todo","deps":["RF-31","RF-09"],"risk":"medium","priority":"P1","findings":["F-4.3","F-4.4","F-5.7"],"files":["browser_control/cli/"],"target":["browser_control/cli/registry.py","browser_control/cli/usage.py"]},
  {"id":"RF-33","phase":5,"title":"lib/plugins/ package, typed actions","status":"todo","deps":["RF-09"],"risk":"low","priority":"P1","findings":["F-5.4","F-5.5","F-5.9","F-6.14"],"files":["browser_control/lib/plugins.py","browser_control/cli/main.py"],"target":["browser_control/lib/plugins/"]},
- {"id":"RF-34","phase":5,"title":"plugin_api.py named seam","status":"todo","deps":["RF-33"],"risk":"medium","priority":"P2","findings":["F-5.6"],"files":["plugins/x_reader.py","plugins/README.md","browser_control/lib/plugins.py"],"target":["browser_control/plugin_api.py"]},
+ {"id":"RF-34","phase":5,"title":"plugin_api.py named seam","status":"done (commit 9df582b)","deps":["RF-33"],"risk":"medium","priority":"P2","findings":["F-5.6"],"files":["plugins/x_reader.py","plugins/README.md","browser_control/lib/plugins.py"],"target":["browser_control/plugin_api.py"]},
  {"id":"RF-35","phase":5,"title":"Invocation + Reporter; main() facade","status":"todo","deps":["RF-31","RF-32","RF-33","RF-09","RF-08"],"risk":"medium","priority":"P1","findings":["F-4.1","F-5.5","F-6.1"],"files":["browser_control/cli/main.py"],"target":["browser_control/cli/runner.py","browser_control/cli/emit.py"]},
- {"id":"RF-36","phase":5,"title":"lib/profile/ package + seedtree.py","status":"todo","deps":["RF-12","RF-14"],"risk":"low","priority":"P2","findings":["F-5.8","F-5.9"],"files":["browser_control/lib/profile.py"],"target":["browser_control/lib/profile/","browser_control/lib/seedtree.py"]},
+ {"id":"RF-36","phase":5,"title":"lib/profile/ package + seedtree.py","status":"done (commit 70e2074)","deps":["RF-12","RF-14"],"risk":"low","priority":"P2","findings":["F-5.8","F-5.9"],"files":["browser_control/lib/profile.py"],"target":["browser_control/lib/profile/","browser_control/lib/seedtree.py"]},
  {"id":"RF-37","phase":5,"title":"test-seam sweep (final audit)","status":"todo","deps":["RF-01","RF-02","RF-03","RF-04","RF-05","RF-06","RF-07","RF-08","RF-09","RF-10","RF-11","RF-12","RF-13","RF-14","RF-15","RF-16","RF-17","RF-18","RF-19","RF-20","RF-21","RF-22","RF-23","RF-24","RF-25","RF-26","RF-27","RF-28","RF-29","RF-30","RF-31","RF-32","RF-33","RF-34","RF-35","RF-36"],"risk":"medium","priority":"P1","findings":["F-2.9","F-3.12","F-4.6","F-6.11"],"files":["tests/test_unit.py","tests/live_test.py"],"target":["tests/"]}
 ]
 ```
