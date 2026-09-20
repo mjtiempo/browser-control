@@ -2015,7 +2015,7 @@ def t_frames_bind_to_their_tab() -> None:
             {"index": 0, "url": "u", "name": "", "box": [], "visible": True,
              "same_process": False, "target": "",
              "attribution": "unattributable", "candidates": 0}]
-        listed = dom.frames(row, tab_row)                     # noqa: SLF001
+        listed = dom.frames_of_rows(row, tab_row)            # noqa: SLF001
         assert listed["separate"] is None, listed
         assert "cannot attribute" in listed["note"], listed
         dom.frames_of = lambda port, page, census=None: two  # type: ignore[assignment]

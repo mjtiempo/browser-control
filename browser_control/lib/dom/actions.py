@@ -21,7 +21,7 @@ from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports
     as_list,
 )
 from browser_control.lib.dom.keys import (  # pyright: ignore[reportMissingImports]
-    KEYS,
+    key_event,
 )
 from browser_control.lib.dom.queries import (  # pyright: ignore[reportMissingImports]
     FIND_CAP,
@@ -475,17 +475,12 @@ def select(text: str | None = None, selector: str | None = None,
             fail(ERR_SELECT_NOT_VERIFIED,
                  f"{_pkg._describe(element)} cannot take the DOM focus, so the "
                  f"arrow keys would go elsewhere: {e.message}")
-        key = KEYS["arrowdown" if delta > 0 else "arrowup"]
-        key_name, code, vk, _text = key
+        key_name = "arrowdown" if delta > 0 else "arrowup"
         for _step in range(abs(delta)):
             session.call("Input.dispatchKeyEvent",
-                         {"type": "rawKeyDown", "key": key_name,
-                          "code": code, "windowsVirtualKeyCode": vk,
-                          "nativeVirtualKeyCode": vk})
+                         key_event(key_name, "rawKeyDown", with_text=False))
             session.call("Input.dispatchKeyEvent",
-                         {"type": "keyUp", "key": key_name, "code": code,
-                          "windowsVirtualKeyCode": vk,
-                          "nativeVirtualKeyCode": vk})
+                         key_event(key_name, "keyUp", with_text=False))
         _attempts, after = poll(
             lambda: _select_probe(session, needle, css, index, wanted),
             timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,

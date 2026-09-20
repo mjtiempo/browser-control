@@ -136,8 +136,18 @@ def frames_of(port: int, page_target: str,
                      "candidates": shared.get(url, 0)})
     return rows
 
-def frames(row: dict, tab_row: dict) -> dict:
-    """`tab frames`: the page's own TOP-LEVEL frames, and which can be driven."""
+def frames(tab: str = "", browser: str = "") -> dict:
+    """`tab frames`: the page's own TOP-LEVEL frames, and which can be driven.
+
+    Resolves its own tab, like every other verb: the CLI used to reach the
+    private `_resolve` for this one call (a review flagged it).
+    """
+    row, tab_row = _pkg._resolve(tab, browser, for_write=False)
+    return frames_of_rows(row, tab_row)
+
+
+def frames_of_rows(row: dict, tab_row: dict) -> dict:
+    """`frames` for an already-resolved (browser row, tab row)."""
     port = cdp.port_of(str(row["profile"]))
     rows = _pkg.frames_of(port, str(tab_row["id"]))
     unattributed = any(r.get("attribution") for r in rows)

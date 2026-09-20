@@ -706,8 +706,7 @@ def cmd_tab_frames(rest: list[str], browser: str) -> dict:
     """`tab frames [--tab SPEC]` — this page's iframes, and which are drivable."""
     rest, spec = _tab_flag(rest, "tab frames")
     _none(rest, "tab frames")
-    row, tab_row = dom._resolve(spec, browser, for_write=False)  # noqa: SLF001
-    return dom.frames(row, tab_row)
+    return dom.frames(tab=spec, browser=browser)
 
 
 def cmd_tab_find(rest: list[str], browser: str) -> dict:

@@ -50,6 +50,7 @@ from browser_control.lib.dom.frames import (  # noqa: F401
     frame_resolved,
     frames,
     frames_of,
+    frames_of_rows,
 )
 from browser_control.lib.dom.keys import (  # noqa: F401
     KEYS,

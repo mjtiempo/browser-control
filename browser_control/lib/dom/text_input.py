@@ -20,6 +20,8 @@ from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports
 )
 from browser_control.lib.dom.keys import (  # pyright: ignore[reportMissingImports]
     KEYS,
+    key_event,
+    typed_events,
 )
 from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
     TEXT_TARGET_EXPR,
@@ -89,21 +91,15 @@ def press(key: str, tab: str = "", browser: str = "") -> dict:
     if name not in KEYS:
         fail(ERR_BAD_ARGS, f"tab press: unknown key {key!r} "
                          f"(have: {', '.join(sorted(KEYS))})")
-    key_name, code, vk, text = KEYS[name]
+    key_name = KEYS[name][0]
     row, tab_row = _pkg._resolve(tab, browser, for_write=True)
     with _pkg._session(row, tab_row) as session:
-        down: dict = {"type": "keyDown" if text else "rawKeyDown",
-                      "key": key_name, "code": code,
-                      "windowsVirtualKeyCode": vk,
-                      "nativeVirtualKeyCode": vk}
-        if text:
-            down["text"] = text
-            down["unmodifiedText"] = text
-        session.call("Input.dispatchKeyEvent", down)
+        # a key WITH text goes as `keyDown` (the browser composes it); one
+        # without goes as `rawKeyDown` — the same split the table implies
+        down = "keyDown" if KEYS[name][3] else "rawKeyDown"
+        session.call("Input.dispatchKeyEvent", key_event(name, down))
         session.call("Input.dispatchKeyEvent",
-                     {"type": "keyUp", "key": key_name, "code": code,
-                      "windowsVirtualKeyCode": vk,
-                      "nativeVirtualKeyCode": vk})
+                     key_event(name, "keyUp", with_text=False))
     return {"ok": True, "key": key_name, "target": "page",
             "verified": False,
             "note": ("the key event was dispatched; read the effect with "
@@ -186,25 +182,15 @@ def type_text(text: str, tab: str = "", browser: str = "") -> dict:
         before = _preflight(session, value, "tab type")
         for char in value:
             if char == "\n":
+                # NO text on this keyDown, deliberately: that variant does not
+                # submit a form, which is what `type "a\n"` promises
                 session.call("Input.dispatchKeyEvent",
-                             {"type": "keyDown", "key": "Enter",
-                              "code": "Enter", "windowsVirtualKeyCode": 13,
-                              "nativeVirtualKeyCode": 13})
+                             key_event("enter", "keyDown", with_text=False))
                 session.call("Input.dispatchKeyEvent",
-                             {"type": "keyUp", "key": "Enter",
-                              "code": "Enter", "windowsVirtualKeyCode": 13,
-                              "nativeVirtualKeyCode": 13})
+                             key_event("enter", "keyUp", with_text=False))
             else:
-                vk = ord(char)
-                base = {"key": char, "code": char,
-                        "windowsVirtualKeyCode": vk,
-                        "nativeVirtualKeyCode": vk}
-                session.call("Input.dispatchKeyEvent",
-                             {"type": "keyDown", **base})
-                session.call("Input.dispatchKeyEvent",
-                             {"type": "char", "text": char, **base})
-                session.call("Input.dispatchKeyEvent",
-                             {"type": "keyUp", **base})
+                for event in typed_events(char):
+                    session.call("Input.dispatchKeyEvent", event)
             time.sleep(TYPE_PAUSE_S)      # the page's handlers need air
         after = _text_target(session)
     return _text_reply(row, tab_row, before, after, value, "type")
