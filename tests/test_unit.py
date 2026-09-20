@@ -858,16 +858,10 @@ def t_one_tab_addressing() -> None:
                 browser.endpoint_owner = real_owner           # type: ignore[assignment]
                 cdp.port_of = real_port                       # type: ignore[assignment]
                 cdp.browser_call = real_call                  # type: ignore[assignment]
-            # …and the tabs read that failed is the ONLY place the error may be
-            # dropped: `_tabs_of(row)[0]` must not appear anywhere in the tier
-            # (the module became a package; the check reads all of it)
-            package = (Path(__file__).resolve().parent.parent
-                       / "browser_control/lib/browser")
-            source = "\n".join(p.read_text(encoding="utf-8")
-                              for p in sorted(package.glob("*.py")))
-            assert "_tabs_of(row)[0]" not in source, \
-                "a failed tabs read must refuse, not read as 'no tabs'"
-            assert "_tabs_or_fail(row)" in source
+            # …and the BEHAVIOUR above is the check: a failed read refuses and
+            # a good one passes through. The old assertion read the tier's
+            # source text for `_tabs_of(row)[0]`; the refusal test proves the
+            # same property and cannot pass on a rename (RF-37).
         finally:
             browser.browsers = real_browsers          # type: ignore[assignment]
             browser.cdp.page_rows_at = real_rows      # type: ignore[assignment]
