@@ -176,7 +176,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-6-crosscutting.md#F-6.2`
 
 ### RF-02 — `lib/coerce.py`: one numeric/sequence coercer
-- status: todo
+- status: done (commit f724849)
 - priority: P1
 - category: dedup
 - findings: lane-6 F-6.5 (int half), lane-3 F-3.1 (scattered helpers)
@@ -193,7 +193,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-6-crosscutting.md#F-6.5`
 
 ### RF-03 — `lib/proc.py`: one `/proc` reader (dedupes `cdp` vs `browser`)
-- status: todo
+- status: done (commit df385db)
 - priority: P1
 - category: lib
 - findings: lane-6 F-6.3, lane-2 F-2.3
@@ -212,7 +212,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-6-crosscutting.md#F-6.3`, `lane-2-browser.md#F-2.3`
 
 ### RF-04 — `lib/poll.py`: one deadline loop
-- status: todo
+- status: done (commit 7fff291)
 - priority: P1
 - category: dedup
 - findings: lane-6 F-6.4, lane-3 F-3.9
@@ -231,7 +231,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-6-crosscutting.md#F-6.4`, `lane-3-dom.md#F-3.9`
 
 ### RF-05 — `lib/paths.py`: one path/root/profile resolver
-- status: todo
+- status: done (commit 4eb04cc)
 - priority: P1
 - category: lib
 - findings: lane-6 F-6.5 (paths half), lane-5 F-5.1 (private reaches)
@@ -247,7 +247,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-6-crosscutting.md#F-6.5`
 
 ### RF-06 — `errors.CODES`: register the refusal vocabulary (P2)
-- status: todo
+- status: done (commit 4101928)
 - priority: P2
 - category: naming
 - findings: lane-1 F-1.5
@@ -263,7 +263,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-1-transport.md#F-1.5`
 
 ### RF-07 — `lib/images.py`: the screenshot file layer, CDP-free
-- status: todo
+- status: done (commit a47722a)
 - priority: P1
 - category: lib
 - findings: lane-3 F-3.7
@@ -279,7 +279,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-3-dom.md#F-3.7`
 
 ### RF-08 — `lib/scope.py::Scope`: own the per-invocation profile + frame (D-1)
-- status: todo
+- status: done (commit 4e8cddf)
 - priority: P1
 - category: state
 - findings: lane-6 F-6.1, lane-2 F-2.2 (`SCOPE`), lane-3 F-3.6 (`FRAME`), lane-4 open-q 2
@@ -300,7 +300,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-6-crosscutting.md#F-6.1`, `lane-3-dom.md#F-3.6`
 
 ### RF-09 — capabilities: `Surface` (declaration) + `Policy` (gate) value objects
-- status: todo
+- status: done (commit f4f88fe)
 - priority: P1
 - category: state/class
 - findings: lane-1 F-1.4, lane-6 F-6.1, lane-5 F-5.5 (gate half)
@@ -320,7 +320,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-1-transport.md#F-1.4`
 
 ### RF-10 — publish the seams, delete the dead, fix the naming
-- status: todo
+- status: done (commit 5196cf2)
 - priority: P1
 - category: dead-code/naming/tests
 - findings: lane-2 F-2.10 + F-2.9 (publish half), lane-6 F-6.12 + F-6.13 + F-6.11 (publish half),
@@ -908,15 +908,15 @@ blocking; if the architect overrides one, record the override here before the af
 ```json
 [
  {"id":"RF-01","phase":1,"title":"lib/text.py: one untrusted-text flattener","status":"done (commit 28c06d4)","deps":[],"risk":"low","priority":"P1","findings":["F-6.2"],"files":["browser_control/lib/cdp.py","browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/audit.py"],"target":["browser_control/lib/text.py"]},
- {"id":"RF-02","phase":1,"title":"lib/coerce.py: one numeric/sequence coercer","status":"todo","deps":[],"risk":"low","priority":"P1","findings":["F-6.5"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/profile.py"],"target":["browser_control/lib/coerce.py"]},
- {"id":"RF-03","phase":1,"title":"lib/proc.py: one /proc reader","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-6.3","F-2.3"],"files":["browser_control/lib/cdp.py","browser_control/lib/browser.py"],"target":["browser_control/lib/proc.py"]},
- {"id":"RF-04","phase":1,"title":"lib/poll.py: one deadline loop","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-6.4","F-3.9"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/cdp.py"],"target":["browser_control/lib/poll.py"]},
- {"id":"RF-05","phase":1,"title":"lib/paths.py: one path/root/profile resolver","status":"todo","deps":[],"risk":"low","priority":"P1","findings":["F-6.5","F-5.1"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py","browser_control/lib/audit.py","browser_control/lib/plugins.py"],"target":["browser_control/lib/paths.py"]},
- {"id":"RF-06","phase":1,"title":"errors.CODES: register the refusal vocabulary","status":"todo","deps":[],"risk":"low","priority":"P2","findings":["F-1.5"],"files":["browser_control/lib/errors.py"],"target":["browser_control/lib/errors.py"]},
- {"id":"RF-07","phase":1,"title":"lib/images.py: CDP-free screenshot file layer","status":"todo","deps":[],"risk":"low","priority":"P1","findings":["F-3.7"],"files":["browser_control/lib/dom.py"],"target":["browser_control/lib/images.py"]},
- {"id":"RF-08","phase":1,"title":"lib/scope.py::Scope: own profile+frame","status":"todo","deps":[],"risk":"high","priority":"P1","findings":["F-6.1","F-2.2","F-3.6"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py"],"target":["browser_control/lib/scope.py"]},
- {"id":"RF-09","phase":1,"title":"capabilities Surface + policy Policy","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-1.4","F-6.1"],"files":["browser_control/lib/capabilities.py"],"target":["browser_control/lib/capabilities.py","browser_control/lib/policy.py"]},
- {"id":"RF-10","phase":1,"title":"publish seams, delete dead, fix naming","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-2.9","F-2.10","F-3.11","F-4.7","F-6.11","F-6.12","F-6.13"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py","browser_control/lib/audit.py"],"target":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py"]},
+ {"id":"RF-02","phase":1,"title":"lib/coerce.py: one numeric/sequence coercer","status":"done (commit f724849)","deps":[],"risk":"low","priority":"P1","findings":["F-6.5"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/profile.py"],"target":["browser_control/lib/coerce.py"]},
+ {"id":"RF-03","phase":1,"title":"lib/proc.py: one /proc reader","status":"done (commit df385db)","deps":[],"risk":"medium","priority":"P1","findings":["F-6.3","F-2.3"],"files":["browser_control/lib/cdp.py","browser_control/lib/browser.py"],"target":["browser_control/lib/proc.py"]},
+ {"id":"RF-04","phase":1,"title":"lib/poll.py: one deadline loop","status":"done (commit 7fff291)","deps":[],"risk":"medium","priority":"P1","findings":["F-6.4","F-3.9"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/cdp.py"],"target":["browser_control/lib/poll.py"]},
+ {"id":"RF-05","phase":1,"title":"lib/paths.py: one path/root/profile resolver","status":"done (commit 4eb04cc)","deps":[],"risk":"low","priority":"P1","findings":["F-6.5","F-5.1"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py","browser_control/lib/audit.py","browser_control/lib/plugins.py"],"target":["browser_control/lib/paths.py"]},
+ {"id":"RF-06","phase":1,"title":"errors.CODES: register the refusal vocabulary","status":"done (commit 4101928)","deps":[],"risk":"low","priority":"P2","findings":["F-1.5"],"files":["browser_control/lib/errors.py"],"target":["browser_control/lib/errors.py"]},
+ {"id":"RF-07","phase":1,"title":"lib/images.py: CDP-free screenshot file layer","status":"done (commit a47722a)","deps":[],"risk":"low","priority":"P1","findings":["F-3.7"],"files":["browser_control/lib/dom.py"],"target":["browser_control/lib/images.py"]},
+ {"id":"RF-08","phase":1,"title":"lib/scope.py::Scope: own profile+frame","status":"done (commit 4e8cddf)","deps":[],"risk":"high","priority":"P1","findings":["F-6.1","F-2.2","F-3.6"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py"],"target":["browser_control/lib/scope.py"]},
+ {"id":"RF-09","phase":1,"title":"capabilities Surface + policy Policy","status":"done (commit f4f88fe)","deps":[],"risk":"medium","priority":"P1","findings":["F-1.4","F-6.1"],"files":["browser_control/lib/capabilities.py"],"target":["browser_control/lib/capabilities.py","browser_control/lib/policy.py"]},
+ {"id":"RF-10","phase":1,"title":"publish seams, delete dead, fix naming","status":"done (commit 5196cf2)","deps":[],"risk":"medium","priority":"P1","findings":["F-2.9","F-2.10","F-3.11","F-4.7","F-6.11","F-6.12","F-6.13"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py","browser_control/lib/audit.py"],"target":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py"]},
  {"id":"RF-11","phase":2,"title":"lib/locks.py: typed lock + choreography","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-2.5","F-5.2"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py"],"target":["browser_control/lib/locks.py"]},
  {"id":"RF-12","phase":2,"title":"lib/attachments.py: one attached.json owner","status":"todo","deps":["RF-11"],"risk":"medium","priority":"P1","findings":["F-2.4","F-5.3"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py"],"target":["browser_control/lib/attachments.py"]},
  {"id":"RF-13","phase":2,"title":"Selector: one named-browser value object","status":"todo","deps":["RF-05","RF-19"],"risk":"medium","priority":"P1","findings":["F-2.6","F-6.7"],"files":["browser_control/lib/browser.py","browser_control/cli/main.py"],"target":["browser_control/lib/browser/selector.py"]},
