@@ -36,6 +36,7 @@ import shutil
 import stat
 import time
 
+from browser_control.lib import attachments as attachments_lib
 from browser_control.lib import browser as browser_lib
 from browser_control.lib import locks
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
@@ -504,9 +505,9 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
                  "`profile info` shows it first")
         detached = browser_lib.is_attached(target)
         if detached:
-            records = browser_lib._attached()                # noqa: SLF001
-            records.pop(norm(target), None)
-            browser_lib._write_attached(records)             # noqa: SLF001
+            # the root lock is already held here (instance_locks): the store's
+            # unlocked drop is the one that must be used
+            attachments_lib.STORE.drop_unlocked(target)
         try:
             shutil.rmtree(target)
         except OSError as e:

@@ -24,7 +24,6 @@ publishes rather than an assumed 9222.
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import re
 import shutil
@@ -36,6 +35,9 @@ from typing import Any
 # The project-level pyright run resolves these imports; the line-level ignore
 # is for pi-lens's fallback index, which does not see the sibling modules.
 from browser_control.lib import (
+    attachments as attachments_lib,  # pyright: ignore[reportMissingImports]
+)
+from browser_control.lib import (
     cdp,  # pyright: ignore[reportMissingImports]
     locks,  # pyright: ignore[reportMissingImports]
 )
@@ -46,7 +48,6 @@ from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingIm
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_ACTIVATE_NOT_VERIFIED,
     ERR_AMBIGUOUS_BROWSER,
-    ERR_ATTACH_FAILED,
     ERR_BAD_ARGS,
     ERR_BROWSER_NOT_STOPPED,
     ERR_CDP_ERROR,
@@ -307,7 +308,7 @@ def browsers() -> list[dict]:
     machine rather than our own corner of it.
     """
     rows: list[dict] = []
-    attached = _attached()
+    attached = attachments_lib.STORE.records()
     for pid, exe, cmd in main_processes():
         flag = cmdline_value(cmd, "--user-data-dir")
         profile = flag or _default_profile(exe)
@@ -350,45 +351,9 @@ def list_browsers() -> dict:
             "browsers": rows}
 
 
-ATTACH_FILE = "attached.json"
-
-
-def _attached() -> dict[str, dict]:
-    """The attach records, keyed by absolute profile path.
-
-    A missing, unreadable or malformed file is {}: an attachment that cannot
-    be read is not an authorization to write anywhere.
-    """
-    try:
-        with open(os.path.join(root(), ATTACH_FILE)) as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, list):
-        return {}
-    return {_norm(row["profile"]): row for row in data
-            if isinstance(row, dict) and row.get("profile")}
-
-
-def _write_attached(records: dict[str, dict]) -> None:
-    """Replace the attach file. One scratch file and a rename, so a crash
-    cannot leave a half-written list of authorizations."""
-    path = os.path.join(root(), ATTACH_FILE)
-    temp = f"{path}.new"
-    try:
-        os.makedirs(root(), exist_ok=True)
-        with open(temp, "w") as handle:
-            json.dump(sorted(records.values(),
-                             key=lambda r: str(r.get("profile"))),
-                      handle, indent=1)
-        os.replace(temp, path)
-    except OSError as e:
-        fail(ERR_ATTACH_FAILED, f"cannot write {path}: {e}")
-
-
 def is_attached(profile: str) -> bool:
     """Is this profile attached for tab writes?"""
-    return _norm(profile) in _attached()
+    return attachments_lib.STORE.is_attached(profile)
 
 
 def _narrow(rows: list[dict], browser: str) -> list[dict]:
@@ -515,7 +480,7 @@ def managed_profile(browser: str = "") -> str:
 
 def attachments() -> dict:
     """`attach --list`: what is attached, and whether it is still there."""
-    records = _attached()
+    records = attachments_lib.STORE.records()
     live = {_norm(r["profile"]): r for r in browsers()}
     rows: list[dict] = []
     for key in sorted(records):
@@ -569,13 +534,9 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
               "port": as_int(row["cdp"]["port"]), "exe": row["exe"],
               "managed": row["managed"],
               "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-    # the read-modify-write of the records runs under the root's lock: two
-    # `attach`s at once used to overwrite each other's line
-    with _lock(_lock_path(root()), "attach") as lock:
-        records = _attached()
-        already = record["profile"] in records
-        records[record["profile"]] = record
-        _write_attached(records)
+    # the read-modify-write of the records runs under the root's lock (the
+    # store owns it): two `attach`s at once used to overwrite each other's line
+    already, lock = attachments_lib.STORE.put(record)
     reply = {"ok": True, "attached": True, "already": already,
              "browser": {"pid": record["pid"], "exe": record["exe"],
                          "profile": record["profile"],
@@ -593,9 +554,7 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
     if detach_all:
         if port or pid or profile:
             fail(ERR_BAD_ARGS, "detach: --all takes no other selector")
-        with _lock(_lock_path(root()), "detach") as lock:
-            keys = sorted(_attached())
-            _write_attached({})
+        keys, lock = attachments_lib.STORE.drop_all()
         reply = {"ok": True, "detached": keys, "count": 0}
         lock.warn(reply)
         return reply
@@ -605,24 +564,13 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
         fail(ERR_BAD_ARGS,
              "detach: name ONE browser — --port N, --pid N, --profile DIR, "
              "or --all")
-    # the read-modify-write of the records runs under the root's lock, so two
-    # `attach`/`detach` calls cannot lose each other's line
-    with _lock(_lock_path(root()), "detach") as lock:
-        records = _attached()
-        if profile:
-            keys = [key for key in records if key == _norm(profile)]
-        elif pid:
-            keys = [key for key, rec in records.items()
-                    if as_int(rec.get("pid")) == as_int(pid)]
-        else:
-            keys = [key for key, rec in records.items()
-                    if as_int(rec.get("port")) == as_int(port)]
-        if not keys:
-            fail(ERR_NOT_ATTACHED, f"nothing is attached for {given[0]}")
-        for key in keys:
-            records.pop(key, None)
-        _write_attached(records)
-    reply = {"ok": True, "detached": keys, "count": len(records)}
+    # the read-modify-write of the records runs under the root's lock (the
+    # store owns it), so two `attach`/`detach` calls cannot lose each other's line
+    keys, lock = attachments_lib.STORE.drop(profile, pid=pid, port=port)
+    if not keys:
+        fail(ERR_NOT_ATTACHED, f"nothing is attached for {given[0]}")
+    reply = {"ok": True, "detached": keys,
+             "count": len(attachments_lib.STORE.records())}
     lock.warn(reply)
     return reply
 
