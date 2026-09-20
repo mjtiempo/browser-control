@@ -23,9 +23,8 @@ import contextlib
 import re
 import urllib.parse
 
-from browser_control.lib import browser as browser_lib
-from browser_control.lib import dom
-from browser_control.lib.errors import ControlError, fail
+from browser_control import plugin_api
+from browser_control.plugin_api import ControlError, fail
 
 DEFAULT_CAP = 10
 MAX_CAP = 50
@@ -99,7 +98,7 @@ def _selected_sort(tab: str, browser: str, fallback: str) -> str:
     made. This is the honest way to say "sorted by date": ask the UI.
     """
     try:
-        data = dom.extract(each='[role="tab"]',
+        data = plugin_api.extract(each='[role="tab"]',
                            fields=["label=:scope", "selected=@aria-selected"],
                            cap=12, chars=40, tab=tab, browser=browser)
     except ControlError:
@@ -171,18 +170,18 @@ def run(rest: list[str], browser: str) -> dict:
         fail("bad-args", "x search: an empty QUERY is not a search")
 
     url = _search_url(query, latest=(not top))
-    browser_lib.nav(url, tab=tab, browser=browser)
+    plugin_api.nav(url, tab=tab, browser=browser)
     # X keeps long-lived connections, and the extraction below is the real
     # read-back: a page that never reports "idle" is not fatal here.
     with contextlib.suppress(ControlError):
-        dom.wait("idle", timeout=WAIT_S, tab=tab, browser=browser)
+        plugin_api.wait("idle", timeout=WAIT_S, tab=tab, browser=browser)
     # ...but idle does NOT mean rendered: X builds the result list after the
     # network quiets, so wait for the first post itself. No results (or a
     # wall) times out, and the extraction below then answers zero, honestly.
     with contextlib.suppress(ControlError):
-        dom.wait("element", selector=POST, timeout=POST_WAIT_S,
+        plugin_api.wait("element", selector=POST, timeout=POST_WAIT_S,
                  tab=tab, browser=browser)
-    data = dom.extract(each=POST, fields=FIELDS,
+    data = plugin_api.extract(each=POST, fields=FIELDS,
                        cap=_number(cap, "--cap", DEFAULT_CAP, MAX_CAP),
                        chars=_number(chars, "--chars", DEFAULT_CHARS, 20_000),
                        tab=tab, browser=browser)
