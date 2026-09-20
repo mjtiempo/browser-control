@@ -157,7 +157,7 @@ blocking; if the architect overrides one, record the override here before the af
 ## Phase 1 — foundation leaves (no behaviour change)
 
 ### RF-01 — `lib/text.py`: one untrusted-text flattener
-- status: done (commit bc62686)
+- status: done (commit 28c06d4)
 - priority: P1
 - category: dedup
 - findings: lane-6 F-6.2
@@ -907,7 +907,7 @@ blocking; if the architect overrides one, record the override here before the af
 
 ```json
 [
- {"id":"RF-01","phase":1,"title":"lib/text.py: one untrusted-text flattener","status":"done (commit bc62686)","deps":[],"risk":"low","priority":"P1","findings":["F-6.2"],"files":["browser_control/lib/cdp.py","browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/audit.py"],"target":["browser_control/lib/text.py"]},
+ {"id":"RF-01","phase":1,"title":"lib/text.py: one untrusted-text flattener","status":"done (commit 28c06d4)","deps":[],"risk":"low","priority":"P1","findings":["F-6.2"],"files":["browser_control/lib/cdp.py","browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/audit.py"],"target":["browser_control/lib/text.py"]},
  {"id":"RF-02","phase":1,"title":"lib/coerce.py: one numeric/sequence coercer","status":"todo","deps":[],"risk":"low","priority":"P1","findings":["F-6.5"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/profile.py"],"target":["browser_control/lib/coerce.py"]},
  {"id":"RF-03","phase":1,"title":"lib/proc.py: one /proc reader","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-6.3","F-2.3"],"files":["browser_control/lib/cdp.py","browser_control/lib/browser.py"],"target":["browser_control/lib/proc.py"]},
  {"id":"RF-04","phase":1,"title":"lib/poll.py: one deadline loop","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-6.4","F-3.9"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/lib/cdp.py"],"target":["browser_control/lib/poll.py"]},
