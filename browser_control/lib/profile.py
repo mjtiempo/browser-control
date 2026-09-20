@@ -62,6 +62,7 @@ from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
     PID_FILE,
     expand,
     is_managed,
+    lock_path,
     norm,
     pid_file,
 )
@@ -406,9 +407,9 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     # read; a dry run touches no profile.
     target_lock = (contextlib.nullcontext({"held": True, "warning": ""})
                    if dry else
-                   browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001
+                   browser_lib.lock(lock_path(target),
                                      "profile seed"))
-    with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
+    with (browser_lib.lock(lock_path(root()),
                             "profile seed") as lock,
           target_lock as profile_lock):
         if not dry:
@@ -490,9 +491,9 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         fail(ERR_NOT_MANAGED,
              f"{target} is a symlink — this CLI wipes a profile directory, "
              "not a link to somebody else's")
-    with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
+    with (browser_lib.lock(lock_path(root()),
                             "profile reset") as lock,
-          browser_lib._lock(browser_lib._lock_path(target),  # noqa: SLF001
+          browser_lib.lock(lock_path(target),
                             "profile reset") as profile_lock):
         # the PROFILE's lock is the one `open` holds across its whole
         # check-then-act: without it, a reset could `rmtree` the directory a

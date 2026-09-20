@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -145,7 +146,8 @@ def t_profile_keyed_by_binary() -> None:
             assert browser.profile_dir("brave-browser") == \
                 os.path.join(tmp, "brave-browser")
             assert browser.profiles() == [], browser.profiles()
-            assert browser.live_profiles() == [], browser.live_profiles()
+            live = [p for p in browser.profiles() if cdp.reachable(p)]
+            assert live == [], live
         finally:
             _restore_root(keep_root)
 
@@ -2368,8 +2370,10 @@ def t_wait_own_port_requires_a_verified_owner() -> None:
         with tempfile.TemporaryDirectory() as profile:
             Path(profile, cdp.PORT_FILE).write_text(
                 f"{port}\n/devtools/browser/x\n")
-            assert browser._wait_port(profile, timeout=0.5) is True, \
-                "the fake endpoint answers"
+            deadline = time.time() + 0.5
+            while time.time() < deadline and not cdp.reachable(profile):
+                time.sleep(0.05)
+            assert cdp.reachable(profile), "the fake endpoint answers"
             assert browser._wait_own_port(profile, timeout=0.5) is False, \
                 "answering is not owning"
     finally:

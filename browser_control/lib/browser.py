@@ -210,11 +210,6 @@ def profiles() -> list[str]:
             if os.path.isdir(os.path.join(base, name))]
 
 
-def live_profiles() -> list[str]:
-    """The managed profiles a browser is answering CDP on right now."""
-    return [path for path in profiles() if cdp.reachable(path)]
-
-
 def ensure_up(profile: str) -> None:
     """Refuse now when the verb needs a browser and none is drivable."""
     if not cdp.reachable(profile):
@@ -757,7 +752,7 @@ def _tabs_or_fail(row: dict) -> list[dict]:
     return tabs
 
 
-def _tabs_of(row: dict) -> tuple[list[dict], str]:
+def tabs_of(row: dict) -> tuple[list[dict], str]:
     """(page tabs, error) for one browser row.
 
     A browser that stopped answering between the probe and the read is
@@ -775,7 +770,7 @@ def _tabs_of(row: dict) -> tuple[list[dict], str]:
         return [], e.message
 
 
-def _brief(row: dict) -> dict:
+def brief(row: dict) -> dict:
     """One browser row, small enough to ride along in a tab reply."""
     return {"pid": row["pid"], "exe": row["exe"], "profile": row["profile"],
             "managed": row["managed"], "attached": row["attached"],
@@ -876,15 +871,9 @@ def browser_info(browser: str = "") -> dict:
 
 
 # ------------------------------------------------------------- read-backs
-def _rows(profile: str) -> list[dict]:
+def rows(profile: str) -> list[dict]:
     """The page tabs, as every verb reports them."""
     return cdp.rows_to_tabs(cdp.page_rows(profile))
-
-
-def _wait_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
-    """The endpoint must ANSWER, not merely have a port file."""
-    return bool(poll(lambda: cdp.reachable(profile), timeout=timeout,
-                     interval=POLL_SLOW)[1])
 
 
 def _wait_own_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
@@ -982,7 +971,7 @@ def _wait_ids_gone(profile: str, ids: list[str],
                 accept=lambda left: not left)[1]
 
 
-def _verify_profile_endpoint(profile: str) -> None:
+def verify_profile_endpoint(profile: str) -> None:
     """Refuse when the endpoint on that profile is not the browser we think.
 
     `ensure_up` proves only that something ANSWERS; the port comes from a FILE,
@@ -1111,7 +1100,7 @@ def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
 
 
 @contextlib.contextmanager
-def _lock(path: str, verb: str, wait: float = LOCK_WAIT_S):
+def lock(path: str, verb: str, wait: float = LOCK_WAIT_S):
     """Hold `path` while a check-then-act runs, or refuse `profile-busy`.
 
     Yields ``{"held": bool, "warning": str}``: `held: False` is the
@@ -1446,8 +1435,8 @@ def _spec_hits(rows: list[dict], tabs_of: dict,
     return hits
 
 
-def _resolve_across(specs: list[str], browser: str,
-                    for_write: bool) -> list[tuple[dict, dict, int]]:
+def resolve_across(specs: list[str], browser: str,
+                   for_write: bool) -> list[tuple[dict, dict, int]]:
     """[(browser row, tab, index)] for every spec, across the drivable ones.
 
     EVERY spec is resolved before any of them is acted on, so an ambiguous or
@@ -1895,7 +1884,7 @@ def _no_drive(browser: str = "", reason: str = "") -> None:
          + (f" ({reason})" if reason else ""))
 
 
-def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
+def one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
     """(browser row, tab row) for the ONE tab a page verb acts on.
 
     With a spec: the same resolution every other verb uses (one match, or a
@@ -2234,7 +2223,7 @@ def activate(tab: str = "", browser: str = "") -> dict:
             "browser": _brief(row)}
 
 
-def reload(tab: str = "", browser: str = "") -> dict:      # noqa: A001
+def reload_page(tab: str = "", browser: str = "") -> dict:
     """`tab reload`: reload ONE tab and prove a NEW document is there.
 
     `location.reload()` returns immediately and a fast page can be complete
@@ -2255,3 +2244,16 @@ def reload(tab: str = "", browser: str = "") -> dict:      # noqa: A001
              "block the reload, or it is still loading")
     return {"ok": True, "tab": f"id:{target_id}", "reloaded": True,
             "url_read": _href(profile, target_id), "browser": _brief(row)}
+
+
+# ------------------------------------------------------------ public aliases
+# The names other modules call now; the `_`-prefixed spellings stay for one
+# release because the suites and the CLI grew up patching them by name (RF-37
+# migrates those patch targets, and proves they still intercept).
+_brief = brief
+_one_tab = one_tab
+_lock = lock
+_tabs_of = tabs_of
+_rows = rows
+_verify_profile_endpoint = verify_profile_endpoint
+_resolve_across = resolve_across

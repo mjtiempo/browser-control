@@ -1,7 +1,7 @@
 """dom — what a page READS and ACTS like: js, wait, find, text, click, scroll.
 
 The tier above `lib.browser`: every verb resolves ONE tab through the same
-rule as the other verbs (`browser._one_tab`), and then talks to that tab —
+rule as the other verbs (`browser.one_tab`), and then talks to that tab —
 through `cdp.Session`, ONE connection for the whole verb, because these verbs
 are sequences (a click is a move, a press, a release and a read; scrolling to
 an edge is a wheel and a read per step).
@@ -55,7 +55,7 @@ from typing import Any
 # tab resolution, one evaluation on that tab, and the browser block every
 # reply carries. They are private because no other module needs them.
 from browser_control.lib import audit, cdp, images
-from browser_control.lib import browser as tabs
+from browser_control.lib import browser as browser_lib
 from browser_control.lib import (
     scope as scope_state,  # pyright: ignore[reportMissingImports]
 )
@@ -678,7 +678,7 @@ def _viewport(data: dict, target_id: str) -> list[int]:
 
 def _resolve(tab: str, browser: str, for_write: bool) -> tuple[dict, dict]:
     """(browser row, tab row) — the resolution every other verb uses."""
-    return tabs._one_tab(tab, browser, for_write)  # noqa: SLF001
+    return browser_lib.one_tab(tab, browser, for_write)
 
 
 def _document_ws(port: int, page_target: str) -> str:
@@ -815,7 +815,7 @@ def frames(row: dict, tab_row: dict) -> dict:
         reply["note"] = ("this page has no iframes — nothing for `--frame` to "
                           "name")
     reply["tab"] = f"id:{tab_row['id']}"
-    reply["browser"] = tabs._brief(row)          # noqa: SLF001
+    reply["browser"] = browser_lib.brief(row)
     return reply
 
 
@@ -1140,7 +1140,7 @@ def _reply(row: dict, tab_row: dict, data: dict) -> dict:
     """The page-level facts every DOM read carries."""
     return {"tab": f"id:{tab_row['id']}", "url": data.get("url"),
             "title": data.get("title"), "visibility": data.get("visibility"),
-            "browser": tabs._brief(row)}  # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 # ------------------------------------------------------------------- verbs
@@ -1159,7 +1159,7 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
         value = session.evaluate(expr)
     return {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
             "verified": False, "note": "evaluated, not interpreted",
-            "browser": tabs._brief(row)}  # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def wait(mode: str, selector: str | None = None, expr: str | None = None,
@@ -1219,7 +1219,7 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
              + f" did not pass within {seconds:g}s ({samples} samples)")
     return {"ok": True, "for": name, "waited_s": round(time.time() - started, 1),
             "samples": samples, "tab": f"id:{target_id}",
-            "browser": tabs._brief(row)}  # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 EXTRACT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
@@ -1495,7 +1495,7 @@ def _click_at(row: dict, tab_row: dict, at: str) -> dict:
                       "page that reflows can move the control out from under "
                       "the click (so `under` says what is there afterwards)"),
              "tab": f"id:{tab_row['id']}",
-             "browser": tabs._brief(row)}         # noqa: SLF001
+             "browser": browser_lib.brief(row)}
     return _with_frame(reply)
 
 
@@ -1530,7 +1530,7 @@ def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
                       "intended — `tab hover TEXT|--selector CSS` is the "
                       "verified form"),
              "tab": f"id:{tab_row['id']}",
-             "browser": tabs._brief(row)}         # noqa: SLF001
+             "browser": browser_lib.brief(row)}
     return _with_frame(reply)
 
 
@@ -1628,7 +1628,7 @@ def click(text: str | None = None, selector: str | None = None,
             "note": ("real input (CDP), so handlers that ignore "
                      "element.click() take it; `changed` is whether anything "
                      "observable moved"),
-            "tab": f"id:{tab_row['id']}", "browser": tabs._brief(row)}  # noqa: SLF001
+            "tab": f"id:{tab_row['id']}", "browser": browser_lib.brief(row)}
 
 
 def hover(text: str | None = None, selector: str | None = None,
@@ -1700,7 +1700,7 @@ def hover(text: str | None = None, selector: str | None = None,
             "note": ("real input (CDP): one mouseMoved; the read-back is the "
                      "engine's own `:hover` state"),
             "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}       # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def _check_state(session: cdp.Session, needle: str, css: str,
@@ -1750,7 +1750,7 @@ def check(text: str | None = None, selector: str | None = None,
                     "note": ("already in that state — no click was sent, "
                              "because a click would toggle it"),
                     "tab": f"id:{tab_row['id']}",
-                    "browser": tabs._brief(row)}       # noqa: SLF001
+                    "browser": browser_lib.brief(row)}
         if not element.get("in_viewport"):
             fail(ERR_NO_VIEWPORT_TARGET,
                  f"{_describe(element)} is at page {element.get('box')}, "
@@ -1791,7 +1791,7 @@ def check(text: str | None = None, selector: str | None = None,
             "checked_before": bool(before.get("checked")),
             "note": "real input (CDP); the read-back is the control's own `checked`",
             "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}           # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def _select_probe(session: cdp.Session, needle: str, css: str,
@@ -1868,7 +1868,7 @@ def select(text: str | None = None, selector: str | None = None,
                     "option_index": target, "by": probe.get("by"),
                     "note": "already selected — no key was sent",
                     "tab": f"id:{tab_row['id']}",
-                    "browser": tabs._brief(row)}   # noqa: SLF001
+                    "browser": browser_lib.brief(row)}
         node_id = _node_of(session,
                            _match_args(ELEMENT_EXPR, needle, css, index))
         if not node_id:
@@ -1914,7 +1914,7 @@ def select(text: str | None = None, selector: str | None = None,
             "note": ("REAL key events (CDP) on the focused control, so the "
                      "page's `change` handler sees isTrusted: true"),
             "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}           # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 NO_DIALOG_NOTE = (
@@ -1991,7 +1991,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
         return {"ok": True, "open": opened, "verified": verified,
                 "blocked": True if opened is None else None, "note": note,
                 "tab": f"id:{tab_row['id']}",
-                "browser": tabs._brief(row)}       # noqa: SLF001
+                "browser": browser_lib.brief(row)}
     # accept | dismiss: NO Page.enable first — a dialog that is already up
     # cannot be announced any more, and enabling is exactly what blocks on a
     # parked tab, while the handling command answers regardless
@@ -2031,7 +2031,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
                      "opened before this connection, and Chromium announces a "
                      "dialog only once"),
             "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}           # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def screenshot(path: str, full: bool = False, force: bool = False,
@@ -2091,7 +2091,7 @@ def screenshot(path: str, full: bool = False, force: bool = False,
             "note": ("the file's IHDR matches the page's own geometry; a "
                      "read, so no attach is needed"),
             "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}           # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def scroll(by: int | None = None, edge: str | None = None,
@@ -2255,7 +2255,7 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
             "nested": {"before": before.get("nested"),
                        "after": after.get("nested")},
             "point": [x, y], "steps": steps,
-            "tab": f"id:{tab_row['id']}", "browser": tabs._brief(row)}  # noqa: SLF001
+            "tab": f"id:{tab_row['id']}", "browser": browser_lib.brief(row)}
 
 
 def _reveal(session: cdp.Session, row: dict, tab_row: dict,
@@ -2288,7 +2288,7 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
              "container that cannot scroll it into view")
     return {"ok": True, "revealed": True, "element": _element(inside[0]),
             "scroll": found.get("scroll"), "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}  # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
@@ -2363,7 +2363,7 @@ def focus(text: str | None = None, selector: str | None = None,
              "control, or an element that cannot be focused)")
     return {"ok": True, "focused": True, "element": _element(element),
             "active": probe.get("active"), "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}  # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def press(key: str, tab: str = "", browser: str = "") -> dict:
@@ -2398,7 +2398,7 @@ def press(key: str, tab: str = "", browser: str = "") -> dict:
             "verified": False,
             "note": ("the key event was dispatched; read the effect with "
                      "`tab text`, `tab info` or `tab js`"),
-            "tab": f"id:{tab_row['id']}", "browser": tabs._brief(row)}  # noqa: SLF001
+            "tab": f"id:{tab_row['id']}", "browser": browser_lib.brief(row)}
 
 
 def _preflight(session: cdp.Session, text: str, verb: str) -> dict:
@@ -2436,7 +2436,7 @@ def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
              "length_before": before.get("length"),
              "length_after": after.get("length"),
              "tab": f"id:{tab_row['id']}",
-             "browser": tabs._brief(row)}  # noqa: SLF001
+             "browser": browser_lib.brief(row)}
     if verified is None:
         reply["note"] = why
     return reply
@@ -2555,7 +2555,7 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     return {"ok": True, "file": file_path,
             "input": {"selector": css, "files": files},
             "tab": f"id:{tab_row['id']}",
-            "browser": tabs._brief(row)}  # noqa: SLF001
+            "browser": browser_lib.brief(row)}
 
 
 def _media_reply(row: dict, tab_row: dict, state: dict, mode: str,
@@ -2575,7 +2575,7 @@ def _media_reply(row: dict, tab_row: dict, state: dict, mode: str,
              "ready_state": as_int(state.get("ready_state")),
              "src": str(state.get("src") or ""),
              "tab": f"id:{tab_row['id']}",
-             "browser": tabs._brief(row)}  # noqa: SLF001
+             "browser": browser_lib.brief(row)}
     if before is not None:
         reply["time_before"] = as_float(before.get("time"))
         reply["advanced"] = as_float(state.get("time")) > as_float(before.get("time"))

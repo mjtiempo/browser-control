@@ -39,9 +39,11 @@ from browser_control.lib.browser import (
     list_tabs,
     nav,
     new_tab,
-    reload,
     stop,
     tab_info,
+)
+from browser_control.lib.browser import (
+    reload_page as reload,
 )
 from browser_control.lib.errors import (
     ERR_BAD_ARGS,
@@ -234,8 +236,7 @@ def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
     """`--port N | --pid N | --profile DIR`, plus `--list`/`--all` where a
     verb allows them. Pure argv work: an unknown flag is refused, and the
     combinations that mean two different things are refused too."""
-    out = {"port": 0, "pid": 0, "profile": "", "list": False,
-           "all": False}
+    out = {"port": 0, "pid": 0, "list": False, "all": False}
     index = 0
     while index < len(rest):
         arg = str(rest[index])
@@ -247,24 +248,20 @@ def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
             out["all"] = True
             index += 1
             continue
-        if arg in ("--port", "--pid", "--profile"):
+        if arg in ("--port", "--pid"):
             if index + 1 >= len(rest):
                 fail(ERR_BAD_ARGS, f"{verb}: {arg} needs a value")
             key, value = arg[2:], str(rest[index + 1])
-            if key in ("port", "pid"):
-                out[key] = _int(value, f"{verb}: {arg}")
-            else:
-                out[key] = value
+            out[key] = _int(value, f"{verb}: {arg}")
             index += 2
             continue
         known = ", ".join(["--port N", "--pid N", "--profile DIR"]
                           + [f"--{name}" for name in allow])
         fail(ERR_BAD_ARGS,
              f"{verb}: unknown argument {arg!r} (flags: {known})")
-    if out["list"] and (out["all"] or out["port"] or out["pid"]
-                        or out["profile"]):
+    if out["list"] and (out["all"] or out["port"] or out["pid"]):
         fail(ERR_BAD_ARGS, f"{verb}: --list takes no other argument")
-    if out["all"] and (out["port"] or out["pid"] or out["profile"]):
+    if out["all"] and (out["port"] or out["pid"]):
         fail(ERR_BAD_ARGS, f"{verb}: --all takes no other selector")
     return out
 
@@ -842,7 +839,7 @@ def cmd_tab_press(rest: list[str], browser: str) -> dict:
     return dom.press(rest[0], tab=spec, browser=browser)
 
 
-def _text_arg(rest: list[str], verb: str, tab: str) -> str:
+def _text_arg(rest: list[str], verb: str) -> str:
     """The single TEXT a writing verb takes — nothing else, and no flags."""
     for arg in rest:
         if str(arg).startswith("-"):
@@ -859,14 +856,14 @@ def _text_arg(rest: list[str], verb: str, tab: str) -> str:
 def cmd_tab_insert(rest: list[str], browser: str) -> dict:
     """`tab insert TEXT [--tab SPEC]` — atomic insert at the DOM focus."""
     rest, spec = _tab_flag(rest, "tab insert")
-    return dom.insert(_text_arg(rest, "tab insert", spec), tab=spec,
+    return dom.insert(_text_arg(rest, "tab insert"), tab=spec,
                       browser=browser)
 
 
 def cmd_tab_type(rest: list[str], browser: str) -> dict:
     """`tab type TEXT [--tab SPEC]` — real per-character key events."""
     rest, spec = _tab_flag(rest, "tab type")
-    return dom.type_text(_text_arg(rest, "tab type", spec), tab=spec,
+    return dom.type_text(_text_arg(rest, "tab type"), tab=spec,
                          browser=browser)
 
 

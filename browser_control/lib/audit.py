@@ -214,8 +214,3 @@ class ActionLog:
 
 # One instance: the command marks a secret, the command writes the line.
 LOG = ActionLog()
-
-
-def reset_redaction() -> None:
-    """Clear the per-invocation secret (the CLI does this before dispatch)."""
-    LOG.begin("")
