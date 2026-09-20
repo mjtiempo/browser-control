@@ -5,6 +5,8 @@ after a start, a URL after a navigation, ids after a close.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
 from browser_control.lib import (
     cdp,  # pyright: ignore[reportMissingImports]
@@ -122,3 +124,25 @@ def _wait_ids_gone(profile: str, ids: list[str],
 
     return poll(probe, timeout=timeout, interval=POLL_NORMAL,
                 accept=lambda left: not left)[1]
+
+
+def page_ws(profile: str, target_id: str) -> str:
+    """The websocket URL of ONE tab's page target — the one place that spells it."""
+    port = cdp.port_of(profile)
+    return cdp.target_ws(port, target_id)
+
+
+def page_session(profile: str, target_id: str, *,
+                  page_domain: bool = True) -> cdp.Session:
+    """ONE session on that tab's page target.
+
+    `page_domain=False` is the parked-dialog case: a dialog already up cannot be
+    announced, and enabling the domain is what blocks on a parked tab.
+    """
+    return cdp.Session(page_ws(profile, target_id), page_domain=page_domain)
+
+
+def page_eval(profile: str, target_id: str, expression: str,
+              timeout: float = 15.0) -> Any:
+    """One expression evaluated on that tab's page target."""
+    return cdp.evaluate(page_ws(profile, target_id), expression, timeout=timeout)

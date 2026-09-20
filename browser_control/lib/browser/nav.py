@@ -13,7 +13,7 @@ from typing import Any
 from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
 from browser_control.lib import (
     cdp,  # pyright: ignore[reportMissingImports]
-    )
+)
 from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
     ACTIVATE_TIMEOUT_S,
     HISTORY_TIMEOUT_S,
@@ -21,6 +21,11 @@ from browser_control.lib.browser.constants import (  # pyright: ignore[reportMis
     NAV_TIMEOUT_S,
     READY_EXPR,
     RELOAD_TIMEOUT_S,
+)
+from browser_control.lib.browser.readback import (  # pyright: ignore[reportMissingImports]
+    page_eval,
+    page_session,
+    page_ws,
 )
 from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
     as_int,
@@ -76,8 +81,7 @@ def _same_page(left: object, right: object) -> bool:
 def _eval(profile: str, target_id: str, expression: str,
           timeout: float = 15.0) -> Any:
     """Evaluate one expression on that tab's own connection."""
-    ws = cdp.target_ws(cdp.port_of(profile), target_id)
-    return cdp.evaluate(ws, expression, timeout=timeout)
+    return page_eval(profile, target_id, expression, timeout)
 
 def _href(profile: str, target_id: str) -> str:
     """The tab's address, or "" when it cannot be read (mid-navigation)."""
@@ -195,7 +199,7 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
     profile, target_id = str(row["profile"]), str(tab_row["id"])
     before = _href(profile, target_id)
     before_origin = _time_origin(profile, target_id)
-    with cdp.Session(cdp.target_ws(cdp.port_of(profile), target_id)) as session:
+    with page_session(profile, target_id) as session:
         try:
             reply = session.call("Page.navigate", {"url": target})
         except ControlError as e:
@@ -261,7 +265,7 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
     row, tab_row = _pkg._one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
     before = _href(profile, target_id)
-    tab_ws = cdp.target_ws(cdp.port_of(profile), target_id)
+    tab_ws = page_ws(profile, target_id)
     listing = cdp.call(tab_ws, "Page.getNavigationHistory")
     entries = listing.get("entries") if isinstance(listing, dict) else None
     index = as_int(listing.get("currentIndex")) if isinstance(listing, dict) \
@@ -314,7 +318,7 @@ def activate(tab: str = "", browser: str = "") -> dict:
     """
     row, tab_row = _pkg._one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
-    with cdp.Session(cdp.target_ws(cdp.port_of(profile), target_id)) as session:
+    with page_session(profile, target_id) as session:
         before = str(session.evaluate("document.visibilityState") or "")
         session.call("Page.bringToFront")
         def probe() -> str:

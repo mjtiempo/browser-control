@@ -148,6 +148,7 @@ from browser_control.lib.dom.tab import (  # noqa: F401
     _session,
     _with_frame,
     mode_of,
+    page_session,
 )
 from browser_control.lib.dom.text_input import (  # noqa: F401
     TYPE_PAUSE_S,

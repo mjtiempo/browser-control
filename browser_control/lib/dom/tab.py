@@ -57,16 +57,25 @@ def _document_ws(port: int, page_target: str) -> str:
         return cdp.target_ws(port, str(target["target"]), "iframe")
     return cdp.target_ws(port, page_target)
 
-def _session(row: dict, tab_row: dict) -> cdp.Session:
+def page_session(row: dict, tab_row: dict, *,
+                   page_domain: bool = True) -> cdp.Session:
     """ONE connection for the whole verb — or for the FRAME it is scoped to.
 
     `--frame` attaches to that frame's OWN target. A cross-origin frame is a
     target with its own coordinate space, so every verb below works unchanged
     inside it — measured: a real click dispatched on that session fires the
     frame's own handler and the frame reports the new state.
+    `page_domain=False` is the parked-dialog case: a dialog already up cannot be
+    announced, and enabling the domain is what blocks on a parked tab.
     """
     port = cdp.port_of(str(row["profile"]))
-    return cdp.Session(_document_ws(port, str(tab_row["id"])))
+    return cdp.Session(_document_ws(port, str(tab_row["id"])),
+                       page_domain=page_domain)
+
+
+def _session(row: dict, tab_row: dict) -> cdp.Session:
+    """The name the verbs call (and the suites patch): the factory above."""
+    return page_session(row, tab_row)
 
 def _reply(row: dict, tab_row: dict, data: dict) -> dict:
     """The page-level facts every DOM read carries."""

@@ -8,9 +8,6 @@ from __future__ import annotations
 from browser_control.lib import (
     browser as browser_lib,  # pyright: ignore[reportMissingImports]
 )
-from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
-)
 from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
 from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
     DIALOG_AWAKE,
@@ -109,9 +106,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
     if text is not None:
         params["promptText"] = str(text)
     row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with cdp.Session(cdp.target_ws(cdp.port_of(str(row["profile"])),
-                                   str(tab_row["id"])),
-                     page_domain=False) as session:
+    with _pkg.page_session(row, tab_row, page_domain=False) as session:
         try:
             session.call("Page.handleJavaScriptDialog", params)
         except ControlError as e:
