@@ -67,6 +67,11 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
+from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+    POLL_FAST,
+    POLL_NORMAL,
+    poll,
+)
 from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 # The coercers themselves live in lib/coerce.py. These aliases keep the
@@ -1742,11 +1747,10 @@ def check(text: str | None = None, selector: str | None = None,
             session.call("Input.dispatchMouseEvent",
                          {"type": kind, "x": x, "y": y, "button": "left",
                           "buttons": buttons, "clickCount": 1})
-        after = _check_state(session, needle, css, index)
-        deadline = time.time() + CHECK_TIMEOUT_S
-        while bool(after.get("checked")) != want and time.time() < deadline:
-            time.sleep(0.15)
-            after = _check_state(session, needle, css, index)
+        _attempts, after = poll(
+            lambda: _check_state(session, needle, css, index),
+            timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,
+            accept=lambda state: bool(state.get("checked")) == want)
     if bool(after.get("checked")) != want:
         fail("check-not-verified",
              f"{_describe(element)} reports checked={after.get('checked')} "
@@ -1858,12 +1862,10 @@ def select(text: str | None = None, selector: str | None = None,
                          {"type": "keyUp", "key": key_name, "code": code,
                           "windowsVirtualKeyCode": vk,
                           "nativeVirtualKeyCode": vk})
-        after = _select_probe(session, needle, css, index, wanted)
-        deadline = time.time() + CHECK_TIMEOUT_S
-        while (as_int(after.get("selected"), -1) != target
-               and time.time() < deadline):
-            time.sleep(0.15)
-            after = _select_probe(session, needle, css, index, wanted)
+        _attempts, after = poll(
+            lambda: _select_probe(session, needle, css, index, wanted),
+            timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,
+            accept=lambda got: as_int(got.get("selected"), -1) == target)
     if as_int(after.get("selected"), -1) != target \
             or str(after.get("value")) != str(probe.get("target_value")):
         fail("select-not-verified",
@@ -1976,17 +1978,17 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
             if _no_dialog(e):
                 fail("no-dialog", NO_DIALOG_NOTE)
             raise
-        answered = False
-        deadline = time.time() + DIALOG_CLEAR_S
-        while time.time() < deadline:
+        def probe() -> bool:
             try:
                 session.evaluate("1", timeout=0.8)
-                answered = True
-                break
+                return True
             except ControlError as e:
                 if e.code not in ("eval-timeout", "cdp-error", "blocked"):
                     raise
-                time.sleep(0.2)
+                return False
+
+        _attempts, answered = poll(probe, timeout=DIALOG_CLEAR_S,
+                                   interval=POLL_NORMAL)
     if not answered:
         fail("dialog-not-verified",
              f"the {name} was sent, but the tab still does not answer "
@@ -2262,14 +2264,14 @@ def _probe(session: cdp.Session, x: int, y: int) -> dict:
 def _settle(session: cdp.Session, x: int, y: int, before: dict,
             timeout: float = SCROLL_MOVE_S) -> dict:
     """Poll until the document OR the scroller under the point moved."""
-    deadline = time.time() + timeout
-    now = before
-    while time.time() < deadline:
-        now = _probe(session, x, y)
-        if (now.get("y"), now.get("x"), now.get("nested")) != \
-                (before.get("y"), before.get("x"), before.get("nested")):
-            return now
-        time.sleep(0.15)
+    def probe() -> dict:
+        return _probe(session, x, y)
+
+    _attempts, now = poll(
+        probe, timeout=timeout, interval=POLL_FAST,
+        accept=lambda got: (got.get("y"), got.get("x"), got.get("nested")) !=
+                           (before.get("y"), before.get("x"),
+                            before.get("nested")))
     return now
 
 
@@ -2351,15 +2353,14 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
              + _frames_note(row, tab_row))
     session.call("DOM.scrollIntoViewIfNeeded", {"nodeId": node_id})
     # prove it: the SAME matcher now finds it inside the viewport
-    deadline = time.time() + SCROLL_MOVE_S
-    found: dict = {}
-    while time.time() < deadline:
-        found = _matches_in(session, needle, css, FIND_CAP)
-        rows = _well_formed(found.get("matches") or [], ("tag", "box"))
-        now = [row for row in rows if row.get("in_viewport")]
-        if now:
-            break
-        time.sleep(0.15)
+    def visible_in(data: dict) -> list[dict]:
+        rows = _well_formed(data.get("matches") or [], ("tag", "box"))
+        return [row for row in rows if row.get("in_viewport")]
+
+    _attempts, found = poll(
+        lambda: _matches_in(session, needle, css, FIND_CAP),
+        timeout=SCROLL_MOVE_S, interval=POLL_FAST,
+        accept=lambda data: bool(visible_in(data)))
     rows = _well_formed(found.get("matches") or [], ("tag", "box"))
     inside = [row for row in rows if row.get("in_viewport")]
     if not inside:
@@ -2671,19 +2672,19 @@ def _poll_media(session: cdp.Session, mode: str, before: dict,
     autoplay policy, no supported source) is the answer, and waiting would
     only make the caller wait for it.
     """
-    deadline = time.time() + timeout
-    state = before
-    while True:
+    def probe() -> dict:
         got = session.evaluate(MEDIA_STATE_EXPR)
-        state = got if isinstance(got, dict) else {}
+        return got if isinstance(got, dict) else {}
+
+    def done(state: dict) -> bool:
         if not state.get("found"):
-            return state
+            return True
         verified, _why = _playback_verdict(mode, before, state)
-        if verified or state.get("error"):
-            return state
-        if time.time() >= deadline:
-            return state
-        time.sleep(0.2)
+        return verified or bool(state.get("error"))
+
+    _attempts, state = poll(probe, timeout=timeout, interval=POLL_NORMAL,
+                            accept=done)
+    return state
 
 
 def media(mode: str, index: int | None = None, tab: str = "",

@@ -64,6 +64,14 @@ from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
     record_pid,
     spawn,
 )
+from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+    POLL_FAST,
+    POLL_LOAD,
+    POLL_NORMAL,
+    POLL_SLOW,
+    deadline,
+    poll,
+)
 from browser_control.lib.text import flat  # pyright: ignore[reportMissingImports]
 
 # The private spellings this module grew up with; the implementations live in
@@ -852,12 +860,8 @@ def _rows(profile: str) -> list[dict]:
 
 def _wait_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
     """The endpoint must ANSWER, not merely have a port file."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if cdp.reachable(profile):
-            return True
-        time.sleep(0.25)
-    return False
+    return bool(poll(lambda: cdp.reachable(profile), timeout=timeout,
+                     interval=POLL_SLOW)[1])
 
 
 def _wait_own_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
@@ -870,45 +874,36 @@ def _wait_own_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
     until it verifies — the browser this call spawned names the profile in its
     own command line, so its endpoint is the one that can pass.
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    def probe() -> bool:
         port = cdp.port_of(profile)
-        if port:
-            _OWNER_CACHE.pop((profile, port), None)
-            if endpoint_owner(profile, port).get("verified"):
-                return True
-        time.sleep(0.25)
-    return False
+        if not port:
+            return False
+        _OWNER_CACHE.pop((profile, port), None)
+        return bool(endpoint_owner(profile, port).get("verified"))
+
+    return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])
 
 
 def _wait_rows(profile: str, timeout: float = TAB_WAIT_S) -> list[dict]:
-    deadline = time.time() + timeout
-    rows: list[dict] = []
-    while time.time() < deadline:
-        try:
-            rows = _rows(profile)
-        except Exception:                                      # noqa: BLE001
-            rows = []                 # mid-startup: the endpoint is not up yet
-        if rows:
-            return rows
-        time.sleep(0.25)
-    return rows
+    return poll(lambda: _rows(profile), timeout=timeout, interval=POLL_SLOW,
+                accept=bool, on_error=lambda _e: [])[1]
 
 
 def _wait_tabs(profile: str, ids: list[str],
                timeout: float = TAB_WAIT_S) -> tuple[dict, list[str]]:
     """(rows by id, ids still missing) after ONE bounded poll."""
-    deadline = time.time() + timeout
-    while True:
+    def probe() -> tuple[dict, list[str]]:
         try:
             rows = _rows(profile)
         except ControlError:
             rows = []                  # mid-startup, or the browser is gone
         seen = {r["id"]: r for r in rows if r["id"] in ids}
-        missing = [i for i in ids if i not in seen]
-        if not missing or time.time() >= deadline:
-            return seen, missing
-        time.sleep(0.25)
+        return seen, [i for i in ids if i not in seen]
+
+    _attempts, (seen, missing) = poll(probe, timeout=timeout,
+                                      interval=POLL_SLOW,
+                                      accept=lambda pair: not pair[1])
+    return seen, missing
 
 
 def _wait_url(profile: str, url: str,
@@ -919,14 +914,15 @@ def _wait_url(profile: str, url: str,
     adds: a startup page has no id we were told, so the URL is what names it.
     """
     want = url.rstrip("/")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+
+    def probe() -> dict | None:
         for row in _rows(profile):
             got = str(row["url"]).rstrip("/")
             if got == want or got.startswith(want):
                 return row
-        time.sleep(0.25)
-    return None
+        return None
+
+    return poll(probe, timeout=timeout, interval=POLL_SLOW, accept=bool)[1]
 
 
 def _require_tab_list_readable(profile: str, error: ControlError) -> None:
@@ -951,17 +947,16 @@ def _wait_ids_gone(profile: str, ids: list[str],
     beforeunload handler can keep it open: the list is the only honest proof,
     and its survivors ARE the report.
     """
-    deadline = time.time() + timeout
-    while True:
+    def probe() -> list[str]:
         try:
             open_ids = {r["id"] for r in _rows(profile)}
         except ControlError as e:
             _require_tab_list_readable(profile, e)
             open_ids = set()          # the browser is gone: so are its tabs
-        left = [i for i in ids if i in open_ids]
-        if not left or time.time() >= deadline:
-            return left
-        time.sleep(0.2)
+        return [i for i in ids if i in open_ids]
+
+    return poll(probe, timeout=timeout, interval=POLL_NORMAL,
+                accept=lambda left: not left)[1]
 
 
 def _verify_profile_endpoint(profile: str) -> None:
@@ -1145,14 +1140,12 @@ def _await_owner(profile: str, port: int) -> dict:
         return {}
     if not owner or owner.get("verified") or not owner.get("profile_pid"):
         return owner
-    deadline = time.time() + LAUNCH_WAIT_S
-    while time.time() < deadline:
-        time.sleep(0.25)
+    def probe() -> dict:
         _OWNER_CACHE.pop((profile, port), None)
-        owner = endpoint_owner(profile, port) if cdp.reachable(profile) else {}
-        if owner.get("verified"):
-            return owner
-    return owner
+        return endpoint_owner(profile, port) if cdp.reachable(profile) else {}
+
+    return poll(probe, timeout=LAUNCH_WAIT_S, interval=POLL_SLOW,
+                accept=lambda o: bool(o.get("verified")))[1]
 
 
 def launch(urls: list[str] | None = None, browser: str = "") -> dict:
@@ -1364,17 +1357,19 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
             os.kill(target_pid, signal.SIGTERM)
         except OSError as e:
             fail("browser-not-stopped", f"cannot stop pid {target_pid}: {e}")
-        deadline = time.time() + STOP_WAIT_S
-        while time.time() < deadline and pid_alive(target_pid):
-            time.sleep(0.2)
-        if pid_alive(target_pid):
+        _attempts, alive = poll(lambda: pid_alive(target_pid), timeout=STOP_WAIT_S,
+                                interval=POLL_NORMAL, accept=lambda a: not a,
+                                on_error=lambda _e: True)
+        if alive:
             fail("browser-not-stopped",
                  f"pid {target_pid} survived SIGTERM for {STOP_WAIT_S:g}s — "
                  "stop it yourself; this CLI does not SIGKILL a browser")
-        deadline = time.time() + PORT_WAIT_S
-        while time.time() < deadline and cdp.reachable(target):
-            time.sleep(0.2)
-        if cdp.reachable(target):
+        _attempts, answering = poll(lambda: cdp.reachable(target),
+                                    timeout=PORT_WAIT_S,
+                                    interval=POLL_NORMAL,
+                                    accept=lambda a: not a,
+                                    on_error=lambda _e: True)
+        if answering:
             fail("browser-not-stopped",
                  f"pid {target_pid} is gone but the CDP endpoint on {target} "
                  "still answers")
@@ -1957,15 +1952,15 @@ def _wait_document(profile: str, target_id: str,
     Every sample is bounded by what is left of the budget: a page that stops
     answering must not spend a fresh 15s on each attempt.
     """
-    deadline = time.time() + timeout
-    while True:
+    end = deadline(timeout)
+
+    def probe() -> bool:
         with contextlib.suppress(ControlError):
-            if _eval(profile, target_id, READY_EXPR,
-                     timeout=max(0.5, deadline - time.time())) == "complete+body":
-                return True
-        if time.time() >= deadline:
-            return False
-        time.sleep(0.3)
+            return _eval(profile, target_id, READY_EXPR,
+                         timeout=max(0.5, end - time.time())) == "complete+body"
+        return False
+
+    return bool(poll(probe, timeout=timeout, interval=POLL_LOAD)[1])
 
 
 def _ready(profile: str, target_id: str) -> bool:
@@ -1989,8 +1984,7 @@ def _wait_move(profile: str, target_id: str, before_url: str,
     new document (`performance.timeOrigin`), a fragment navigation changes the
     address — either one is the move.
     """
-    deadline = time.time() + timeout
-    while True:
+    def probe() -> bool:
         origin = _time_origin(profile, target_id)
         if origin is not None and before_origin is not None \
                 and origin != before_origin:
@@ -2000,11 +1994,9 @@ def _wait_move(profile: str, target_id: str, before_url: str,
         # is always false, so the move used to be reported as PROVEN by a
         # tautology (a review measured it). An unknown before is handled by the
         # caller, which judges the AFTER state instead.
-        if now and before_url and not _same_page(now, before_url):
-            return True
-        if time.time() >= deadline:
-            return False
-        time.sleep(0.25)
+        return bool(now and before_url and not _same_page(now, before_url))
+
+    return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])
 
 
 def _wait_url_change(profile: str, target_id: str, before: str,
@@ -2017,14 +2009,11 @@ def _wait_url_change(profile: str, target_id: str, before: str,
     here after that one was fixed). Callers that cannot know the address judge
     the AFTER state instead.
     """
-    deadline = time.time() + timeout
-    while True:
+    def probe() -> bool:
         now = _href(profile, target_id)
-        if now and before and not _same_page(now, before):
-            return True
-        if time.time() >= deadline:
-            return False
-        time.sleep(0.25)
+        return bool(now and before and not _same_page(now, before))
+
+    return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])
 
 
 def _time_origin(profile: str, target_id: str) -> float | None:
@@ -2043,14 +2032,11 @@ def _time_origin(profile: str, target_id: str) -> float | None:
 def _wait_new_document(profile: str, target_id: str, before: float,
                        timeout: float = RELOAD_TIMEOUT_S) -> bool:
     """Is there a document whose timeOrigin differs from `before`?"""
-    deadline = time.time() + timeout
-    while True:
+    def probe() -> bool:
         now = _time_origin(profile, target_id)
-        if now is not None and now != before:
-            return True
-        if time.time() >= deadline:
-            return False
-        time.sleep(0.25)
+        return now is not None and now != before
+
+    return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])
 
 
 def nav(url: str, tab: str = "", browser: str = "") -> dict:
@@ -2094,12 +2080,11 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
                                                             before,
                                                             before_origin)
     if moved is None:
-        deadline = time.time() + NAV_MOVE_S
-        while time.time() < deadline:
+        def probe() -> bool:
             url_read = _href(profile, target_id)
-            if url_read and _same_page(target, url_read):
-                break
-            time.sleep(0.25)
+            return bool(url_read and _same_page(target, url_read))
+
+        poll(probe, timeout=NAV_MOVE_S, interval=POLL_SLOW)
     loaded = _wait_document(profile, target_id) if moved else _ready(profile,
                                                                      target_id)
     url_read = _href(profile, target_id)
@@ -2199,13 +2184,17 @@ def activate(tab: str = "", browser: str = "") -> dict:
     with cdp.Session(cdp.target_ws(cdp.port_of(profile), target_id)) as session:
         before = str(session.evaluate("document.visibilityState") or "")
         session.call("Page.bringToFront")
-        after = before
-        deadline = time.time() + ACTIVATE_TIMEOUT_S
-        while after != "visible" and time.time() < deadline:
-            time.sleep(0.15)
+        def probe() -> str:
+            nonlocal after
             with contextlib.suppress(ControlError):
                 after = str(session.evaluate("document.visibilityState",
                                              timeout=4) or after)
+            return after
+
+        after = before
+        _attempts, after = poll(probe, timeout=ACTIVATE_TIMEOUT_S,
+                                interval=POLL_FAST,
+                                accept=lambda value: value == "visible")
     if after != "visible":
         fail("activate-not-verified",
              f"the tab still reports visibility={after or 'unreadable'!r} "
