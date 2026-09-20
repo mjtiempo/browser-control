@@ -2015,6 +2015,8 @@ def t_frames_bind_to_their_tab() -> None:
             {"index": 0, "url": "u", "name": "", "box": [], "visible": True,
              "same_process": False, "target": "",
              "attribution": "unattributable", "candidates": 0}]
+        # frames_of_rows is the row-taking form the package keeps for callers
+        # that already hold a resolution (frames itself resolves internally now)
         listed = dom.frames_of_rows(row, tab_row)            # noqa: SLF001
         assert listed["separate"] is None, listed
         assert "cannot attribute" in listed["note"], listed

@@ -703,7 +703,11 @@ def cmd_tab_js(rest: list[str], browser: str) -> dict:
 
 
 def cmd_tab_frames(rest: list[str], browser: str) -> dict:
-    """`tab frames [--tab SPEC]` — this page's iframes, and which are drivable."""
+    """`tab frames [--tab SPEC]` — this page's iframes, and which are drivable.
+
+    The verb resolves its own tab (`dom.frames(tab=, browser=)`), like every
+    other page verb: the CLI no longer reaches the private resolver.
+    """
     rest, spec = _tab_flag(rest, "tab frames")
     _none(rest, "tab frames")
     return dom.frames(tab=spec, browser=browser)
