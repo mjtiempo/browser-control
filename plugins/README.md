@@ -43,8 +43,10 @@ value of `--browser`. The verb is what comes after the top-level word — for
 `browser_control.lib.errors.fail("bad-args", …)`, or raise `ControlError`;
 `main` maps it to `ERR[code]` and exit 2 like any built-in refusal.
 
-Everything in `browser_control.lib` is importable: `browser` for `nav`, `dom`
-for `wait` and the reads, and especially `dom.extract` — the generic extraction
+The supported surface is `browser_control.plugin_api` (`fail`,
+`ControlError`, `nav`, `wait`, `extract`, `PLUGIN_API`) — import that, not
+`browser_control.lib` at large. `browser` for `nav`, `dom` for `wait` and the
+reads, and especially `dom.extract` — the generic extraction
 engine (`--each` + `--field NAME=SELECTOR[@ATTR]`, CSS only, no code) that a
 reader plugin is normally a thin wrapper around. The capability classes a
 plugin declares must come from the closed vocabulary (`read`, `write`, `code`,

@@ -170,7 +170,8 @@ def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
     if not probe.get("hovered"):
         fail(ERR_HOVER_NOT_VERIFIED,
              f"nothing at viewport {[x, y]} matches `:hover` after the pointer "
-             f"moved there ({probe.get('under') or 'nothing'} is at that point)")
+             f"moved there ({foreign(probe.get('under'), 60) or 'nothing'} "
+             "is at that point)")
     reply = {"ok": True, "hovered": True, "verified": False,
              "point": [x, y], "under": probe.get("under"),
              "note": ("real input (CDP): one mouseMoved at a point; the "
@@ -275,7 +276,8 @@ def hover(text: str | None = None, selector: str | None = None,
         fail(ERR_HOVER_NOT_VERIFIED,
              f"{_pkg._describe(element)} at viewport {[x, y]} does not match "
              "`:hover` after the pointer moved there "
-             f"({probe.get('under') or 'nothing'} is at that point) — the "
+             f"({foreign(probe.get('under'), 60) or 'nothing'} is at that "
+             "point) — the "
              "page may re-render, or the element moved between the read and "
              "the move")
     return {"ok": True, "hovered": True, "verified": True,
@@ -505,7 +507,8 @@ def focus(text: str | None = None, selector: str | None = None,
     if not probe.get("focused"):
         fail(ERR_FOCUS_NOT_VERIFIED,
              f"{_pkg._describe(element)} did not take the DOM focus — "
-             f"{probe.get('active') or 'nothing'} has it instead (a disabled "
+             f"{foreign(probe.get('active'), 60) or 'nothing'} has it instead "
+             "(a disabled "
              "control, or an element that cannot be focused)")
     return {"ok": True, "focused": True, "element": _pkg._element(element),
             "active": probe.get("active"), "tab": f"id:{tab_row['id']}",

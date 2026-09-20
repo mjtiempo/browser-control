@@ -207,7 +207,10 @@ PLUGIN = {
     "actions": {
         "x": {
             "run": run,
-            "classes": ("read",),
+            # nav resolves the tab for_write=True, so the honest declaration
+            # is read+write: a `--allow read` gate would otherwise authorise a
+            # write (a review found the gate's answer misleading)
+            "classes": ("read", "write"),
             "usage": ("x search QUERY [--latest|--top] [--cap N] [--chars N] "
                       "[--tab SPEC] — the page's rendered posts as records"),
         },

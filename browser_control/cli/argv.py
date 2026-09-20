@@ -1,8 +1,9 @@
-"""argv — the flag readers, and `VerbArgs` for one verb's argv.
+"""argv — the flag readers every verb shares.
 
 Every refusal string here is the frozen contract: the messages are the ones the
-CLI has always printed, spelled once. A verb reads its argv through `VerbArgs`,
-which owns the unknown-flag scan and the "one TEXT at most" rule.
+CLI has always printed, spelled once. The unknown-flag scan, the "one TEXT at
+most" rule and the `--flag VALUE`/`--flag=value` readers live here, so a handler
+names a rule instead of retyping it.
 """
 from __future__ import annotations
 

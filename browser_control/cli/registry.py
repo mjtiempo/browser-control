@@ -1,15 +1,16 @@
-"""registry — the verb surface as records, and the ONE action resolver.
+"""registry — the ONE action resolver for the verb surface.
 
-The same verb used to be declared four times: names→callables, names→classes,
-prose in `USAGE`, and frame eligibility. A `Verb` record carries all of it, and
-the gate and the handler read the SAME `action_of`, which is the seam that once
-shipped the `--for JS` hole (the gate read the raw token while the verb ran
-caller code).
+A mode-carrying subcommand answers differently by mode, and the gate and the
+handler must read that mode the SAME way: `action_of` is that one reader (with
+`resolved_mode` underneath it), which is the seam that once shipped the
+`--for JS` hole (the gate read the raw token while the verb ran caller code).
+
+The tables themselves stay on `cli.main` (`HANDLERS`, `TAB_SUBCOMMANDS`,
+`PROFILE_SUBCOMMANDS`), which is what `capabilities.unclassified` validates.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from typing import Any
 
 from browser_control.lib import (
@@ -23,55 +24,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
 
 Handler = Callable[[list[str], str], dict]
 
-__all__ = ["Handler", "Verb", "VerbTable", "action_of", "modes_of"]
-
-
-@dataclass(frozen=True)
-class Verb:
-    """One verb (or subcommand) as a record."""
-
-    name: str
-    handler: Handler
-    classes: tuple[str, ...] = ()
-    usage: str = ""
-    takes_scope: bool = True
-    takes_browser: bool = True
-    frame_ok: bool = False
-    action_of: Callable[[list[str]], str] | None = None
-
-
-@dataclass
-class VerbTable:
-    """The verb surface: top-level verbs, and each noun's subcommands."""
-
-    verbs: dict[str, Verb] = field(default_factory=dict)
-    subcommands: dict[str, dict[str, Verb]] = field(default_factory=dict)
-
-    def handlers(self) -> dict[str, Handler]:
-        """The top-level name→callable map the CLI dispatches through."""
-        return {name: verb.handler for name, verb in self.verbs.items()}
-
-    def sub(self, noun: str) -> dict[str, Handler]:
-        """One noun's subcommand table (name→callable)."""
-        return {name: verb.handler
-                for name, verb in self.subcommands.get(noun, {}).items()}
-
-    def lookup(self, verb: str, rest: list[str]) -> Verb | None:
-        """The record a call resolves to, or None for a name nobody has."""
-        record = self.verbs.get(verb)
-        if record is None:
-            return None
-        head = str(rest[0]) if rest else ""
-        if head and head in self.subcommands.get(verb, {}):
-            return self.subcommands[verb][head]
-        return record
-
-    def action_of(self, verb: str, rest: list[str]) -> str:
-        """Which DECLARED action a call is: verb, subcommand, and its mode."""
-        record = self.lookup(verb, rest)
-        if record is None or record.action_of is None:
-            return ""
-        return record.action_of(rest)
+__all__ = ["Handler", "action_of", "modes_of", "resolved_mode"]
 
 
 def modes_of(head: str) -> tuple[str, ...]:

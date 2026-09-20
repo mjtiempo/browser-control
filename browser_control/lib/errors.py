@@ -33,6 +33,7 @@ ERR_FRAME_AMBIGUOUS = "frame-ambiguous"
 ERR_FRAME_NOT_SEPARATE = "frame-not-separate"
 ERR_FRAME_UNATTRIBUTABLE = "frame-unattributable"
 ERR_HOVER_NOT_VERIFIED = "hover-not-verified"
+ERR_INSERT_NOT_VERIFIED = "insert-not-verified"
 ERR_INTERNAL = "internal"
 ERR_JS_ERROR = "js-error"
 ERR_LAUNCH_FAILED = "launch-failed"
@@ -72,6 +73,7 @@ ERR_SEED_NOT_VERIFIED = "seed-not-verified"
 ERR_SELECT_NOT_VERIFIED = "select-not-verified"
 ERR_TAB_AMBIGUOUS = "tab-ambiguous"
 ERR_TABS_OPEN = "tabs-open"
+ERR_TYPE_NOT_VERIFIED = "type-not-verified"
 ERR_UNKNOWN_COMMAND = "unknown-command"
 ERR_UPLOAD_NOT_VERIFIED = "upload-not-verified"
 ERR_WAIT_TIMEOUT = "wait-timeout"
@@ -100,6 +102,7 @@ CODES: frozenset[str] = frozenset({
     ERR_FRAME_NOT_SEPARATE,
     ERR_FRAME_UNATTRIBUTABLE,
     ERR_HOVER_NOT_VERIFIED,
+    ERR_INSERT_NOT_VERIFIED,
     ERR_INTERNAL,
     ERR_JS_ERROR,
     ERR_LAUNCH_FAILED,
@@ -139,6 +142,7 @@ CODES: frozenset[str] = frozenset({
     ERR_SELECT_NOT_VERIFIED,
     ERR_TAB_AMBIGUOUS,
     ERR_TABS_OPEN,
+    ERR_TYPE_NOT_VERIFIED,
     ERR_UNKNOWN_COMMAND,
     ERR_UPLOAD_NOT_VERIFIED,
     ERR_WAIT_TIMEOUT,

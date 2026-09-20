@@ -13,8 +13,11 @@ from browser_control.cli.argv import (  # pyright: ignore[reportMissingImports]
     _switch,
     _urls,
 )
-from browser_control.lib import audit, capabilities, cdp
+from browser_control.lib import audit, capabilities
 from browser_control.lib import browser as browser_lib
+from browser_control.lib.cdp import (
+    rpc as cdp_rpc,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BAD_ARGS,
     ERR_NO_WEBSOCKETS,
@@ -98,7 +101,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
     reported, not failed — the command is installed either way.
     """
     _none(rest, "selftest")
-    if cdp.websockets is None:
+    if cdp_rpc.websockets is None:
         fail(ERR_NO_WEBSOCKETS,
              "the `websockets` package is required to speak CDP "
              "(pip install websockets)")
@@ -114,7 +117,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
              "version": __version__,
              "python": sys.executable,
              "python_version": platform.python_version(),
-             "websockets": getattr(cdp.websockets, "__version__", "unknown"),
+             "websockets": getattr(cdp_rpc.websockets, "__version__", "unknown"),
              "profile_root": browser_lib.root(),
              "action_log": audit.LOG.path() or "off",
              "verbs": sorted(cli_main.HANDLERS),

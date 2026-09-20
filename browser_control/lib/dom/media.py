@@ -37,6 +37,7 @@ from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
     POLL_NORMAL,
     poll,
 )
+from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 MEDIA_TIMEOUT_S = 5.0       # how long a play/pause is given to take effect
 
@@ -147,7 +148,8 @@ def media(mode: str, index: int | None = None, tab: str = "",
     if not verified:
         if after.get("error"):
             fail(ERR_MEDIA_BLOCKED,
-                 f"tab media {name}: the page refused: {after['error']}" + (
+                 f"tab media {name}: the page refused: "
+                 f"{foreign(after['error'], 120)}" + (
                      " — if that is the autoplay policy, a real gesture is "
                      "needed first (`tab click` the player)"
                      if "interact" in str(after.get("error")) else ""))

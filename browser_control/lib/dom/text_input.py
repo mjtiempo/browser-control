@@ -31,7 +31,9 @@ from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingIm
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BAD_ARGS,
+    ERR_INSERT_NOT_VERIFIED,
     ERR_NO_FOCUS,
+    ERR_TYPE_NOT_VERIFIED,
     fail,
 )
 
@@ -135,9 +137,13 @@ def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
     """The reply `insert` and `type` share, from the read-back verdict."""
     verified, why = _text_verdict(before, after, len(text))
     if verified is not None and not verified:
-        fail(f"{rung}-not-verified",
-             f"{why}: {before.get('active')!r} did not take the "
-             f"{len(text)} character(s)")
+        # the rung names the code: both are REGISTERED in errors.CODES, so a
+        # caller can branch on them (a built string would be invisible to the
+        # vocabulary check)
+        code = (ERR_INSERT_NOT_VERIFIED if rung == "insert"
+                else ERR_TYPE_NOT_VERIFIED)
+        fail(code, f"{why}: {before.get('active')!r} did not take the "
+                   f"{len(text)} character(s)")
     reply = {"ok": True, "verb": rung, "chars": len(text),
              "active": after.get("active") or before.get("active"),
              "verified": bool(verified),

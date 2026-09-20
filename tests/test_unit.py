@@ -45,6 +45,7 @@ from browser_control.lib import (
     profile as profile_lib,
 )
 from browser_control.lib import scope as scope_lib
+from browser_control.lib.cdp import rpc as cdp_rpc  # noqa: E402
 from browser_control.lib.errors import ControlError  # noqa: E402
 
 # Importing this module must be INERT: it used to mkdtemp a /tmp directory and
@@ -1447,14 +1448,18 @@ def t_selftest() -> None:
     # the one thing selftest must FAIL on: without websockets no verb can
     # speak CDP, and an install that cannot reach a browser should say so at
     # once rather than at the first `tabs`
-    original = cdp.websockets
-    cdp.websockets = None
+    # the REAL switch is `cdp.rpc.websockets` (the transport reads it); the
+    # facade's `cdp.websockets` is only a snapshot alias, so flipping THAT would
+    # make selftest refuse while the transport happily connected (a review found
+    # the check proved less than it claimed)
+    original = cdp_rpc.websockets
+    cdp_rpc.websockets = None
     try:
         rc, _out, err = run_cli(["selftest"])
         assert rc == 2, (rc, err)
         assert "ERR[no-websockets]" in err, err
     finally:
-        cdp.websockets = original
+        cdp_rpc.websockets = original
 
 
 def t_a_working_log_makes_no_scratch_dirs() -> None:
@@ -2914,12 +2919,15 @@ def t_error_codes_are_registered() -> None:
     """
     root = Path(__file__).resolve().parent.parent / "browser_control"
     literal = re.compile(r'\b(?:fail|ControlError)\(\s*"([^"]+)"')
+    dynamic = re.compile(r'\b(?:fail|ControlError)\(\s*f"')
     named = re.compile(r"\bERR_[A-Z0-9_]+\b")
     for path in sorted(root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         for code in literal.findall(source):
             assert code in errors.CODES, \
                 f"{path}: {code!r} is not registered"
+        assert not dynamic.search(source), \
+            f"{path}: a built refusal code is invisible to CODES — use a constant"
         for name in sorted(set(named.findall(source))):
             value = getattr(errors, name, None)
             assert value is not None, f"{path}: {name} is not defined"

@@ -5,8 +5,6 @@ frame scope and the reply envelope cannot drift between verbs.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from browser_control.lib import (
     browser as browser_lib,  # pyright: ignore[reportMissingImports]
 )
@@ -105,10 +103,9 @@ class Tab:
     """ONE verb's page context: resolve, connect, read, aim, reply.
 
     Every DOM verb used to retype the same prelude. This owns it, so the frame
-    scope, the session and the reply envelope cannot drift between verbs. It is a
-    thin layer over the helpers the verbs already called (`_resolve`, `_session`,
-    `_matches_in`, `_pick`, `_reply`), which is what keeps the suites'
-    monkeypatches intercepting.
+    scope and the ONE session cannot drift between verbs. It is a thin layer
+    over the helpers the verbs already called (`_resolve`, `_session`), which is
+    what keeps the suites' monkeypatches intercepting.
     """
 
     def __init__(self, row: dict, tab_row: dict) -> None:
@@ -124,19 +121,3 @@ class Tab:
     def session(self) -> cdp.Session:
         """ONE connection for the whole verb, frame scope included."""
         return _pkg._session(self.row, self.tab_row)
-
-    def facts(self, session: cdp.Session) -> dict:
-        """Page facts, no matching: the base every verb's read-back starts from."""
-        return _pkg._matches_in(session, "", "", 1)
-
-    def target(self, session: cdp.Session, needle: str, css: str,
-               index: int | None = None) -> tuple[dict, dict]:
-        """The page data and the ONE element the caller named."""
-        data = _pkg._matches_in(session, needle, css, _pkg.FIND_CAP)
-        element = _pkg._pick(data, needle, css, index, row=self.row,
-                            tab_row=self.tab_row)
-        return data, element
-
-    def reply(self, data: dict, **fields: Any) -> dict:
-        """The page-level facts every DOM reply carries, plus `fields`."""
-        return _pkg._reply(self.row, self.tab_row, data, **fields)

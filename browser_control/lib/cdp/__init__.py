@@ -11,6 +11,7 @@ call `cdp.listener_of`.
 """
 from __future__ import annotations
 
+from browser_control.lib.cdp import rpc  # noqa: F401
 from browser_control.lib.cdp.endpoint import (  # noqa: F401
     GET_CAP,
     GET_DEADLINE_S,
