@@ -30,7 +30,6 @@ import os
 import re
 import shutil
 import signal
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -52,6 +51,19 @@ from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
     profile_dir,
     root,
 )
+from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
+    BROWSER_EXES,
+    cmdline_value,
+    exe_path,
+    find_pid,
+    main_processes,
+    pid_alive,
+    pid_of,
+    pid_on_marker,
+    pid_on_profile,
+    record_pid,
+    spawn,
+)
 from browser_control.lib.text import flat  # pyright: ignore[reportMissingImports]
 
 # The private spellings this module grew up with; the implementations live in
@@ -61,18 +73,17 @@ _is_managed = is_managed
 _pid_file = pid_file
 _lock_path = lock_path
 
+# The /proc helpers now live in lib/proc.py; these private spellings stay
+# because the hermetic checks and the live battery call them by name.
+_pid_alive = pid_alive
+_cmdline_value = cmdline_value
+_pid_of = pid_of
+
 # The PATH names, in preference order. The profile is keyed off the basename
 # of whichever resolves, so the same browser cannot end up with two profiles.
 BROWSER_BINS = ("google-chrome-stable", "google-chrome", "chromium",
                 "chromium-browser", "brave-browser", "microsoft-edge-stable",
                 "vivaldi-stable")
-# The EXECUTABLE names a Chromium-family pid can have: the PATH names above are
-# wrappers (`google-chrome-stable` execs `chrome`), so an identity check
-# against them alone would refuse a genuine browser.
-BROWSER_EXES = ("chrome", "chromium", "chromium-browser", "google-chrome",
-                "google-chrome-stable", "brave", "brave-browser", "msedge",
-                "microsoft-edge", "vivaldi", "vivaldi-bin",
-                "chrome-headless-shell", "headless_shell")
 # What a browser uses when it was launched WITHOUT `--user-data-dir`. Only
 # used to say which profile a running browser is on, so a missing entry or a
 # stale path costs an empty string, never a wrong claim.
@@ -248,179 +259,6 @@ def resolve_tab(rows: list[dict], spec: str) -> dict:
     return hits[0]
 
 
-# ------------------------------------------------------------------ the pid
-def _pid_alive(pid: int) -> bool:
-    """A live process, and not a zombie: an unreaped child still answers
-    `kill(pid, 0)`, which would refuse a stop that actually worked."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            state = f.read().rsplit(")", 1)[1].split()[0]
-    except (OSError, IndexError):
-        return False
-    return state != "Z"
-
-
-def _proc_text(pid: int, name: str) -> str:
-    """One /proc file, as text — read to the END, not to 4096 bytes.
-
-    The cap silently truncated the text every identity decision reads: a
-    renderer whose `--type=` fell past it looked like a MAIN process, and a
-    browser whose `--user-data-dir=` fell past it looked like no browser at all
-    (a review flagged it; measured here, the longest cmdline is 2344 bytes, so
-    the cap was reachable in principle rather than in practice).
-
-    NULs are PRESERVED: they are the argv boundaries, and flattening them to
-    spaces made `_cmdline_value` cut a `--user-data-dir` containing a space at
-    the first space — the browser this CLI started became a stranger (a review
-    flagged it).
-    """
-    try:
-        with open(f"/proc/{pid}/{name}", "rb") as f:
-            raw = f.read()
-    except OSError:
-        return ""
-    return raw.decode("utf-8", "replace").rstrip("\0\n")
-
-
-def _cmdline_value(cmd: str, flag: str) -> str:
-    """The value of `--flag=value` (or `--flag value`) in a /proc cmdline.
-
-    Both spellings: Chrome accepts both and a launcher may write either. ""
-    when the flag is absent. Splits on NUL when it is there (the real argv
-    form), so a value containing spaces survives; the legacy space-joined
-    form is still parsed for a caller that passed one.
-    """
-    text = str(cmd)
-    parts = text.split("\0") if "\0" in text else text.split()
-    for index, part in enumerate(parts):
-        if part.startswith(flag + "="):
-            return part[len(flag) + 1:]
-        if part == flag and index + 1 < len(parts):
-            return parts[index + 1]
-    return ""
-
-
-def _main_processes() -> list[tuple[int, str, str]]:
-    """(pid, exe, cmdline) for every Chromium-family MAIN process here.
-
-    A renderer, GPU or zygote process carries `--type=`; the main process does
-    not, and it is the one that owns a profile and answers CDP.
-    """
-    found: list[tuple[int, str, str]] = []
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return found
-    for entry in entries:
-        try:
-            pid = int(entry)
-        except ValueError:
-            continue
-        cmd = _proc_text(pid, "cmdline")
-        if not cmd:
-            continue
-        # Chrome rewrites a CHILD's cmdline in place (space-separated, one
-        # trailing NUL) while the main process keeps real argv boundaries. Both
-        # forms must be recognised: per-entry `startswith` for the NUL form, a
-        # substring only for the rewritten form — a main process whose URL
-        # argument merely CONTAINS `--type=` must stay a main process (a review
-        # flagged that), and a rewritten child title has no entries to check.
-        if "\0" in cmd:
-            if any(part.startswith("--type=") for part in cmd.split("\0")):
-                continue
-        elif "--type=" in cmd:
-            continue
-        exe = os.path.basename(os.path.realpath(f"/proc/{pid}/exe"))
-        if exe in BROWSER_EXES:
-            found.append((pid, exe, cmd))
-    return sorted(found)
-
-
-def _profile_marker(profile: str) -> str:
-    """The `--user-data-dir` marker a browser on that profile carries.
-
-    Built from the NORMALISED path, so a browser launched with a trailing
-    slash, a `..` or a symlinked root is still recognised as this profile's — an
-    exact string compare read a live profile as somebody else's.
-    """
-    return f"--user-data-dir={_norm(profile)}"
-
-
-def _pid_on_marker(pid: int, cmd: str, profile: str) -> bool:
-    """Does that process's cmdline name this profile, however it was spelled?"""
-    spelled = _cmdline_value(cmd, "--user-data-dir")
-    return bool(spelled) and _norm(spelled) == _norm(profile)
-
-
-def _find_pid(profile: str) -> int:
-    """The pid running ON this profile, from its own cmdline.
-
-    The fallback when the pid file is gone (a crash restart). Only a MAIN
-    process (no `--type=`) whose exe is Chromium-family counts, so this can
-    never hand back a renderer — or a process we did not start. The path is
-    compared NORMALISED, so the spelling a launcher chose does not matter.
-    """
-    for pid, _exe, cmd in _main_processes():
-        if _pid_on_marker(pid, cmd, profile):
-            return pid
-    return 0
-
-
-def _pid_on_profile(pid: int, profile: str) -> bool:
-    """Does that pid's OWN cmdline say it runs on this profile?
-
-    The marker is the one `_find_pid` matches and the one Chrome is started
-    with, so a pid that cannot show it is not this profile's browser — which is
-    the difference between stopping that browser and signalling whatever
-    process inherited a recycled pid. The comparison is by NORMALISED path: an
-    exact string compare would refuse to stop the browser this CLI itself
-    started if the launcher spelled the directory differently.
-    """
-    return any(found == pid and _pid_on_marker(found, cmd, profile)
-               for found, _exe, cmd in _main_processes())
-
-
-def _pid_of(profile: str) -> int:
-    """The pid recorded for this profile, or the one running on it now.
-
-    A recorded pid is used only while the process still SAYS it is this
-    profile's browser: the record is a hint, and a stale one plus a recycled
-    pid would otherwise aim `stop` at an unrelated process. `_find_pid` is the
-    fallback, and it refuses to hand back a renderer or a stranger.
-    """
-    pid = 0
-    try:
-        with open(_pid_file(profile)) as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
-        pid = 0
-    if pid and _pid_alive(pid) and _pid_on_profile(pid, profile):
-        return pid
-    return _find_pid(profile)
-
-
-def _record_pid(profile: str, pid: int) -> None:
-    # a missing pid file degrades `close`; it does not break `open`
-    with contextlib.suppress(OSError):
-        Path(_pid_file(profile)).write_text(str(pid), encoding="utf-8")
-
-
-def _spawn(argv: list[str]) -> int:
-    """Start a detached browser process, or refuse.
-
-    Detached (`start_new_session`) so the browser outlives this CLI call; the
-    pid it returns is what `stop` signals.
-    """
-    try:
-        proc = subprocess.Popen(argv, start_new_session=True,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
-    except OSError as e:
-        raise ControlError("launch-failed",
-                           f"cannot start {argv[0]}: {e}") from e
-    return proc.pid
-
-
 # ------------------------------------------------------------ what is running
 def _default_profile(exe: str) -> str:
     """The default data directory of a browser executable, when it exists."""
@@ -443,12 +281,12 @@ def browsers() -> list[dict]:
     """
     rows: list[dict] = []
     attached = _attached()
-    for pid, exe, cmd in _main_processes():
-        flag = _cmdline_value(cmd, "--user-data-dir")
+    for pid, exe, cmd in main_processes():
+        flag = cmdline_value(cmd, "--user-data-dir")
         profile = flag or _default_profile(exe)
         port = cdp.port_of(profile) if profile else 0
         if not port:
-            port = as_int(_cmdline_value(cmd, "--remote-debugging-port"))
+            port = as_int(cmdline_value(cmd, "--remote-debugging-port"))
         reachable = cdp.answers(port)
         endpoint: dict = {"port": port, "reachable": reachable,
                           "verified": False}
@@ -465,7 +303,7 @@ def browsers() -> list[dict]:
             else:
                 endpoint["reason"] = str(owner["reason"])
         rows.append({"pid": pid, "exe": exe,
-                     "path": os.path.realpath(f"/proc/{pid}/exe"),
+                     "path": exe_path(pid),
                      "profile": profile,
                      "profile_from": ("flag" if flag else
                                       ("default" if profile else "")),
@@ -798,7 +636,7 @@ def endpoint_owner(profile: str, port: int) -> dict:
     pid = as_int(owner.get("pid"))
     exe = str(owner.get("exe") or "")
     cmd = str(owner.get("cmd") or "")
-    profile_pid = _find_pid(profile) if profile else 0
+    profile_pid = find_pid(profile) if profile else 0
     if not owner:
         verdict = {"verified": False, "pid": 0, "exe": "",
                    "profile_pid": profile_pid,
@@ -808,7 +646,7 @@ def endpoint_owner(profile: str, port: int) -> dict:
                    "profile_pid": profile_pid,
                    "reason": f"pid {pid} holds the port and is not a "
                              f"Chromium-family browser ({exe or 'unknown'})"}
-    elif profile and not _pid_on_marker(pid, cmd, profile):
+    elif profile and not pid_on_marker(pid, cmd, profile):
         verdict = {"verified": False, "pid": pid, "exe": exe,
                    "profile_pid": profile_pid,
                    "reason": f"pid {pid} holds the port, but its own command "
@@ -1372,7 +1210,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
         else:
             first = wanted[0] if wanted else "about:blank"
             requests = [first, *wanted[1:]]
-            _record_pid(profile, _spawn([path, *flags(profile), first]))
+            record_pid(profile, spawn([path, *flags(profile), first]))
             if not _wait_own_port(profile):
                 fail("launch-failed",
                      f"started {path} on {profile} but no CDP endpoint "
@@ -1393,7 +1231,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     notes = [text for text in (stale, lock["warning"]) if text]
     reply = {"ok": True, "started": not already, "browser": path,
              "profile": profile, "port": cdp.port_of(profile),
-             "pid": _pid_of(profile), "tabs": rows,
+             "pid": pid_of(profile), "tabs": rows,
              "opened": [{"requested": requests[index], "id": row["id"],
                          "url": row["url"], "title": row["title"]}
                         for index, row in enumerate(opened)]}
@@ -1494,7 +1332,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
         if named else {}
     target = str(row["profile"]) if row else managed_profile(browser)
     with _lock(_lock_path(target), "close") as lock:
-        target_pid = as_int(row["pid"]) if row else _pid_of(target)
+        target_pid = as_int(row["pid"]) if row else pid_of(target)
         tabs = _page_count(target)
         if not target_pid:
             if not cdp.reachable(target):
@@ -1508,7 +1346,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
                  f"a browser answers on {target} but no Chromium process on "
                  "it can be identified — refusing to signal a process this "
                  "CLI did not start")
-        if not _pid_on_profile(target_pid, target):
+        if not pid_on_profile(target_pid, target):
             # re-verified IMMEDIATELY before the signal, on BOTH paths: the
             # managed path took its pid before `_page_count` (an HTTP GET plus
             # a /proc walk), so a browser that exited in that window could have
@@ -1527,9 +1365,9 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
         except OSError as e:
             fail("browser-not-stopped", f"cannot stop pid {target_pid}: {e}")
         deadline = time.time() + STOP_WAIT_S
-        while time.time() < deadline and _pid_alive(target_pid):
+        while time.time() < deadline and pid_alive(target_pid):
             time.sleep(0.2)
-        if _pid_alive(target_pid):
+        if pid_alive(target_pid):
             fail("browser-not-stopped",
                  f"pid {target_pid} survived SIGTERM for {STOP_WAIT_S:g}s — "
                  "stop it yourself; this CLI does not SIGKILL a browser")

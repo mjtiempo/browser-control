@@ -26,6 +26,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
+from browser_control.lib import proc  # pyright: ignore[reportMissingImports]
 from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 # The one third-party dependency. Typed as Any so a missing package is a
@@ -39,6 +40,11 @@ except ImportError:                                          # pragma: no cover
 websockets = _websockets
 
 PORT_FILE = "DevToolsActivePort"
+
+# The kernel's answer to "who owns that port" lives in lib/proc.py; it is
+# re-exported here because browser.py and the hermetic checks call
+# `cdp.listener_of`.
+listener_of = proc.listener_of
 # The most a CDP HTTP reply may be. `/json` for a browser with hundreds of
 # tabs is tens of KB; a body past this is not a tab list.
 GET_CAP = 8 * 1024 * 1024
@@ -144,92 +150,6 @@ def get_json(profile: str, path: str) -> Any:
              f"no DevTools port in {profile}: the browser is not running "
              "(or was started without --remote-debugging-port=0)")
     return _get_port(port, path)
-
-
-def _proc_text(pid: str, name: str) -> str:
-    """One /proc file of a pid as text, or "" — argv NULs PRESERVED.
-
-    Chrome rewrites a child's cmdline in place (spaces between entries, one
-    trailing NUL) while the main process keeps real argv boundaries; callers
-    handle both forms. Flattening here made `--user-data-dir` containing a
-    space lose its tail in the ownership check (a review flagged it).
-    """
-    try:
-        with open(f"/proc/{pid}/{name}", "rb") as handle:
-            return handle.read().decode("utf-8", "replace").rstrip("\0\n")
-    except OSError:
-        return ""
-
-
-def _exe_basename(pid: str) -> str:
-    """The executable a pid is running, by name, or ""."""
-    try:
-        return os.path.basename(os.path.realpath(f"/proc/{pid}/exe"))
-    except OSError:
-        return ""
-
-
-def _listening_inodes(port: int) -> set[str]:
-    """The socket inodes LISTENING on that port, tcp4 and tcp6.
-
-    `/proc/net/tcp` is a table: `sl local_address rem_address st … inode`, with
-    the port in HEX and `0A` meaning LISTEN.
-    """
-    wanted = f"{port:04X}"
-    inodes: set[str] = set()
-    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(name) as handle:
-                next(handle, "")            # the header line
-                for line in handle:
-                    fields = line.split()
-                    if len(fields) < 10 or fields[3] != "0A":
-                        continue
-                    if fields[1].rpartition(":")[2] != wanted:
-                        continue
-                    inodes.add(fields[9])
-        except OSError:
-            continue
-    return inodes
-
-
-def listener_of(port: int) -> dict:
-    """Which process LISTENS on that port: {pid, exe, cmd} — or {}.
-
-    The port came from a FILE (`DevToolsActivePort`), and a file can be stale
-    or its port can be taken by something else. This asks the KERNEL instead:
-    the listening socket's inode from `/proc/net/tcp{,6}`, then the process
-    holding that inode through `/proc/<pid>/fd`. A few milliseconds, which is
-    why the caller memoises.
-
-    A pid whose fd table cannot be read is skipped rather than guessed at: the
-    answer is either the process holding the socket or nothing.
-    """
-    if not port:
-        return {}
-    marks = {f"socket:[{inode}]" for inode in _listening_inodes(port)}
-    if not marks:
-        return {}
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return {}
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        fd_dir = f"/proc/{entry}/fd"
-        try:
-            handles = os.listdir(fd_dir)
-        except OSError:
-            continue
-        for handle in handles:
-            try:
-                if os.readlink(f"{fd_dir}/{handle}") in marks:
-                    return {"pid": int(entry), "exe": _exe_basename(entry),
-                            "cmd": _proc_text(entry, "cmdline")}
-            except OSError:
-                continue
-    return {}
 
 
 def answers(port: int) -> bool:
