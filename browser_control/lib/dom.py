@@ -57,11 +57,25 @@ from typing import Any
 # reply carries. They are private because no other module needs them.
 from browser_control.lib import audit, cdp
 from browser_control.lib import browser as tabs
+from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+    as_float,
+    as_int,
+    as_ints,
+    as_list,
+)
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ControlError,
     fail,
 )
 from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
+
+# The coercers themselves live in lib/coerce.py. These aliases keep the
+# hermetic checks that call `dom._int`/`dom._ints`/`dom._num`/`dom._list` by
+# name working, and are part of the re-export surface RF-23 must preserve.
+_int = as_int
+_num = as_float
+_ints = as_ints
+_list = as_list
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
@@ -608,21 +622,6 @@ WAIT_EXPRS = {
 }
 
 
-def _int(value: object, default: int = 0) -> int:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return default
-
-
-def _num(value: object, default: float = 0.0) -> float:
-    """A number the PAGE reported, or `default` when it is not one."""
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return default
-
-
 def _well_formed(rows: Any, required: tuple) -> list[dict]:
     """The dict rows a page-supplied extraction must be, filtered to shape.
 
@@ -635,7 +634,7 @@ def _well_formed(rows: Any, required: tuple) -> list[dict]:
 
 def _viewport(data: dict, target_id: str) -> list[int]:
     """The page's viewport, or a refusal when it has none."""
-    viewport = _ints(data.get("viewport"))
+    viewport = as_ints(data.get("viewport"))
     if len(viewport) < 2 or viewport[0] <= 0 or viewport[1] <= 0:
         fail("no-viewport",
              f"tab {target_id[:10]}… reports no viewport ({viewport}) — a box "
@@ -662,7 +661,7 @@ def _document_ws(port: int, page_target: str) -> str:
         target = _frame_target(port, page_target, FRAME["wanted"])
         # WHICH frame that was: an index is the page's live iframe order, so the
         # reply says what was resolved, not only what was asked for
-        FRAME["resolved"] = {"index": _int(target["index"]),
+        FRAME["resolved"] = {"index": as_int(target["index"]),
                              "url": str(target["url"]),
                              "target": str(target["target"])}
         return cdp.target_ws(port, str(target["target"]), "iframe")
@@ -747,10 +746,10 @@ def frames_of(port: int, page_target: str,
                           and str(r.get("id")) not in used), None)
         if match is not None:
             used.add(str(match["id"]))
-        rows.append({"index": _int(entry.get("index")), "url": url,
+        rows.append({"index": as_int(entry.get("index")), "url": url,
                      "committed": str((match or {}).get("url") or ""),
                      "name": str(entry.get("name") or ""),
-                     "box": _ints(entry.get("box")),
+                     "box": as_ints(entry.get("box")),
                      "visible": bool(entry.get("visible")),
                      "same_process": bool(entry.get("same_process")),
                      "target": str((match or {}).get("id") or ""),
@@ -801,7 +800,7 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
         fail("no-frame", "this page has no iframes — `tab frames` lists them")
     text_ = str(wanted or "").strip()
     if text_.isdigit():
-        hits = [r for r in rows if _int(r["index"]) == _int(text_)]
+        hits = [r for r in rows if as_int(r["index"]) == as_int(text_)]
     else:
         hits = [r for r in rows
                 if text_.lower() in str(r.get("url") or "").lower()]
@@ -970,7 +969,7 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
     """
     rows = _well_formed(data.get("matches") or [], ("tag", "box", "point"))
     if not rows:
-        offscreen = _int(data.get("offscreen"))
+        offscreen = as_int(data.get("offscreen"))
         hint = (f" — {offscreen} candidate(s) are rendered but NOT in the "
                 "viewport: `tab scroll TEXT` brings one into view"
                 if offscreen else "")
@@ -1016,7 +1015,7 @@ def _match_args(expression: str, needle: str, css: str,
               .replace("__SELECTOR__", json.dumps(css))
               .replace("__VISIBLE__", "true" if visible else "false"))
     if "__INDEX__" in filled:
-        filled = filled.replace("__INDEX__", str(_int(index)))
+        filled = filled.replace("__INDEX__", str(as_int(index)))
     return filled
 
 
@@ -1033,7 +1032,7 @@ def _node_of(session: cdp.Session, expression: str) -> int:
         return 0
     session.call("DOM.getDocument", {"depth": 0})
     node = session.call("DOM.requestNode", {"objectId": handle})
-    return _int(node.get("nodeId"))
+    return as_int(node.get("nodeId"))
 
 
 def _text_target(session: cdp.Session) -> dict:
@@ -1074,9 +1073,9 @@ def _playback_verdict(mode: str, before: dict, after: dict) -> tuple[bool, str]:
     is verified by the state the page reports.
     """
     if mode == "play":
-        if _num(after.get("time")) > _num(before.get("time")):
+        if as_float(after.get("time")) > as_float(before.get("time")):
             return True, "the clock advanced"
-        if _int(after.get("ready_state")) == 0:
+        if as_int(after.get("ready_state")) == 0:
             return False, ("the element has nothing to play (readyState 0: no "
                            "supported source)")
         return False, "the clock did not advance"
@@ -1098,7 +1097,7 @@ def _text_verdict(before: dict, after: dict, chars: int) -> tuple[bool | None, s
         return None, "the focused field is not readable from this document"
     if after.get("target") != before.get("target"):
         return None, "the focus moved while the text was being written"
-    grew = _int(after.get("length")) - _int(before.get("length"))
+    grew = as_int(after.get("length")) - as_int(before.get("length"))
     if grew > 0:
         return True, f"the field grew by {grew} character(s) for {chars}"
     return False, "the focused field did not change"
@@ -1165,7 +1164,7 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     expression = (WAIT_EXPRS[name]
                   .replace("__SELECTOR__", json.dumps(str(selector or "")))
                   .replace("__EXPR__", str(expr or "false"))
-                  .replace("__IDLE_MS__", str(_int(idle_ms, IDLE_DEFAULT_MS))))
+                  .replace("__IDLE_MS__", str(as_int(idle_ms, IDLE_DEFAULT_MS))))
     started = time.time()
     value, samples = cdp.evaluate_until(
         _document_ws(cdp.port_of(profile), target_id), expression, bool,
@@ -1279,10 +1278,10 @@ def _extract_schema(each: str, fields: list[str], cap: int = EXTRACT_CAP,
     for spec in fields:
         name, field = _extract_field(spec, verb)
         parsed[name] = field
-    limit = _int(cap, EXTRACT_CAP)
+    limit = as_int(cap, EXTRACT_CAP)
     if limit < 1:
         fail("bad-args", f"{verb}: --cap must be at least 1")
-    keep = _int(chars, EXTRACT_FIELD_CHARS)
+    keep = as_int(chars, EXTRACT_FIELD_CHARS)
     if keep < 1:
         fail("bad-args", f"{verb}: --chars must be at least 1")
     return {"each": selector, "fields": parsed,
@@ -1355,7 +1354,7 @@ def extract(each: str = "", fields: list[str] | None = None,
             records.append(record)
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "each": schema["each"], "fields": names,
-                  "count": len(records), "total": _int(data.get("total")),
+                  "count": len(records), "total": as_int(data.get("total")),
                   "truncated": (bool(data.get("truncated"))
                                 or len(records) < len(raw)),
                   "matches": records})
@@ -1374,7 +1373,7 @@ def find(text: str | None = None, selector: str | None = None,
     it exists and scroll to it.
     """
     needle, css = _query_args(text, selector, "tab find")
-    limit = max(1, _int(cap, FIND_CAP))
+    limit = max(1, as_int(cap, FIND_CAP))
     row, tab_row = _resolve(tab, browser, for_write=False)
     with _session(row, tab_row) as session:
         data = _matches_in(session, needle, css, limit)
@@ -1383,24 +1382,24 @@ def find(text: str | None = None, selector: str | None = None,
         # `--frame` scoped that session to a frame
         frames_here = _frame_summary(row, tab_row, session)
     viewport = _viewport(data, str(tab_row["id"]))
-    matches = [dict(m, box=_ints(m["box"]),
-                    center=_ints(m.get("center")),
-                    viewport=_ints(m.get("viewport")),
-                    point=_ints(m.get("point")))
+    matches = [dict(m, box=as_ints(m["box"]),
+                    center=as_ints(m.get("center")),
+                    viewport=as_ints(m.get("viewport")),
+                    point=as_ints(m.get("point")))
                for m in _well_formed(data.get("matches") or [],
                                      ("tag", "box"))]
     if not matches:
-        offscreen = _int(data.get("offscreen"))
+        offscreen = as_int(data.get("offscreen"))
         fail("no-match",
              f"no rendered element matches {needle or css!r} on "
              f"{str(data.get('title'))!r} (readyState {data.get('ready')!r}, "
-             f"{_int(data.get('total'))} candidate(s)"
+             f"{as_int(data.get('total'))} candidate(s)"
              + (f", {offscreen} offscreen" if offscreen else "") + ")"
              + _frames_note(row, tab_row))
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "query": needle or css, "viewport": viewport,
-                  "total": _int(data.get("total")),
-                  "offscreen": _int(data.get("offscreen")),
+                  "total": as_int(data.get("total")),
+                  "offscreen": as_int(data.get("offscreen")),
                   "truncated": bool(data.get("truncated")),
                   "matches": matches})
     if frames_here:
@@ -1558,7 +1557,7 @@ def click(text: str | None = None, selector: str | None = None,
         # centre: the probe CLAMPS into the viewport, so an element whose centre
         # is below the fold was tested inside it and pressed outside, and the
         # reply still said `clicked: true` (a review measured the mismatch)
-        point = _ints(element.get("hit_at") or element.get("point"), 2)
+        point = as_ints(element.get("hit_at") or element.get("point"), 2)
         if len(point) < 2:
             # a page may answer anything for a value that crosses
             # Runtime.evaluate, and "[7]" is not a point: refuse rather
@@ -1636,7 +1635,7 @@ def hover(text: str | None = None, selector: str | None = None,
                  f"but that point reaches "
                  f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
-        point = _ints(element.get("hit_at") or element.get("point"), 2)
+        point = as_ints(element.get("hit_at") or element.get("point"), 2)
         if len(point) < 2:
             # a page may answer anything for a value that crosses
             # Runtime.evaluate, and "[7]" is not a point: refuse rather
@@ -1728,7 +1727,7 @@ def check(text: str | None = None, selector: str | None = None,
                  f"but that point reaches "
                  f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
                  "instead — something is on top of it")
-        point = _ints(element.get("hit_at") or element.get("point"), 2)
+        point = as_ints(element.get("hit_at") or element.get("point"), 2)
         if len(point) < 2:
             # a page may answer anything for a value that crosses
             # Runtime.evaluate, and "[7]" is not a point: refuse rather
@@ -1808,23 +1807,23 @@ def select(text: str | None = None, selector: str | None = None,
             fail("not-a-select",
                  f"{_describe(element)} is a multiple select — it holds a "
                  "SET of options, and this verb sets one (use `tab js`)")
-        matched = _int(probe.get("matched"))
+        matched = as_int(probe.get("matched"))
         if not matched:
             names = [foreign(name, 30)
-                     for name in _list(probe.get("labels"))[:12]]
+                     for name in as_list(probe.get("labels"))[:12]]
             labels = ", ".join(names)
             fail("no-match",
                  f"no <option> in {_describe(element)} has value or label "
                  f"{wanted!r} (have: {labels or 'none'})")
         if matched > 1:
             candidates = ", ".join(foreign(name, 30) for name in
-                                   _list(probe.get("candidates"))[:5])
+                                   as_list(probe.get("candidates"))[:5])
             fail("ambiguous-option",
                  f"{matched} options in {_describe(element)} match "
                  f"{wanted!r}: {candidates} — their VALUES are what tell them "
                  "apart")
-        target = _int(probe.get("target"), -1)
-        selected = _int(probe.get("selected"), -1)
+        target = as_int(probe.get("target"), -1)
+        selected = as_int(probe.get("selected"), -1)
         delta = target - selected
         if not delta:
             return {"ok": True, "selected": True, "changed": False,
@@ -1861,11 +1860,11 @@ def select(text: str | None = None, selector: str | None = None,
                           "nativeVirtualKeyCode": vk})
         after = _select_probe(session, needle, css, index, wanted)
         deadline = time.time() + CHECK_TIMEOUT_S
-        while (_int(after.get("selected"), -1) != target
+        while (as_int(after.get("selected"), -1) != target
                and time.time() < deadline):
             time.sleep(0.15)
             after = _select_probe(session, needle, css, index, wanted)
-    if _int(after.get("selected"), -1) != target \
+    if as_int(after.get("selected"), -1) != target \
             or str(after.get("value")) != str(probe.get("target_value")):
         fail("select-not-verified",
              f"{_describe(element)} reports "
@@ -2144,13 +2143,13 @@ def screenshot(path: str, full: bool = False, force: bool = False,
         except (ValueError, binascii.Error) as e:
             fail("cdp-error",
                  f"Page.captureScreenshot: the data is not base64 ({e})")
-    dpr = _num(metrics.get("dpr"), 1.0)
+    dpr = as_float(metrics.get("dpr"), 1.0)
     if not math.isfinite(dpr) or dpr <= 0:
         fail("screenshot-not-verified",
              f"the page reports devicePixelRatio {metrics.get('dpr')!r}, which "
              "no size can be checked against — nothing was written")
-    want = ([_int(metrics.get("sw")), _int(metrics.get("sh"))] if full
-            else [_int(metrics.get("iw")), _int(metrics.get("ih"))])
+    want = ([as_int(metrics.get("sw")), as_int(metrics.get("sh"))] if full
+            else [as_int(metrics.get("iw")), as_int(metrics.get("ih"))])
     expected = [_pixels(css, dpr) for css in want]
     size = _png_size(data)
     if not size:
@@ -2204,7 +2203,7 @@ def scroll(by: int | None = None, edge: str | None = None,
     if at is not None and modes[0] != "--by":
         fail("bad-args", "tab scroll: --at goes with --by")
     # the arguments are checked BEFORE a browser is asked about anything
-    if modes[0] == "--by" and not _int(by):
+    if modes[0] == "--by" and not as_int(by):
         fail("bad-args", "tab scroll: --by needs a non-zero PIXELS")
     if edge is not None and str(edge) not in ("top", "bottom"):
         fail("bad-args", f"tab scroll: --edge is top|bottom, got {edge!r}")
@@ -2232,35 +2231,7 @@ def _at_point(at: str, verb: str = "tab scroll") -> tuple[int, int]:
     parts = str(at).replace(" ", "").split(",")
     if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
         fail("bad-args", f"{verb}: --at needs X,Y numbers, got {at!r}")
-    return _int(parts[0], -1), _int(parts[1], -1)
-
-
-def _ints(value: object, count: int = 0) -> list[int]:
-    """A numeric list from the page, or [] — never a TypeError out of a verb.
-
-    `_well_formed` checks that KEYS exist, and its callers then unpack the
-    values (`box`, `center`, `point`, `viewport`); a page that answers
-    `{"point": 7}` raised `TypeError` out of the verb instead of refusing, and
-    the page owns every value on that path (a review flagged it). A value that
-    is not a list at all is []: iterating a dict would have produced its KEYS as
-    numbers, which is worse than nothing.
-    """
-    if not isinstance(value, (list, tuple)):
-        return []
-    out = [_int(item) for item in value]
-    return out[:count] if count else out
-
-
-def _list(value: object) -> list:
-    """A page-supplied list, or [] — never a TypeError out of a verb.
-
-    The sibling of `_ints` for sequences of NAMES: `tab select` sliced
-    `probe["labels"]` and `probe["candidates"]` unguarded, so a page that
-    answered a number or an object raised `TypeError` instead of the intended
-    `no-match`/`ambiguous-option` refusal (a review flagged it). A dict is not
-    a list here: its keys would be read as labels.
-    """
-    return list(value) if isinstance(value, (list, tuple)) else []
+    return as_int(parts[0], -1), as_int(parts[1], -1)
 
 
 def _point(at: str | None, viewport: list[int],
@@ -2312,24 +2283,24 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
     before = _probe(session, x, y)
     steps = 0
     if edge is None:
-        delta = _int(by)
+        delta = as_int(by)
         session.call("Input.dispatchMouseEvent",
                      {"type": "mouseWheel", "x": x, "y": y, "deltaX": 0,
                       "deltaY": delta, "button": "none", "buttons": 0})
         after = _settle(session, x, y, before)
         steps = 1
-        moved = (_int(after.get("y")) != _int(before.get("y"))
+        moved = (as_int(after.get("y")) != as_int(before.get("y"))
                  or after.get("nested") != before.get("nested"))
         if not moved:
             # a delta was asked for and nothing took it: already at that end
             # of the document is the one reason that is not a failure
-            at_edge = ((_int(before.get("y")) == 0 and delta < 0)
-                       or (abs(_int(before.get("y"))
-                               - _int(before.get("max"))) <= 2 and delta > 0))
+            at_edge = ((as_int(before.get("y")) == 0 and delta < 0)
+                       or (abs(as_int(before.get("y"))
+                               - as_int(before.get("max"))) <= 2 and delta > 0))
             if not at_edge:
                 fail("scroll-not-verified",
                      f"nothing moved: the document is still at y="
-                     f"{_int(after.get('y'))} (max {_int(after.get('max'))}) "
+                     f"{as_int(after.get('y'))} (max {as_int(after.get('max'))}) "
                      f"and no scroller under ({x}, {y}) moved — the wheel may "
                      "have landed on something that does not scroll (aim it "
                      "with --at X,Y)")
@@ -2348,19 +2319,19 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
                 after = moved
                 break                     # nothing moved: an edge, or a wall
             after = moved
-        want = 0 if direction < 0 else _int(after.get("max"))
-        if abs(_int(after.get("y")) - want) > 2:
+        want = 0 if direction < 0 else as_int(after.get("max"))
+        if abs(as_int(after.get("y")) - want) > 2:
             fail("scroll-not-verified",
-                 f"the document stopped at y={_int(after.get('y'))} of "
-                 f"max {_int(after.get('max'))} after {steps} wheel step(s) — "
+                 f"the document stopped at y={as_int(after.get('y'))} of "
+                 f"max {as_int(after.get('max'))} after {steps} wheel step(s) — "
                  "the bottom/top was not reached (a sticky scroller, or a "
                  "point that is over something that does not scroll)")
-    moved_document = _int(after.get("y")) != _int(before.get("y"))
+    moved_document = as_int(after.get("y")) != as_int(before.get("y"))
     moved_nested = after.get("nested") != before.get("nested")
     return {"ok": True, "moved": moved_document or moved_nested,
-            "document": {"before": _int(before.get("y")),
-                         "after": _int(after.get("y")),
-                         "max": _int(after.get("max"))},
+            "document": {"before": as_int(before.get("y")),
+                         "after": as_int(after.get("y")),
+                         "max": as_int(after.get("max"))},
             "nested": {"before": before.get("nested"),
                        "after": after.get("nested")},
             "point": [x, y], "steps": steps,
@@ -2410,7 +2381,7 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
     how a caller sees what it did not get).
     """
     css = str(selector or "").strip()
-    limit = max(1, min(TEXT_CAP, _int(chars, TEXT_CAP)))
+    limit = max(1, min(TEXT_CAP, as_int(chars, TEXT_CAP)))
     row, tab_row = _resolve(tab, browser, for_write=False)
     with _session(row, tab_row) as session:
         data = session.evaluate(TEXT_EXPR.replace("__SELECTOR__",
@@ -2424,9 +2395,9 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
              + _frames_note(row, tab_row))
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "selector": data.get("selector"),
-                  "viewport": _ints(data.get("viewport")),
+                  "viewport": as_ints(data.get("viewport")),
                   "text": str(data.get("text") or ""),
-                  "length": _int(data.get("length")),
+                  "length": as_int(data.get("length")),
                   "truncated": bool(data.get("truncated"))})
     if frames_here:
         reply["frames"] = frames_here
@@ -2658,7 +2629,7 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     first = files[0] if files and isinstance(files[0], dict) else {}
     name = os.path.basename(file_path)
     if len(files) != 1 or first.get("name") != name \
-            or _int(first.get("size"), -1) != size:
+            or as_int(first.get("size"), -1) != size:
         fail("upload-not-verified",
              f"tab upload: the page holds {files!r}, not one file named "
              f"{name!r} of {size} bytes")
@@ -2673,22 +2644,22 @@ def _media_reply(row: dict, tab_row: dict, state: dict, mode: str,
     """The media reply: what the PAGE reports, plus the clock as evidence."""
     reply = {"ok": True, "mode": mode,
              "element": state.get("element"),
-             "count": _int(state.get("count")),
+             "count": as_int(state.get("count")),
              "playing": bool(state.get("playing")),
              "paused": bool(state.get("paused")),
              "ended": bool(state.get("ended")),
              "muted": bool(state.get("muted")),
-             "volume": _num(state.get("volume")),
-             "rate": _num(state.get("rate")),
-             "time": _num(state.get("time")),
-             "duration": _num(state.get("duration")),
-             "ready_state": _int(state.get("ready_state")),
+             "volume": as_float(state.get("volume")),
+             "rate": as_float(state.get("rate")),
+             "time": as_float(state.get("time")),
+             "duration": as_float(state.get("duration")),
+             "ready_state": as_int(state.get("ready_state")),
              "src": str(state.get("src") or ""),
              "tab": f"id:{tab_row['id']}",
              "browser": tabs._brief(row)}  # noqa: SLF001
     if before is not None:
-        reply["time_before"] = _num(before.get("time"))
-        reply["advanced"] = _num(state.get("time")) > _num(before.get("time"))
+        reply["time_before"] = as_float(before.get("time"))
+        reply["advanced"] = as_float(state.get("time")) > as_float(before.get("time"))
     return reply
 
 
@@ -2741,7 +2712,7 @@ def media(mode: str, index: int | None = None, tab: str = "",
         if not before.get("found"):
             fail("no-media",
                  f"tab media: the page has no video or audio element "
-                 f"({_int(before.get('count'))} found)")
+                 f"({as_int(before.get('count'))} found)")
         if name == "state":
             return _media_reply(row, tab_row, before, name)
         # `__MODE__` here is play|pause, NOT the matcher's text|selector, so
@@ -2749,7 +2720,7 @@ def media(mode: str, index: int | None = None, tab: str = "",
         session.evaluate(
             MEDIA_ACTION_EXPR.replace("__MODE__", json.dumps(name))
             .replace("__INDEX__",
-                     str(-1 if index is None else _int(index))))
+                     str(-1 if index is None else as_int(index))))
         after = _poll_media(session, name, before)
     if not after.get("found"):
         fail("no-media", f"tab media {name}: the element left the page")

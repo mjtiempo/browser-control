@@ -46,6 +46,7 @@ from browser_control.lib.browser import (  # pyright: ignore[reportMissingImport
     root,
     scope,
 )
+from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import fail  # pyright: ignore[reportMissingImports]
 
 # Never copied, at any depth, by NAME: the lock files that make a profile look
@@ -187,13 +188,6 @@ def _copy(source: str, target: str, dry: bool) -> dict:
     return facts
 
 
-def _int(value: object) -> int:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
-
-
 def _has_content(path: str) -> bool:
     """Does that directory exist and hold anything? Never raises.
 
@@ -262,7 +256,7 @@ def _live_pid(profile: str) -> int:
     wanted = browser_lib._norm(profile)                       # noqa: SLF001
     for row in browser_lib.browsers():
         if row["pid"] and browser_lib._norm(str(row["profile"])) == wanted:
-            return _int(row["pid"])
+            return as_int(row["pid"])
     return 0
 
 

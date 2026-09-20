@@ -38,6 +38,7 @@ from typing import Any
 # The project-level pyright run resolves these imports; the line-level ignore
 # is for pi-lens's fallback index, which does not see the sibling modules.
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ControlError,
     fail,
@@ -430,13 +431,6 @@ def _spawn(argv: list[str]) -> int:
 
 
 # ------------------------------------------------------------ what is running
-def _to_int(value: object) -> int:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
-
-
 def _default_profile(exe: str) -> str:
     """The default data directory of a browser executable, when it exists."""
     raw = DEFAULT_PROFILES.get(exe, "")
@@ -478,7 +472,7 @@ def browsers() -> list[dict]:
         profile = flag or _default_profile(exe)
         port = cdp.port_of(profile) if profile else 0
         if not port:
-            port = _to_int(_cmdline_value(cmd, "--remote-debugging-port"))
+            port = as_int(_cmdline_value(cmd, "--remote-debugging-port"))
         reachable = cdp.answers(port)
         endpoint: dict = {"port": port, "reachable": reachable,
                           "verified": False}
@@ -708,14 +702,14 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
              "attach: name ONE browser — --port N, --pid N or --profile DIR")
     rows = browsers()
     if pid:
-        row = next((r for r in rows if r["pid"] == _to_int(pid)), None)
+        row = next((r for r in rows if r["pid"] == as_int(pid)), None)
     elif profile:
         want = _norm(profile)
         row = next((r for r in rows if _norm(r["profile"]) == want), None)
     else:
-        want_port = _to_int(port)
+        want_port = as_int(port)
         row = next((r for r in rows
-                    if _to_int(r["cdp"]["port"]) == want_port), None)
+                    if as_int(r["cdp"]["port"]) == want_port), None)
     if row is None:
         fail("no-browser",
              f"no running Chromium-family browser matches {given[0]}")
@@ -728,10 +722,10 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
         # is what opens the tab-write gate: `_named_browser` refuses an
         # unverified endpoint, and so must this (a review measured the gap —
         # a stale port was enough to authorise a write path)
-        not_local_refusal(str(row["profile"]), _to_int(row["cdp"]["port"]),
+        not_local_refusal(str(row["profile"]), as_int(row["cdp"]["port"]),
                           str(row["cdp"].get("reason") or "unknown"))
     record = {"profile": _norm(row["profile"]), "pid": row["pid"],
-              "port": _to_int(row["cdp"]["port"]), "exe": row["exe"],
+              "port": as_int(row["cdp"]["port"]), "exe": row["exe"],
               "managed": row["managed"],
               "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     # the read-modify-write of the records runs under the root's lock: two
@@ -780,10 +774,10 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
             keys = [key for key in records if key == _norm(profile)]
         elif pid:
             keys = [key for key, rec in records.items()
-                    if _to_int(rec.get("pid")) == _to_int(pid)]
+                    if as_int(rec.get("pid")) == as_int(pid)]
         else:
             keys = [key for key, rec in records.items()
-                    if _to_int(rec.get("port")) == _to_int(port)]
+                    if as_int(rec.get("port")) == as_int(port)]
         if not keys:
             fail("not-attached", f"nothing is attached for {given[0]}")
         for key in keys:
@@ -825,7 +819,7 @@ def endpoint_owner(profile: str, port: int) -> dict:
     if cached is not None:
         return cached
     owner = cdp.listener_of(port)
-    pid = _to_int(owner.get("pid"))
+    pid = as_int(owner.get("pid"))
     exe = str(owner.get("exe") or "")
     cmd = str(owner.get("cmd") or "")
     profile_pid = _find_pid(profile) if profile else 0
@@ -873,7 +867,7 @@ def _drive_refusal(browser: str, rows: list[dict]) -> None:
                         and not r["cdp"].get("verified")], browser)
     if suspects:
         row = suspects[0]
-        not_local_refusal(str(row["profile"]), _to_int(row["cdp"]["port"]),
+        not_local_refusal(str(row["profile"]), as_int(row["cdp"]["port"]),
                           str(row["cdp"].get("reason") or "unknown"))
 
 
@@ -930,7 +924,7 @@ def _tabs_of(row: dict) -> tuple[list[dict], str]:
         return [], str(row["cdp"].get("reason") or
                        "the endpoint is not this profile's browser")
     try:
-        port = _to_int(row["cdp"]["port"])
+        port = as_int(row["cdp"]["port"])
         return cdp.rows_to_tabs(cdp.page_rows_at(port)), ""
     except ControlError as e:
         return [], e.message
@@ -940,7 +934,7 @@ def _brief(row: dict) -> dict:
     """One browser row, small enough to ride along in a tab reply."""
     return {"pid": row["pid"], "exe": row["exe"], "profile": row["profile"],
             "managed": row["managed"], "attached": row["attached"],
-            "port": _to_int(row["cdp"]["port"])}
+            "port": as_int(row["cdp"]["port"])}
 
 
 def _row(row: dict) -> dict:
@@ -954,7 +948,7 @@ def _endpoint_details(row: dict) -> dict:
     """One browser row's endpoint, with the version it reports itself."""
     details = dict(row["cdp"])
     if details.get("reachable"):
-        version = cdp.version_at(_to_int(details.get("port")))
+        version = cdp.version_at(as_int(details.get("port")))
         details["version"] = str(version.get("Browser") or "")
         details["protocol"] = str(version.get("Protocol-Version") or "")
         details["user_agent"] = str(version.get("User-Agent") or "")
@@ -1167,7 +1161,7 @@ def _verify_profile_endpoint(profile: str) -> None:
     they re-read the port file at call time (a stale one sent a tab-creating
     call wherever it pointed).
     """
-    port = _to_int(cdp.port_of(profile))
+    port = as_int(cdp.port_of(profile))
     if not port:
         fail("cdp-unreachable",
              f"no port file in {profile} — nothing to drive there")
@@ -1467,8 +1461,8 @@ def _named_browser(selector: dict) -> dict:
     is the consent; this is what makes the name mean something.
     """
     rows = browsers()
-    port = _to_int(selector.get("port"))
-    pid = _to_int(selector.get("pid"))
+    port = as_int(selector.get("port"))
+    pid = as_int(selector.get("pid"))
     profile = str(selector.get("profile") or "")
     if pid:
         row = next((r for r in rows if r["pid"] == pid), None)
@@ -1479,7 +1473,7 @@ def _named_browser(selector: dict) -> dict:
         what = f"--profile {profile}"
     else:
         row = next((r for r in rows
-                    if _to_int(r["cdp"]["port"]) == port), None)
+                    if as_int(r["cdp"]["port"]) == port), None)
         what = f"--port {port}"
     if row is None:
         fail("no-browser",
@@ -1529,7 +1523,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
         if named else {}
     target = str(row["profile"]) if row else managed_profile(browser)
     with _lock(_lock_path(target), "close") as lock:
-        target_pid = _to_int(row["pid"]) if row else _pid_of(target)
+        target_pid = as_int(row["pid"]) if row else _pid_of(target)
         tabs = _page_count(target)
         if not target_pid:
             if not cdp.reachable(target):
@@ -2342,7 +2336,7 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
     tab_ws = cdp.target_ws(cdp.port_of(profile), target_id)
     listing = cdp.call(tab_ws, "Page.getNavigationHistory")
     entries = listing.get("entries") if isinstance(listing, dict) else None
-    index = _to_int(listing.get("currentIndex")) if isinstance(listing, dict) \
+    index = as_int(listing.get("currentIndex")) if isinstance(listing, dict) \
         else -1
     if not isinstance(entries, list) or not entries:
         fail("nav-failed",
