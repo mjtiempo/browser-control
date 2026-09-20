@@ -24,6 +24,7 @@ import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -38,6 +39,7 @@ from browser_control.lib import (  # noqa: E402
     dom,
     errors,
 )
+from browser_control.lib import policy as policy_lib
 from browser_control.lib import (
     profile as profile_lib,
 )
@@ -53,6 +55,16 @@ SUITE_LOG = "/dev/null"          # replaced in main()
 
 PASS: list[str] = []
 FAIL: list[str] = []
+
+
+def _gate(allow: str | None = None, deny: str | None = None) -> Any:
+    """One Policy built from flags and the CURRENT environment."""
+    return policy_lib.Policy.from_sources(allow, deny)
+
+
+def _may(policy: Any, action: str) -> tuple[bool, str]:
+    """Ask a policy about one action, with the surface's own classes."""
+    return policy.allowed(action, capabilities.classes_for(action))
 
 
 def check(name: str, fn: Callable[[], None]) -> None:
@@ -1649,40 +1661,35 @@ def t_policy_gate() -> None:
     Module state on purpose — the policy is per PROCESS, set by the CLI from
     `--allow`/`--deny` or the environment — so this restores it afterwards.
     """
-    original = dict(capabilities.POLICY)
     try:
-        for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV):
+        for name in (policy_lib.ALLOW_ENV, policy_lib.DENY_ENV):
             os.environ.pop(name, None)
         # no policy: everything the declared surface holds is allowed
-        capabilities.policy()
-        assert capabilities.allowed("tab js")[0] is True
+        assert _may(_gate(), "tab js")[0] is True
         # an allow-list: EVERY class of the action has to be in it
-        capabilities.policy("read,write", None)
-        assert capabilities.allowed("open")[0] is True          # write
-        assert capabilities.allowed("tab js")[0] is False       # code+write
-        assert capabilities.allowed("tab upload")[0] is False   # write+file
+        assert _may(_gate("read,write"), "open")[0] is True          # write
+        assert _may(_gate("read,write"), "tab js")[0] is False       # code+write
+        assert _may(_gate("read,write"), "tab upload")[0] is False   # write+file
         # a deny-list: any one class is enough to block
-        capabilities.policy(None, "code")
-        blocked, why = capabilities.allowed("tab wait --for js")
+        blocked, why = _may(_gate(deny="code"), "tab wait --for js")
         assert blocked is False and "denied" in why, why
-        assert capabilities.allowed("tab wait")[0] is True
+        assert _may(_gate(deny="code"), "tab wait")[0] is True
         # `*` means every class; an unknown class is REFUSED, not ignored
-        capabilities.policy("*", None)
-        assert capabilities.allowed("tab js")[0] is True
-        refusal(lambda: capabilities.policy("nonsense", None), "bad-args")
+        assert _may(_gate("*"), "tab js")[0] is True
+        refusal(lambda: _gate("nonsense"), "bad-args")
         # something nobody classified is refused rather than waved through
-        blocked, why = capabilities.allowed("tab frobnicate")
+        blocked, why = _may(_gate("*"), "tab frobnicate")
         assert blocked is False and "declared surface" in why, why
         # the environment is the default source; a flag names ONE side, and it
         # may only NARROW what the environment set for the session (the bugs
         # this replaced: `--deny X` voided a host's `BROWSER_CONTROL_ALLOW=read`
         # whitelist, and — mirrored — `--deny egress` replaced a host's deny-list
         # so `tab js` ran while `BROWSER_CONTROL_DENY=code` stood)
-        os.environ[capabilities.DENY_ENV] = "code"
-        assert capabilities.policy()["source"] == capabilities.DENY_ENV
-        both = capabilities.policy("read", None)
-        assert both["source"] == f"--allow + {capabilities.DENY_ENV}", both
-        assert both["allow"] == ("read",) and both["deny"] == ("code",), both
+        os.environ[policy_lib.DENY_ENV] = "code"
+        assert _gate().source == policy_lib.DENY_ENV
+        both = _gate("read")
+        assert both.source == f"--allow + {policy_lib.DENY_ENV}", both
+        assert both.allow == ("read",) and both.deny == ("code",), both
         # the argv route, in-process: the gate refuses, `selftest` never is
         rc, _out, err = run_cli(["tab", "text", "--deny", "read"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
@@ -1695,9 +1702,8 @@ def t_policy_gate() -> None:
         rc, _out, err = run_cli(["tab", "text", "--allow", "nonsense"])
         assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
     finally:
-        for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV):
+        for name in (policy_lib.ALLOW_ENV, policy_lib.DENY_ENV):
             os.environ.pop(name, None)
-        capabilities.POLICY.update(original)
     # `list` reports the machine, so it refuses a scope instead of dropping it
     outside = os.path.join(tempfile.gettempdir(),
                            "browser-control-outside-profile")
@@ -1784,23 +1790,22 @@ def t_gate_and_argv_hardening() -> None:
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
     # 4. the two sides of the policy are resolved INDEPENDENTLY: a `--deny`
     #    cannot void the environment's allow-list (measured: it did)
-    original = dict(capabilities.POLICY)
     saved = {name: os.environ.get(name)
-             for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV)}
+             for name in (policy_lib.ALLOW_ENV, policy_lib.DENY_ENV)}
     try:
-        os.environ[capabilities.ALLOW_ENV] = "read"
-        capabilities.policy(None, "egress")
-        allowed, why = capabilities.allowed("tab js")
+        os.environ[policy_lib.ALLOW_ENV] = "read"
+        gate = _gate(deny="egress")
+        allowed, why = _may(gate, "tab js")
         assert allowed is False and "not allowed" in why, why
-        described = capabilities.describe()
-        assert described["source"] == f"{capabilities.ALLOW_ENV} + --deny", \
+        described = gate.describe()
+        assert described["source"] == f"{policy_lib.ALLOW_ENV} + --deny", \
             described
         assert described["enforced"] is True, described
         # …and the MIRROR: the env-DENY side survives a `--deny` naming something
         # else. The first version of this fix still let that through (a review
         # measured `BROWSER_CONTROL_DENY=code` + `--deny egress` running js)
-        os.environ.pop(capabilities.ALLOW_ENV, None)
-        os.environ[capabilities.DENY_ENV] = "code"
+        os.environ.pop(policy_lib.ALLOW_ENV, None)
+        os.environ[policy_lib.DENY_ENV] = "code"
         rc, _out, err = run_cli(["tab", "js", "1", "--deny", "egress"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
         # an ENVIRONMENT value that names no class is refused exactly like the
@@ -1808,7 +1813,7 @@ def t_gate_and_argv_hardening() -> None:
         # EITHER side, and even when a valid flag is present, because the blank
         # side is a mistake and not an absence (a review found only the allow
         # side, only without a flag, was pinned)
-        for name in (capabilities.ALLOW_ENV, capabilities.DENY_ENV):
+        for name in (policy_lib.ALLOW_ENV, policy_lib.DENY_ENV):
             for blank in (" ", "\t"):
                 os.environ[name] = blank
                 rc, _out, err = run_cli(["list"])
@@ -1821,18 +1826,18 @@ def t_gate_and_argv_hardening() -> None:
         # environment's `read` is what refuses it, and the refusal names both
         # sources (a review showed the earlier assertion could not tell the two
         # behaviours apart)
-        os.environ[capabilities.ALLOW_ENV] = "read"
+        os.environ[policy_lib.ALLOW_ENV] = "read"
         rc, _out, err = run_cli(["tab", "wait", "--for", "js", "--expr", "1",
                                  "--allow", "code"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
-        assert "--allow" in err and capabilities.ALLOW_ENV in err, err
+        assert "--allow" in err and policy_lib.ALLOW_ENV in err, err
         # a flag may NARROW the session allow-list, never widen it
         rc, _out, err = run_cli(["tab", "js", "1", "--allow", "code"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
         # …and when the two allow-lists share no class, NOTHING is allowed: an
         # empty allow-list is not "no policy"
-        capabilities.policy("write", None)
-        assert capabilities.allowed("list")[0] is False, capabilities.describe()
+        gate = _gate("write")
+        assert _may(gate, "list")[0] is False, gate.describe()
         # a value that NAMES NO CLASS must not switch the gate off
         for argv in (["tab", "js", "1", "--allow", ","],
                      ["list", "--deny", ","]):
@@ -1844,7 +1849,6 @@ def t_gate_and_argv_hardening() -> None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-        capabilities.POLICY.update(original)
     # 5. an empty value is not "the only tab" (the library refuses an empty
     #    spec, so the CLI has to refuse it too, not hand it one)
     for argv in (["tab", "text", "--tab", ""], ["tab", "activate", ""],
@@ -2781,8 +2785,8 @@ def t_plugin_system() -> None:
             assert "broken.py" in errors and "boom" in errors, errors
             assert "collide.py" in errors and "already taken" in errors, errors
             assert "old.py" in errors and "api 99" in errors, errors
-            assert "hello" in capabilities.PLUGIN_ACTIONS, \
-                capabilities.PLUGIN_ACTIONS
+            assert "hello" in capabilities.SURFACE.plugin_actions, \
+                capabilities.SURFACE.plugin_actions
         finally:
             if keep is None:
                 os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)

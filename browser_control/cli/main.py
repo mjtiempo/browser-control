@@ -24,6 +24,7 @@ from browser_control import __version__
 from browser_control.lib import audit, capabilities, cdp, dom
 from browser_control.lib import browser as browser_lib
 from browser_control.lib import plugins as plugins_lib
+from browser_control.lib import policy as policy_lib
 from browser_control.lib import profile as profile_lib
 from browser_control.lib.browser import (
     activate,
@@ -389,7 +390,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
                  "unclassified": capabilities.unclassified(
                      HANDLERS, {"tab": TAB_SUBCOMMANDS,
                                 "profile": PROFILE_SUBCOMMANDS})},
-             "policy": capabilities.describe(),
+             "policy": _POLICY.describe(),
              "browsers": found}
     reply.update(_plugins_report())
     if browser:
@@ -1162,6 +1163,10 @@ def action(verb: str, rest: list[str]) -> str:
 
 # The plugins loaded for THIS invocation: replaced at the top of `main`, so
 # one call can never inherit another's actions (or leave a ghost behind).
+# The policy ONE invocation runs under: `main` replaces its contents from
+# the flags and the environment before the gate is asked anything.
+_POLICY = policy_lib.Policy()
+
 PLUGINS = plugins_lib.Registry()
 
 
@@ -1237,7 +1242,8 @@ def main(argv: list[str] | None = None) -> int:
         dom.frame(flags["frame"] or "")
         # NOT `or None`: a flag given an empty value must reach the policy,
         # which refuses it, instead of reading as "the call named no policy"
-        capabilities.policy(flags["allow"], flags["deny"])
+        _POLICY.update(policy_lib.Policy.from_sources(flags["allow"],
+                                                     flags["deny"]))
         audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:
@@ -1270,7 +1276,8 @@ def main(argv: list[str] | None = None) -> int:
             # caller sees (`bad-args` for a subcommand nobody has).
             wanted = action(verb, rest)
             if wanted:
-                permitted, why = capabilities.allowed(wanted)
+                permitted, why = _POLICY.allowed(
+                    wanted, capabilities.classes_for(wanted))
                 if not permitted:
                     fail(ERR_NOT_ALLOWED, why)
         reply = handler(rest, browser)
