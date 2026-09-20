@@ -37,6 +37,9 @@ from typing import Any
 # The project-level pyright run resolves these imports; the line-level ignore
 # is for pi-lens's fallback index, which does not see the sibling modules.
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
+from browser_control.lib import (
+    scope as scope_state,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_ACTIVATE_NOT_VERIFIED,
@@ -160,9 +163,7 @@ def binary(name: str = "") -> str:
 # this one value addresses ONE instance everywhere: which is what makes two
 # instances of the SAME browser usable (`open --profile <root>/work` and
 # `open --profile <root>/personal`), instead of refusing `ambiguous-browser`.
-SCOPE: dict[str, str] = {"profile": ""}
-
-
+# The state itself is `lib/scope.py::Scope`, shared with `--frame`.
 def scope(profile: str | None = None) -> str:
     """Set, clear or read the profile this process's calls are about.
 
@@ -171,10 +172,12 @@ def scope(profile: str | None = None) -> str:
     sets it. A path outside this CLI's root is refused when `open` acts on it
     (`instance_dir`), because only the profiles under that root are the CLI's.
     """
-    if profile is not None:
-        text = str(profile).strip()
-        SCOPE["profile"] = norm(text) if text else ""
-    return SCOPE["profile"]
+    return scope_state.current().set_profile(profile)
+
+
+def _scoped() -> str:
+    """The profile this invocation is about (the `--profile` scope)."""
+    return scope_state.current().profile
 
 
 def instance_dir(binary_path: str) -> str:
@@ -185,7 +188,7 @@ def instance_dir(binary_path: str) -> str:
     instead, and it has to live under this CLI's root: outside it we would be
     starting a browser we then refuse to write to.
     """
-    scoped = SCOPE["profile"]
+    scoped = _scoped()
     if not scoped:
         return profile_dir(binary_path)
     if not _is_managed(scoped):
@@ -401,7 +404,7 @@ def _narrow(rows: list[dict], browser: str) -> list[dict]:
     between two instances of the same browser.
     """
     wanted = os.path.basename(str(browser).strip())
-    scoped = SCOPE["profile"]
+    scoped = _scoped()
     out: list[dict] = []
     for row in rows:
         if wanted and wanted not in (row["exe"],
@@ -462,20 +465,20 @@ def _writable_profile(browser: str = "") -> str:
     stranger's browser up, this returns the profile this CLI starts itself,
     because "write into whatever answered" is the bug this rule exists for.
     """
-    if SCOPE["profile"]:
+    if _scoped():
         # the scope is a write target only when it is one this CLI manages or
         # was handed: `--profile /tmp/stranger` used to come straight back and
         # `tab about:blank` then ran `Target.createTarget` in a stranger's
         # browser (a review measured it). `instance_dir` refuses that path for
         # `open`; a write has to refuse it too — the two halves of the gate
         # disagreed about the same argv.
-        if not _is_managed(SCOPE["profile"]) \
-                and not is_attached(SCOPE["profile"]):
+        if not _is_managed(_scoped()) \
+                and not is_attached(_scoped()):
             fail(ERR_NOT_MANAGED,
-                 f"--profile {SCOPE['profile']} is not a profile this CLI "
+                 f"--profile {_scoped()} is not a profile this CLI "
                  "manages or has attached — `open --profile DIR` starts one "
                  "under the root, or `attach --port N` hands one over")
-        return SCOPE["profile"]
+        return _scoped()
     rows = _writable(browser)
     if len(rows) > 1:
         names = ", ".join(os.path.basename(str(r["profile"]))
@@ -496,10 +499,10 @@ def managed_profile(browser: str = "") -> str:
     tab writes, not the right to stop somebody else's browser."""
     rows = _narrow([r for r in browsers()
                     if r["managed"] and r["cdp"]["reachable"]], browser)
-    if not rows and SCOPE["profile"]:
+    if not rows and _scoped():
         # a scoped call is about THAT instance, running or not: `open` starts
         # it, and nothing here may silently fall back to some other profile
-        return SCOPE["profile"]
+        return _scoped()
     if len(rows) > 1:
         # pid AND the whole profile path: two browsers can share an executable
         # name, and "(google-chrome-stable, google-chrome-stable)" is a message
@@ -855,7 +858,7 @@ def browser_info(browser: str = "") -> dict:
     if live:
         return {"ok": True, "running": True, "browser": _row(live[0]),
                 "cdp": _endpoint_details(live[0])}
-    if rows and (browser or SCOPE["profile"]):
+    if rows and (browser or _scoped()):
         # a NAMED browser this CLI cannot (or may not) drive: report it rather
         # than pretend. With no name and no scope, an unmanaged and unreachable
         # browser is not an answer at all — say `running: false` instead.
@@ -1880,7 +1883,7 @@ def _no_drive(browser: str = "", reason: str = "") -> None:
     ANSWERED but did not verify is a different refusal (`cdp-not-local`), which
     the callers check first — this one is for nothing being there at all.
     """
-    scoped = SCOPE["profile"]
+    scoped = _scoped()
     asked = [part for part in ((f"on {scoped}" if scoped else ""),
                                (f"matching {browser!r}" if browser else ""))
              if part]

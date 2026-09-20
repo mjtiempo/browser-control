@@ -41,6 +41,7 @@ from browser_control.lib import (  # noqa: E402
 from browser_control.lib import (
     profile as profile_lib,
 )
+from browser_control.lib import scope as scope_lib
 from browser_control.lib.errors import ControlError  # noqa: E402
 
 # Importing this module must be INERT: it used to mkdtemp a /tmp directory and
@@ -2042,9 +2043,9 @@ def t_frames_bind_to_their_tab() -> None:
     #    cannot be inferred from the argument
     dom.frame("frame.html")
     assert dom.frame_resolved() is None
-    dom.FRAME["resolved"] = {"index": 0, "url": "u", "target": "AAA"}
+    scope_lib.current().resolve_frame(0, "u", "AAA")
     assert dom.frame_resolved() == {"index": 0, "url": "u", "target": "AAA"}
-    assert dom.frame_resolved() is not dom.FRAME["resolved"]     # a COPY
+    assert dom.frame_resolved() is not scope_lib.current().frame_resolved  # COPY
     dom.frame("")
     assert dom.frame_resolved() is None, "the scope was cleared but the frame was not"
 

@@ -56,6 +56,9 @@ from typing import Any
 # reply carries. They are private because no other module needs them.
 from browser_control.lib import audit, cdp, images
 from browser_control.lib import browser as tabs
+from browser_control.lib import (
+    scope as scope_state,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
     as_float,
     as_int,
@@ -136,11 +139,9 @@ SCROLL_MOVE_S = 4.0         # how long one wheel is given to move something
 
 # Which FRAME a verb is about, set once per process by the CLI from `--frame`:
 # a URL substring or an index from `tab frames`. Empty means the page itself.
-# It is a SCOPE, exactly like `--profile`, and the CLI clears it on every
-# invocation that does not pass the flag.
-FRAME: dict[str, Any] = {"wanted": "", "resolved": None}
-
-
+# It is a SCOPE, exactly like `--profile` — one object for both, in
+# `lib/scope.py` — and the CLI clears it on every invocation that does not
+# pass the flag.
 def frame(wanted: str | None = None) -> str:
     """Set, clear or read the frame this process's verbs are about.
 
@@ -150,24 +151,18 @@ def frame(wanted: str | None = None) -> str:
     every lookup wiped what it was looking at (which is exactly the bug this
     docstring exists to prevent).
     """
-    if wanted is not None:
-        FRAME["wanted"] = str(wanted).strip()
-        # a resolution belongs to the call that made it: nothing may inherit
-        # the last call's frame in a reply
-        FRAME["resolved"] = None
-    return FRAME["wanted"]
+    return scope_state.current().set_frame(wanted)
 
 
 def frame_resolved() -> dict | None:
     """Which frame the last session actually attached to, or None.
 
     An index is the page's live iframe order, so "which document did that act
-    in" is not something a caller can infer from their own argument. `_session`
-    records the resolution here and the CLI puts it in the reply, in ONE place,
-    so no verb has to remember to and none can forget to.
+    in" is not something a caller can infer from their own argument. The
+    session records the resolution here and the CLI puts it in the reply, in
+    ONE place, so no verb has to remember to and none can forget to.
     """
-    resolved = FRAME.get("resolved")
-    return dict(resolved) if isinstance(resolved, dict) else None
+    return scope_state.current().resolved_frame()
 
 
 def mode_of(mode: str | None) -> str:
@@ -695,13 +690,13 @@ def _document_ws(port: int, page_target: str) -> str:
     for many samples, and `tab wait --frame 1` evaluated the predicate in the
     top document while its reply said `frame: 1`.
     """
-    if FRAME["wanted"]:
-        target = _frame_target(port, page_target, FRAME["wanted"])
+    current = scope_state.current()
+    if current.frame_wanted:
+        target = _frame_target(port, page_target, current.frame_wanted)
         # WHICH frame that was: an index is the page's live iframe order, so the
         # reply says what was resolved, not only what was asked for
-        FRAME["resolved"] = {"index": as_int(target["index"]),
-                             "url": str(target["url"]),
-                             "target": str(target["target"])}
+        current.resolve_frame(as_int(target["index"]), str(target["url"]),
+                              str(target["target"]))
         return cdp.target_ws(port, str(target["target"]), "iframe")
     return cdp.target_ws(port, page_target)
 
@@ -901,7 +896,7 @@ def _frame_summary(row: dict, tab_row: dict,
     page = str(tab_row["id"])
     port = cdp.port_of(str(row["profile"]))
     try:
-        if session is not None and not FRAME["wanted"]:
+        if session is not None and not scope_state.current().frame_wanted:
             census = session.evaluate(FRAME_CENSUS)
         else:
             census = cdp.evaluate(cdp.target_ws(port, page), FRAME_CENSUS)
@@ -1546,10 +1541,12 @@ def _with_frame(reply: dict) -> dict:
     page's live iframe order, so a caller cannot infer from their own argument
     which document the verb actually changed.
     """
-    if FRAME["wanted"]:
-        reply["frame"] = FRAME["wanted"]
-        if FRAME.get("resolved"):
-            reply["frame_resolved"] = dict(FRAME["resolved"])
+    current = scope_state.current()
+    if current.frame_wanted:
+        reply["frame"] = current.frame_wanted
+        resolved = current.resolved_frame()
+        if resolved:
+            reply["frame_resolved"] = resolved
     return reply
 
 
