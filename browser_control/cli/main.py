@@ -1109,8 +1109,14 @@ def _plugins_report() -> dict:
     return PLUGINS.report()
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
+def _run_invocation(args: list[str]) -> int:
+    """One call end to end: plugins, globals, the gate, dispatch, emit.
+
+    Kept as one body because every step's ORDER is contract: plugins load before
+    the help text and the gate, the scope/frame/policy are set or cleared before
+    the handler runs, and the audit line is written in `finally` on every path
+    (refusals included). `main` is the facade the console script calls.
+    """
     # Plugins load once per invocation, BEFORE the help text and the gate:
     # `--help`/`selftest` report them, and the classes they declare have to be
     # in the surface before `allowed()` is asked anything.
@@ -1263,3 +1269,8 @@ def main(argv: list[str] | None = None) -> int:
         # cannot be written never fails a verb.
         audit.LOG.write(action=verb, ok=ok, code=code,
                         args=rest if verb else args)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The console entry point: argv in, one call, one exit code."""
+    return _run_invocation(list(sys.argv[1:] if argv is None else argv))
