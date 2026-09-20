@@ -31,13 +31,13 @@ to another machine needs that key too, and this verb does not pretend to.
 """
 from __future__ import annotations
 
-import contextlib
 import os
 import shutil
 import stat
 import time
 
 from browser_control.lib import browser as browser_lib
+from browser_control.lib import locks
 from browser_control.lib.browser import (  # pyright: ignore[reportMissingImports]
     binary,
     profile_dir,
@@ -405,13 +405,9 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     # target directory and its lock file, and the docstring promises "without
     # writing anything" (a review flagged it). The root lock still orders the
     # read; a dry run touches no profile.
-    target_lock = (contextlib.nullcontext({"held": True, "warning": ""})
-                   if dry else
-                   browser_lib.lock(lock_path(target),
-                                     "profile seed"))
-    with (browser_lib.lock(lock_path(root()),
-                            "profile seed") as lock,
-          target_lock as profile_lock):
+    with locks.instance_locks(lock_path(root()), lock_path(target),
+                              "profile seed",
+                              skip_profile_lock=dry) as (lock, profile_lock):
         if not dry:
             # the TARGET's own lock — the one `open` and `close` hold. The
             # root lock orders the attach records; this one orders the
@@ -458,10 +454,8 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              "note": ("same machine, same user: Chrome's cookie and password "
                       "keys live in the OS keyring, so the copy decrypts here "
                       "and only here")}
-    for warning in (lock["warning"], profile_lock["warning"]):
-        if warning:
-            reply["warning"] = (f"{reply['warning']}; {warning}"
-                                if "warning" in reply else warning)
+    lock.warn(reply)
+    profile_lock.warn(reply)
     if source_pid:
         lag = (f"the source profile is in use (pid {source_pid}): what is on "
                "disk may lag its live state by a few seconds")
@@ -491,10 +485,8 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         fail(ERR_NOT_MANAGED,
              f"{target} is a symlink — this CLI wipes a profile directory, "
              "not a link to somebody else's")
-    with (browser_lib.lock(lock_path(root()),
-                            "profile reset") as lock,
-          browser_lib.lock(lock_path(target),
-                            "profile reset") as profile_lock):
+    with locks.instance_locks(lock_path(root()), lock_path(target),
+                              "profile reset") as (lock, profile_lock):
         # the PROFILE's lock is the one `open` holds across its whole
         # check-then-act: without it, a reset could `rmtree` the directory a
         # browser was just being started on, and the liveness verdict above was
@@ -526,8 +518,6 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
     reply = {"ok": True, "profile": target, "reset": True,
              "files": facts["files"], "bytes_freed": facts["bytes"],
              "detached": detached, "verified": True}
-    for warning in (lock["warning"], profile_lock["warning"]):
-        if warning:
-            reply["warning"] = (f"{reply['warning']}; {warning}"
-                                if "warning" in reply else warning)
+    lock.warn(reply)
+    profile_lock.warn(reply)
     return reply

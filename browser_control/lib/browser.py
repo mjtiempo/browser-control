@@ -24,7 +24,6 @@ publishes rather than an assumed 9222.
 from __future__ import annotations
 
 import contextlib
-import errno
 import json
 import os
 import re
@@ -36,7 +35,10 @@ from typing import Any
 
 # The project-level pyright run resolves these imports; the line-level ignore
 # is for pi-lens's fallback index, which does not see the sibling modules.
-from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
+from browser_control.lib import (
+    cdp,  # pyright: ignore[reportMissingImports]
+    locks,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib import (
     scope as scope_state,  # pyright: ignore[reportMissingImports]
 )
@@ -58,7 +60,6 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ERR_NO_PAGE_TAB,
     ERR_NOT_ATTACHED,
     ERR_NOT_MANAGED,
-    ERR_PROFILE_BUSY,
     ERR_PROFILE_UNUSABLE,
     ERR_RELOAD_NOT_VERIFIED,
     ERR_TAB_AMBIGUOUS,
@@ -582,8 +583,7 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
              "cdp": {"port": record["port"], "reachable": True},
              "note": ("tab writes only — `close` will not stop it; "
                       "`detach` revokes this")}
-    if lock["warning"]:
-        reply["warning"] = lock["warning"]
+    lock.warn(reply)
     return reply
 
 
@@ -597,8 +597,7 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
             keys = sorted(_attached())
             _write_attached({})
         reply = {"ok": True, "detached": keys, "count": 0}
-        if lock["warning"]:
-            reply["warning"] = lock["warning"]
+        lock.warn(reply)
         return reply
     given = [name for name, value in (("--port", port), ("--pid", pid),
                                       ("--profile", profile)) if value]
@@ -624,8 +623,7 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
             records.pop(key, None)
         _write_attached(records)
     reply = {"ok": True, "detached": keys, "count": len(records)}
-    if lock["warning"]:
-        reply["warning"] = lock["warning"]
+    lock.warn(reply)
     return reply
 
 
@@ -1019,115 +1017,13 @@ def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
 
 # ------------------------------------------------------------------ verbs
 # ------------------------------------------------------------------ the lock
-# A check-then-act two processes can enter at once is two browsers on one
-# profile — the corruption Chrome's own "profile appears to be in use" warning
-# exists to prevent. These verbs serialize it themselves: `flock` on a file in
-# the profile (or in the root, for the attach records), which the kernel
-# releases when the holder dies, so there is no stale lock to clean up.
-LOCK_WAIT_S = 20.0          # as long as a cold launch is given
-
-
-def _lock_holder(handle: Any) -> str:
-    """What the holder wrote: "pid 123 since 12:34:56 (open)", or ""."""
-    try:
-        handle.seek(0)
-        parts = handle.read().strip().split("\t")
-    except OSError:
-        return ""
-    if len(parts) < 2:
-        return ""
-    stamp = parts[1][11:19] or parts[1]
-    verb = f" ({parts[2]})" if len(parts) > 2 and parts[2] else ""
-    return f"pid {parts[0]} since {stamp}{verb}"
-
-
-def _hold(handle: Any, verb: str) -> None:
-    """Say who holds it, and since when, so a refusal can name them."""
-    with contextlib.suppress(OSError):
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"{os.getpid()}\t{time.strftime('%Y-%m-%dT%H:%M:%S')}\t"
-                     f"{verb}\n")
-        handle.flush()
-
-
-def _contention(error: OSError) -> bool:
-    """Is that flock failure someone else holding the lock?
-
-    The difference decides what happens next: contention is worth waiting for,
-    while a filesystem that cannot lock at all has to be reported instead.
-    """
-    return error.errno in (errno.EACCES, errno.EAGAIN)
-
-
-def _expired(deadline: float) -> bool:
-    """Has the wait run out? A call, so a refusal handler reads as one."""
-    return time.time() >= deadline
-
-
-def _holder_text(handle: Any) -> str:
-    """What the holder wrote, or a phrase for "nothing usable"."""
-    return _lock_holder(handle) or "no details"
-
-
-def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
-    """Take the lock, or say why not: "" when taken, else a warning.
-
-    Contention is waited on and then refused `profile-busy` (naming the pid
-    and verb the holder wrote); a filesystem that cannot lock at all comes back
-    as a warning, which the caller REPORTS rather than failing the verb — a
-    guard that silently does nothing would be worse than none.
-    """
-    import fcntl
-
-    deadline = time.time() + wait
-    while True:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            _hold(handle, verb)
-            return ""
-        except OSError as e:
-            if _contention(e):
-                if _expired(deadline):
-                    fail(ERR_PROFILE_BUSY,
-                         f"another browser-control call holds {path} "
-                         f"[{_holder_text(handle)}] and has been for "
-                         f"{wait:g}s — nothing was started or stopped here. "
-                         "Wait for that call, then run this again")
-                time.sleep(0.15)
-                continue
-            return f"{path} cannot be locked ({e})"
-
-
-@contextlib.contextmanager
-def lock(path: str, verb: str, wait: float = LOCK_WAIT_S):
-    """Hold `path` while a check-then-act runs, or refuse `profile-busy`.
-
-    Yields ``{"held": bool, "warning": str}``: `held: False` is the
-    filesystem-cannot-lock case, which the caller proceeds through and reports.
-    Contention never reaches the caller as a warning — it waits, then refuses.
-
-    `flock` rather than an `O_EXCL` file precisely for the stale case: the
-    kernel drops it when the holder exits, crashes or is killed, so there is
-    nothing to clean up and nothing to trust.
-    """
-    import fcntl
-
-    with contextlib.ExitStack() as stack:
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            handle = stack.enter_context(
-                open(path, "a+", encoding="utf-8"))
-        except OSError as e:
-            yield {"held": False,
-                   "warning": f"could not open a lock at {path}: {e}"}
-            return
-        warning = _acquire(handle, path, verb, wait)
-        try:
-            yield {"held": bool(not warning), "warning": warning}
-        finally:
-            with contextlib.suppress(OSError):
-                fcntl.flock(handle, fcntl.LOCK_UN)
+# The lock itself, and the root->profile ordering, live in lib/locks.py. These
+# aliases keep `browser.lock`/`browser._lock` reachable (the checks call the
+# private spelling; profile.py calls the public one).
+lock = locks.profile_lock
+_lock = locks.profile_lock
+LOCK_WAIT_S = locks.LOCK_WAIT_S
+LockState = locks.LockState
 
 
 def _await_owner(profile: str, port: int) -> dict:
@@ -1233,7 +1129,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
         fail(ERR_NO_PAGE_TAB,
              f"{path} is up on {profile} but shows no page tab — pass a URL "
              "(browser-control-cli open https://…)")
-    notes = [text for text in (stale, lock["warning"]) if text]
+    notes = [text for text in (stale, lock.warning) if text]
     reply = {"ok": True, "started": not already, "browser": path,
              "profile": profile, "port": cdp.port_of(profile),
              "pid": pid_of(profile), "tabs": rows,
@@ -1344,8 +1240,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
                 reply = {"ok": True, "stopped": False, "profile": target,
                          "tabs": tabs,
                          "reason": "no managed browser was running"}
-                if lock["warning"]:
-                    reply["warning"] = lock["warning"]
+                lock.warn(reply)
                 return reply
             fail(ERR_BROWSER_NOT_STOPPED,
                  f"a browser answers on {target} but no Chromium process on "
@@ -1390,8 +1285,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
              "profile": target, "tabs": tabs,
              "forced": bool(tabs and force), "named": named,
              "managed": bool(row["managed"]) if row else True}
-    if lock["warning"]:
-        reply["warning"] = lock["warning"]
+    lock.warn(reply)
     return reply
 
 
