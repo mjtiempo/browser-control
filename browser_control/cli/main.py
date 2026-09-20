@@ -43,6 +43,12 @@ from browser_control.lib.browser import (
     tab_info,
 )
 from browser_control.lib.errors import (
+    ERR_BAD_ARGS,
+    ERR_BROKEN_PIPE,
+    ERR_INTERNAL,
+    ERR_NO_WEBSOCKETS,
+    ERR_NOT_ALLOWED,
+    ERR_UNKNOWN_COMMAND,
     ControlError,
     fail,
 )
@@ -175,25 +181,25 @@ def _one(rest: list[str], verb: str, required: bool = False) -> str:
     """The verb's single positional argument, or a refusal."""
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"{verb}: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"{verb}: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"{verb}: one argument at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"{verb}: one argument at most, got {len(rest)}")
     if not rest:
         if required:
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  f"{verb}: a TAB spec is required (id:<prefix> or a "
                  "title/url substring)")
         return ""
     if not str(rest[0]).strip():
         # an EMPTY value is not "no value": `tab activate ""` used to fall
         # through to "the only page tab", which is a tab nobody named
-        fail("bad-args", f"{verb}: an empty argument is not a value")
+        fail(ERR_BAD_ARGS, f"{verb}: an empty argument is not a value")
     return rest[0]
 
 
 def _none(rest: list[str], verb: str) -> None:
     for arg in rest:
-        fail("bad-args", f"{verb}: takes no arguments, got {arg!r}")
+        fail(ERR_BAD_ARGS, f"{verb}: takes no arguments, got {arg!r}")
 
 
 def _urls(rest: list[str], verb: str) -> list[str]:
@@ -204,14 +210,14 @@ def _urls(rest: list[str], verb: str) -> list[str]:
     """
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"{verb}: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"{verb}: unknown flag {arg!r}")
     return list(rest)
 
 
 def _no_browser_flag(verb: str, browser: str) -> None:
     """Refuse `--browser` on a verb that reports every browser it finds."""
     if browser:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: --browser does not apply — this verb reports every "
              "browser on the machine")
 
@@ -220,7 +226,7 @@ def _int(value: str, what: str) -> int:
     try:
         return int(str(value))
     except (TypeError, ValueError):
-        fail("bad-args", f"{what} needs a number, got {value!r}")
+        fail(ERR_BAD_ARGS, f"{what} needs a number, got {value!r}")
 
 
 def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
@@ -242,7 +248,7 @@ def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
             continue
         if arg in ("--port", "--pid", "--profile"):
             if index + 1 >= len(rest):
-                fail("bad-args", f"{verb}: {arg} needs a value")
+                fail(ERR_BAD_ARGS, f"{verb}: {arg} needs a value")
             key, value = arg[2:], str(rest[index + 1])
             if key in ("port", "pid"):
                 out[key] = _int(value, f"{verb}: {arg}")
@@ -252,13 +258,13 @@ def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
             continue
         known = ", ".join(["--port N", "--pid N", "--profile DIR"]
                           + [f"--{name}" for name in allow])
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: unknown argument {arg!r} (flags: {known})")
     if out["list"] and (out["all"] or out["port"] or out["pid"]
                         or out["profile"]):
-        fail("bad-args", f"{verb}: --list takes no other argument")
+        fail(ERR_BAD_ARGS, f"{verb}: --list takes no other argument")
     if out["all"] and (out["port"] or out["pid"] or out["profile"]):
-        fail("bad-args", f"{verb}: --all takes no other selector")
+        fail(ERR_BAD_ARGS, f"{verb}: --all takes no other selector")
     return out
 
 
@@ -271,7 +277,7 @@ def cmd_attach(rest: list[str], browser: str) -> dict:
             # a scope that cannot apply is REFUSED, by every verb: this one
             # dropped --profile silently and answered a broader question
             # (a review flagged it)
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  "attach --list: --profile narrows an instance and --list "
                  "answers for every attachment — drop one of the two")
         return attachments()
@@ -306,7 +312,7 @@ def cmd_close(rest: list[str], browser: str) -> dict:
     selector = _selector(rest, "close", ())
     scoped = browser_lib.scope()
     if scoped and (selector["port"] or selector["pid"]):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "close: --profile names an instance, so it takes no --port or "
              "--pid — one way to name a browser per call")
     return stop(browser=browser, force=force, port=selector["port"],
@@ -322,7 +328,7 @@ def cmd_list(rest: list[str], browser: str) -> dict:
     """
     _no_browser_flag("list", browser)
     if browser_lib.scope():
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "list: --profile does not apply — this verb reports every browser "
              "on the machine; `tab list --profile DIR` shows one instance's "
              "tabs and `info --profile DIR` its endpoint")
@@ -358,7 +364,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
     """
     _none(rest, "selftest")
     if cdp.websockets is None:
-        fail("no-websockets",
+        fail(ERR_NO_WEBSOCKETS,
              "the `websockets` package is required to speak CDP "
              "(pip install websockets)")
     found = []
@@ -413,7 +419,7 @@ def _pop(rest: list[str], flag: str, verb: str) -> tuple[list[str], str | None]:
         arg = str(rest[index])
         if arg == flag:
             if index + 1 >= len(rest):
-                fail("bad-args", f"{verb}: {flag} needs a value")
+                fail(ERR_BAD_ARGS, f"{verb}: {flag} needs a value")
             value = str(rest[index + 1])
             index += 2
             continue
@@ -443,7 +449,7 @@ def _tab_flag(rest: list[str], verb: str) -> tuple[list[str], str]:
     """
     rest, spec = _pop(rest, "--tab", verb)
     if spec is not None and not str(spec).strip():
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: --tab needs a SPEC (id:<prefix> or a title/url "
              "substring); leave the flag out to act on the only page tab")
     return rest, spec or ""
@@ -453,9 +459,9 @@ def _float(value: str, what: str) -> float:
     try:
         number = float(str(value))
     except (TypeError, ValueError):
-        fail("bad-args", f"{what} needs a number, got {value!r}")
+        fail(ERR_BAD_ARGS, f"{what} needs a number, got {value!r}")
     if not math.isfinite(number):
-        fail("bad-args", f"{what} must be a finite number, got {value!r}")
+        fail(ERR_BAD_ARGS, f"{what} must be a finite number, got {value!r}")
     return number
 
 
@@ -482,7 +488,7 @@ def _pop_all(rest: list[str], flag: str,
         arg = str(rest[index])
         if arg == flag:
             if index + 1 >= len(rest):
-                fail("bad-args", f"{verb}: {flag} needs a value")
+                fail(ERR_BAD_ARGS, f"{verb}: {flag} needs a value")
             values.append(str(rest[index + 1]))
             index += 2
             continue
@@ -513,7 +519,7 @@ def cmd_tab_close(rest: list[str], browser: str) -> dict:
     rest, likes = _pop_all(rest, "--like", "tab close")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab close: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab close: unknown flag {arg!r}")
     return close_tabs(rest, browser=browser, title=title, url=url,
                       all_tabs=every, excepts=excepts, like=likes, dry=dry)
 
@@ -523,12 +529,12 @@ def cmd_tab_nav(rest: list[str], browser: str) -> dict:
     rest, spec = _tab_flag(rest, "tab nav")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab nav: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab nav: unknown flag {arg!r}")
     if not rest:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab nav: a URL is required (http(s) or about:blank)")
     if len(rest) > 1:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab nav: one URL at most, got {len(rest)} — the tab is "
              "--tab SPEC")
     return nav(rest[0], tab=spec, browser=browser)
@@ -567,18 +573,18 @@ def cmd_tab_hover(rest: list[str], browser: str) -> dict:
     rest, at = _pop(rest, "--at", "tab hover")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab hover: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab hover: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab hover: one TEXT at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab hover: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
     if at is not None:
         if needle is not None or selector is not None or index is not None:
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  "tab hover: --at is a POINT — give that or a TEXT/"
                  "--selector (with --index), not both")
         return dom.hover(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab hover: give TEXT, --selector CSS, or --at X,Y")
+        fail(ERR_BAD_ARGS, "tab hover: give TEXT, --selector CSS, or --at X,Y")
     return dom.hover(needle, selector=selector,
                      index=_int(index, "tab hover --index")
                      if index is not None else None,
@@ -593,12 +599,12 @@ def cmd_tab_check(rest: list[str], browser: str) -> dict:
     rest, uncheck = _switch(rest, "--uncheck")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab check: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab check: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab check: one TEXT at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab check: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab check: give TEXT or --selector CSS, not both")
+        fail(ERR_BAD_ARGS, "tab check: give TEXT or --selector CSS, not both")
     return dom.check(needle, selector=selector,
                      index=_int(index, "tab check --index")
                      if index is not None else None,
@@ -613,14 +619,14 @@ def cmd_tab_select(rest: list[str], browser: str) -> dict:
     rest, value = _pop(rest, "--value", "tab select")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab select: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab select: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab select: one TEXT at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab select: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab select: give TEXT or --selector CSS, not both")
+        fail(ERR_BAD_ARGS, "tab select: give TEXT or --selector CSS, not both")
     if value is None:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab select: --value is required — the option's value, or its "
              "exact label")
     return dom.select(needle, selector=selector, value=value,
@@ -635,7 +641,7 @@ def cmd_tab_dialog(rest: list[str], browser: str) -> dict:
     rest, text = _pop(rest, "--text", "tab dialog")
     mode = _one(rest, "tab dialog") or "state"
     if text is not None and mode != "accept":
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab dialog: --text is the answer to a prompt — it goes with "
              "`accept`")
     return dom.dialog(mode, text=text, tab=spec, browser=browser)
@@ -649,15 +655,15 @@ def cmd_tab_screenshot(rest: list[str], browser: str) -> dict:
     rest, force = _switch(rest, "--force")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab screenshot: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab screenshot: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab screenshot: one PATH at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab screenshot: one PATH at most, got {len(rest)}")
     if rest and path is not None:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab screenshot: give PATH or --path PATH, not both")
     target = path if path is not None else (rest[0] if rest else "")
     if not target:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab screenshot: a PATH is required (an absolute path ending in "
              ".png)")
     return dom.screenshot(target, full=full, force=force, tab=spec,
@@ -688,11 +694,11 @@ def cmd_tab_js(rest: list[str], browser: str) -> dict:
     rest, spec = _tab_flag(rest, "tab js")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab js: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab js: unknown flag {arg!r}")
     if not rest:
-        fail("bad-args", "tab js: an EXPRESSION is required")
+        fail(ERR_BAD_ARGS, "tab js: an EXPRESSION is required")
     if len(rest) > 1:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab js: one expression at most, got {len(rest)} — the tab is "
              "--tab SPEC")
     return dom.js(rest[0], tab=spec, browser=browser)
@@ -713,12 +719,12 @@ def cmd_tab_find(rest: list[str], browser: str) -> dict:
     rest, cap = _pop(rest, "--cap", "tab find")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab find: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab find: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab find: one TEXT at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab find: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab find: give TEXT or --selector CSS, not both")
+        fail(ERR_BAD_ARGS, "tab find: give TEXT or --selector CSS, not both")
     return dom.find(needle, selector=selector,
                     cap=_int(cap, "tab find --cap") if cap is not None
                     else dom.FIND_CAP,
@@ -747,7 +753,7 @@ def cmd_tab_wait(rest: list[str], browser: str) -> dict:
     rest, idle = _pop(rest, "--idle-ms", "tab wait")
     _none(rest, "tab wait")
     if mode is None:
-        fail("bad-args", "tab wait: --for is required (load|idle|element|js)")
+        fail(ERR_BAD_ARGS, "tab wait: --for is required (load|idle|element|js)")
     return dom.wait(mode, selector=selector, expr=expr,
                     timeout=_float(timeout, "tab wait --timeout")
                     if timeout is not None else dom.WAIT_DEFAULT_S,
@@ -764,19 +770,19 @@ def cmd_tab_click(rest: list[str], browser: str) -> dict:
     rest, at = _pop(rest, "--at", "tab click")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab click: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab click: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab click: one TEXT at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab click: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
     # `--at X,Y` is a POINT: it replaces the spec instead of joining it
     if at is not None:
         if needle is not None or selector is not None or index is not None:
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  "tab click: --at is a POINT — give that or a TEXT/"
                  "--selector (with --index), not both")
         return dom.click(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab click: give TEXT, --selector CSS, or --at X,Y")
+        fail(ERR_BAD_ARGS, "tab click: give TEXT, --selector CSS, or --at X,Y")
     return dom.click(needle, selector=selector,
                      index=_int(index, "tab click --index")
                      if index is not None else None,
@@ -793,9 +799,9 @@ def cmd_tab_scroll(rest: list[str], browser: str) -> dict:
     rest, at = _pop(rest, "--at", "tab scroll")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab scroll: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab scroll: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab scroll: one TEXT at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab scroll: one TEXT at most, got {len(rest)}")
     return dom.scroll(
         by=_int(by, "tab scroll --by") if by is not None else None,
         edge=edge, text=rest[0] if rest else None, selector=selector,
@@ -810,12 +816,12 @@ def cmd_tab_focus(rest: list[str], browser: str) -> dict:
     rest, index = _pop(rest, "--index", "tab focus")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab focus: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab focus: unknown flag {arg!r}")
     if len(rest) > 1:
-        fail("bad-args", f"tab focus: one TEXT at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab focus: one TEXT at most, got {len(rest)}")
     needle = rest[0] if rest else None
     if (needle is None) == (selector is None):
-        fail("bad-args", "tab focus: give TEXT or --selector CSS, not both")
+        fail(ERR_BAD_ARGS, "tab focus: give TEXT or --selector CSS, not both")
     return dom.focus(needle, selector=selector,
                      index=_int(index, "tab focus --index")
                      if index is not None else None,
@@ -827,11 +833,11 @@ def cmd_tab_press(rest: list[str], browser: str) -> dict:
     rest, spec = _tab_flag(rest, "tab press")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab press: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab press: unknown flag {arg!r}")
     if not rest:
-        fail("bad-args", "tab press: KEY is required (enter, tab, escape, …)")
+        fail(ERR_BAD_ARGS, "tab press: KEY is required (enter, tab, escape, …)")
     if len(rest) > 1:
-        fail("bad-args", f"tab press: one KEY at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab press: one KEY at most, got {len(rest)}")
     return dom.press(rest[0], tab=spec, browser=browser)
 
 
@@ -839,11 +845,11 @@ def _text_arg(rest: list[str], verb: str, tab: str) -> str:
     """The single TEXT a writing verb takes — nothing else, and no flags."""
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"{verb}: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"{verb}: unknown flag {arg!r}")
     if not rest:
-        fail("bad-args", f"{verb}: TEXT is required")
+        fail(ERR_BAD_ARGS, f"{verb}: TEXT is required")
     if len(rest) > 1:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: one TEXT at most, got {len(rest)} — quote it if it "
              "has spaces")
     return rest[0]
@@ -870,11 +876,11 @@ def cmd_tab_upload(rest: list[str], browser: str) -> dict:
     rest, index = _pop(rest, "--index", "tab upload")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab upload: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab upload: unknown flag {arg!r}")
     if not rest:
-        fail("bad-args", "tab upload: FILE is required (an absolute path)")
+        fail(ERR_BAD_ARGS, "tab upload: FILE is required (an absolute path)")
     if len(rest) > 1:
-        fail("bad-args", f"tab upload: one FILE at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab upload: one FILE at most, got {len(rest)}")
     return dom.upload(rest[0], selector=selector,
                       index=_int(index, "tab upload --index")
                       if index is not None else None,
@@ -887,11 +893,11 @@ def cmd_tab_media(rest: list[str], browser: str) -> dict:
     rest, index = _pop(rest, "--index", "tab media")
     for arg in rest:
         if str(arg).startswith("-"):
-            fail("bad-args", f"tab media: unknown flag {arg!r}")
+            fail(ERR_BAD_ARGS, f"tab media: unknown flag {arg!r}")
     if not rest:
-        fail("bad-args", "tab media: MODE is required (state, play or pause)")
+        fail(ERR_BAD_ARGS, "tab media: MODE is required (state, play or pause)")
     if len(rest) > 1:
-        fail("bad-args", f"tab media: one MODE at most, got {len(rest)}")
+        fail(ERR_BAD_ARGS, f"tab media: one MODE at most, got {len(rest)}")
     return dom.media(rest[0],
                      index=_int(index, "tab media --index")
                      if index is not None else None,
@@ -902,7 +908,7 @@ def cmd_profile_info(rest: list[str], browser: str) -> dict:
     """`profile info [--profile DIR]`."""
     _none(rest, "profile info")
     if browser:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "profile info: --browser does not narrow it — the instance is "
              "named with --profile DIR, and a scope that cannot apply is "
              "refused rather than dropped")
@@ -935,7 +941,7 @@ def cmd_profile(rest: list[str], browser: str) -> dict:
     """
     handler = PROFILE_SUBCOMMANDS.get(str(rest[0]) if rest else "")
     if handler is None:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "profile: a subcommand is required (info, seed, reset)")
     return handler(rest[1:], browser)
 
@@ -1016,7 +1022,7 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
         arg = args[index]
         if arg in FLAG_KEY:
             if index + 1 >= len(args):
-                fail("bad-args", f"{arg} needs a value")
+                fail(ERR_BAD_ARGS, f"{arg} needs a value")
             if arg in ("--allow", "--deny") \
                     and found[FLAG_KEY[arg]] is not None:
                 # last-wins DROPPED an earlier class in the unsafe direction:
@@ -1024,7 +1030,7 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
                 # read it was told to deny (a review flagged it). The repeatable
                 # per-verb flags have the opposite contract, so a repeat here is
                 # refused rather than silently merged.
-                fail("bad-args",
+                fail(ERR_BAD_ARGS,
                      f"{arg}: given twice — name every class once "
                      f"({arg} read,write …)")
             found[FLAG_KEY[arg]] = args[index + 1]
@@ -1035,7 +1041,7 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
         if named:
             if named[0] in ("--allow", "--deny") \
                     and found[FLAG_KEY[named[0]]] is not None:
-                fail("bad-args",
+                fail(ERR_BAD_ARGS,
                      f"{named[0]}: given twice — name every class once "
                      f"({named[0]}=read,write …)")
             found[FLAG_KEY[named[0]]] = arg.split("=", 1)[1]
@@ -1060,7 +1066,7 @@ def _bare_tab_word(word: str) -> None:
     except ControlError:
         near = difflib.get_close_matches(str(word), sorted(TAB_SUBCOMMANDS),
                                          n=1, cutoff=0.6)
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab: {str(word)[:40]!r} is neither a subcommand (have: "
              + ", ".join(sorted(TAB_SUBCOMMANDS))
              + ") nor a URL (http(s) or about:blank only)"
@@ -1118,7 +1124,7 @@ def resolved_mode(verb: str, rest: list[str]) -> str:
     mode = dom.mode_of(raw)
     modes = _modes(head)
     if mode not in modes:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab {head}: {'--for' if head == 'wait' else 'MODE'} is "
              + "|".join(modes) + f", got {raw!r}")
     return mode
@@ -1195,7 +1201,7 @@ def main(argv: list[str] | None = None) -> int:
             print(USAGE, file=sys.stderr)
             print("ERR[bad-args]: a verb is required "
                   f"(have: {', '.join(_verb_names())})", file=sys.stderr)
-            code = "bad-args"
+            code = ERR_BAD_ARGS
             return 2
         rest, flags = _flags(args)
         if not rest:
@@ -1209,7 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"(have: {', '.join(_verb_names())})"
                   + (f" — {given} was given, but no verb to run"
                      if given else ""), file=sys.stderr)
-            code = "bad-args"           # so the audit line carries the code
+            code = ERR_BAD_ARGS           # so the audit line carries the code
             return 2
         verb, rest = rest[0], rest[1:]
         # a flag given an EMPTY value is a MISTAKE, not an absent flag: every
@@ -1220,7 +1226,7 @@ def main(argv: list[str] | None = None) -> int:
         for name, value in (("--browser", flags["browser"]),
                             ("--profile", flags["profile"])):
             if value is not None and not str(value).strip():
-                fail("bad-args",
+                fail(ERR_BAD_ARGS,
                      f"{name}: an empty value is not a name — name a browser "
                      "or a profile, or leave the flag off")
         # the globals, in the order they matter: the instance, the frame, the
@@ -1238,20 +1244,20 @@ def main(argv: list[str] | None = None) -> int:
             plugin = PLUGINS.actions.get(verb)
             handler = plugin["run"] if plugin is not None else None
         if handler is None:
-            raise ControlError("unknown-command",
+            raise ControlError(ERR_UNKNOWN_COMMAND,
                                f"{verb} (have: {', '.join(_verb_names())})")
         head = str(rest[0]) if rest else ""
         if verb == "tab" and head and head not in TAB_SUBCOMMANDS:
             _bare_tab_word(head)
         if flags["frame"] is not None and not str(flags["frame"]).strip():
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  "--frame needs a VALUE — a URL substring or an index from "
                  "`tab frames` (an empty value is not a frame)")
         if flags["frame"] and verb != "selftest" and not (
                 verb == "tab" and head in dom.FRAME_VERBS):
             # a scope that cannot apply is REFUSED, by every verb: `list
             # --frame 1` and `open --frame 1 URL` used to accept it and drop it
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  f"{verb}{' ' + head if head else ''}: --frame does not apply "
                  "— it scopes the verbs that act on a page's CONTENT ("
                  + ", ".join(sorted(dom.FRAME_VERBS))
@@ -1266,7 +1272,7 @@ def main(argv: list[str] | None = None) -> int:
             if wanted:
                 permitted, why = capabilities.allowed(wanted)
                 if not permitted:
-                    fail("not-allowed", why)
+                    fail(ERR_NOT_ALLOWED, why)
         reply = handler(rest, browser)
         scoped_frame = dom.frame()
         if verb == "tab" and head in dom.FRAME_VERBS and scoped_frame:
@@ -1292,7 +1298,7 @@ def main(argv: list[str] | None = None) -> int:
     except BrokenPipeError:
         # a closed reader (`| head`) is not a crash: the verb already did its
         # work, and the caller gets a code instead of a traceback
-        code = "broken-pipe"
+        code = ERR_BROKEN_PIPE
         # point stdout at the null device: bytes still buffered in stdio are
         # flushed at shutdown, and a SECOND failure there overrides the `2`
         # returned below with 120 (measured; a review flagged it)
@@ -1308,7 +1314,7 @@ def main(argv: list[str] | None = None) -> int:
         # ONE JSON object on stdout, or ERR[code] on stderr — an unexpected
         # failure is reported as `internal` with its type and message, never as
         # a traceback, and it still reaches the action log in `finally`
-        code = "internal"
+        code = ERR_INTERNAL
         with contextlib.suppress(OSError):
             print(f"ERR[internal]: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

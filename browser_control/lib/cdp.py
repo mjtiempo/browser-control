@@ -22,11 +22,21 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from browser_control.lib import proc  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ERR_BLOCKED,
+    ERR_CDP_ERROR,
+    ERR_CDP_NOT_LOCAL,
+    ERR_CDP_UNREACHABLE,
+    ERR_EVAL_TIMEOUT,
+    ERR_JS_ERROR,
+    ERR_NO_FRAME,
+    ERR_NO_PAGE_TAB,
+    ERR_NO_WEBSOCKETS,
+    ERR_RESULT_TOO_LARGE,
     ControlError,
     fail,
 )
-from browser_control.lib import proc  # pyright: ignore[reportMissingImports]
 from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 # The one third-party dependency. Typed as Any so a missing package is a
@@ -84,7 +94,7 @@ class _LoopbackOnly(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str,
                          headers: Any, newurl: str) -> Any:
-        fail("cdp-not-local",
+        fail(ERR_CDP_NOT_LOCAL,
              f"{getattr(req, 'full_url', '?')}: refused a redirect "
              f"({code}) to {newurl}")
 
@@ -118,16 +128,16 @@ def _get_bytes(url: str) -> bytes:
             reader.start()
             reader.join(GET_DEADLINE_S)
             if reader.is_alive():
-                fail("cdp-unreachable",
+                fail(ERR_CDP_UNREACHABLE,
                      f"{url}: the endpoint did not finish answering within "
                      f"{GET_DEADLINE_S:g}s")
             body = chunks[0] if chunks else b""
     except ControlError:
         raise
     except Exception as e:                                     # noqa: BLE001
-        fail("cdp-unreachable", f"{url}: {e}")
+        fail(ERR_CDP_UNREACHABLE, f"{url}: {e}")
     if len(body) > GET_CAP:
-        fail("result-too-large",
+        fail(ERR_RESULT_TOO_LARGE,
              f"{url}: the endpoint answered more than {GET_CAP} bytes — "
              "that is not a CDP reply")
     return body
@@ -139,14 +149,14 @@ def _get_port(port: int, path: str) -> Any:
     try:
         return json.loads(body.decode("utf-8", "replace"))
     except ValueError as e:
-        fail("cdp-error", f"{path}: the endpoint answered no JSON: {e}")
+        fail(ERR_CDP_ERROR, f"{path}: the endpoint answered no JSON: {e}")
 
 
 def get_json(profile: str, path: str) -> Any:
     """GET one CDP JSON endpoint on the profile's own loopback port."""
     port = port_of(profile)
     if not port:
-        fail("cdp-unreachable",
+        fail(ERR_CDP_UNREACHABLE,
              f"no DevTools port in {profile}: the browser is not running "
              "(or was started without --remote-debugging-port=0)")
     return _get_port(port, path)
@@ -251,7 +261,7 @@ def _of_kind(rows: Any, kind: str) -> list[dict]:
     tabs" would otherwise follow an external array's order.
     """
     if not isinstance(rows, list):
-        fail("cdp-error", "/json answered a shape this tool cannot read")
+        fail(ERR_CDP_ERROR, "/json answered a shape this tool cannot read")
     found = [r for r in rows
              if isinstance(r, dict) and r.get("type") == kind and r.get("id")]
     return sorted(found, key=lambda r: str(r["id"]))
@@ -273,7 +283,7 @@ def target_ws(port: int, target_id: str, kind: str = "page") -> str:
     rows = _of_kind(_get_port(port, "/json"), kind)
     row = next((r for r in rows if str(r.get("id")) == str(target_id)), None)
     what = "tab" if kind == "page" else "frame"
-    code = "no-page-tab" if kind == "page" else "no-frame"
+    code = ERR_NO_PAGE_TAB if kind == "page" else ERR_NO_FRAME
     if row is None:
         fail(code, f"{what} {str(target_id)[:10]}… left the {what} list")
     ws = str(row.get("webSocketDebuggerUrl") or "")
@@ -302,9 +312,9 @@ def _checked_ws(url: str, where: str = "endpoint") -> str:
         # a malformed endpoint (`ws://[::1/x`) raised a raw ValueError out of
         # every public transport call; it is a refusal like any other (a
         # review flagged it)
-        fail("cdp-not-local", f"{where}: {url!r} is not a usable endpoint ({e})")
+        fail(ERR_CDP_NOT_LOCAL, f"{where}: {url!r} is not a usable endpoint ({e})")
     if host not in ("127.0.0.1", "localhost", "::1"):
-        fail("cdp-not-local",
+        fail(ERR_CDP_NOT_LOCAL,
              f"{where}: the endpoint names a websocket on {host!r} — refusing "
              "to send page traffic off the loopback CDP endpoint")
     return str(url)
@@ -314,10 +324,10 @@ def browser_ws(profile: str) -> str:
     """The browser endpoint's websocket URL, shape- and host-checked."""
     info = get_json(profile, "/json/version")
     if not isinstance(info, dict):
-        fail("cdp-error", "/json/version answered a shape this tool cannot read")
+        fail(ERR_CDP_ERROR, "/json/version answered a shape this tool cannot read")
     ws = str(info.get("webSocketDebuggerUrl") or "")
     if not ws:
-        fail("cdp-error", "/json/version names no browser websocket endpoint")
+        fail(ERR_CDP_ERROR, "/json/version names no browser websocket endpoint")
     return _checked_ws(ws)
 
 
@@ -344,18 +354,18 @@ async def _call(ws_url: str, method: str, params: dict,
                 if msg.get("id") == 1:
                     err = msg.get("error")
                     if err:
-                        fail("cdp-error",
+                        fail(ERR_CDP_ERROR,
                              f"{method}: {foreign(err.get('message'))} "
                              f"(code {foreign(err.get('code'), 40)})")
                     return msg.get("result") or {}
                 if time.time() >= deadline:
-                    fail("cdp-error",
+                    fail(ERR_CDP_ERROR,
                          f"{method}: no reply for id 1 within {timeout:g}s")
     except ControlError:
         raise                       # the protocol answered; not a transport hiccup
     except Exception as e:                                     # noqa: BLE001
-        raise ControlError("cdp-error", f"{method}: {e}") from e
-    raise ControlError("cdp-error",
+        raise ControlError(ERR_CDP_ERROR, f"{method}: {e}") from e
+    raise ControlError(ERR_CDP_ERROR,
                        f"{method}: did not answer within {timeout:g}s")
 
 
@@ -363,7 +373,7 @@ def call(ws_url: str, method: str, params: dict | None = None,
          timeout: float = 15.0) -> dict:
     """One CDP method call, returning the protocol's own `result`."""
     if websockets is None:
-        fail("no-websockets",
+        fail(ERR_NO_WEBSOCKETS,
              "the `websockets` package is required to speak CDP "
              "(pip install websockets)")
     return asyncio.run(_call(ws_url, method, params or {}, timeout))
@@ -381,7 +391,7 @@ def _value_of(result: dict) -> Any:
         exception = details.get("exception") or {}
         text = str(exception.get("description") or details.get("text")
                    or "page JS exception")
-        fail("js-error", f"Runtime.evaluate: {foreign(text)}")
+        fail(ERR_JS_ERROR, f"Runtime.evaluate: {foreign(text)}")
     value = (result.get("result") or {}).get("value")
     try:
         # A string's cap is about the TEXT the page produced, not its JSON
@@ -393,7 +403,7 @@ def _value_of(result: dict) -> Any:
     except (TypeError, ValueError):
         size = 0
     if size > EVAL_RESULT_CAP:
-        fail("result-too-large",
+        fail(ERR_RESULT_TOO_LARGE,
              f"Runtime.evaluate answered {size} chars (cap {EVAL_RESULT_CAP}) "
              "— narrow the expression, or read the page with `tab text`")
     if isinstance(value, str):
@@ -437,21 +447,19 @@ async def _page_enable(ws: Any, rid: int) -> None:
             msg = json.loads(await asyncio.wait_for(
                 ws.recv(), timeout=max(0.1, deadline - time.time())))
         except TimeoutError as e:
-            raise ControlError("blocked", BLOCKED_HINT) from e
+            raise ControlError(ERR_BLOCKED, BLOCKED_HINT) from e
         except (ValueError, TypeError) as e:
-            raise ControlError(
-                "cdp-error",
+            raise ControlError(ERR_CDP_ERROR,
                 f"Page.enable: a frame that is not JSON ({e})") from e
         if msg.get("id") == rid:
             err = msg.get("error")
             if err:
-                raise ControlError(
-                    "cdp-error",
+                raise ControlError(ERR_CDP_ERROR,
                     f"Page.enable: {err.get('message')} "
                     f"(code {err.get('code')})")
             return
         if time.time() >= deadline:
-            raise ControlError("blocked", BLOCKED_HINT)
+            raise ControlError(ERR_BLOCKED, BLOCKED_HINT)
 
 
 async def _sample(ws, rid: int, expression: str, budget: float) -> Any:
@@ -467,13 +475,12 @@ async def _sample(ws, rid: int, expression: str, budget: float) -> Any:
         except TimeoutError:
             raise                       # the caller decides: poll again, or
         except (ValueError, TypeError) as e:   # refuse `eval-timeout`
-            raise ControlError(
-                "cdp-error",
+            raise ControlError(ERR_CDP_ERROR,
                 f"Runtime.evaluate: a frame that is not JSON ({e})") from e
         if msg.get("id") == rid:
             err = msg.get("error")
             if err:
-                fail("cdp-error",
+                fail(ERR_CDP_ERROR,
                      f"Runtime.evaluate: {err.get('message')} "
                      f"(code {err.get('code')})")
             return _value_of(msg.get("result") or {})
@@ -493,13 +500,13 @@ async def _evaluate(ws_url: str, expression: str, timeout: float) -> Any:
             try:
                 return await _sample(ws, 2, expression, timeout)
             except TimeoutError as e:
-                raise ControlError("eval-timeout",
+                raise ControlError(ERR_EVAL_TIMEOUT,
                                    f"Runtime.evaluate: {e}") from e
     except ControlError:
         raise
     except Exception as e:                                     # noqa: BLE001
-        raise ControlError("cdp-error", f"Runtime.evaluate: {e}") from e
-    raise ControlError("cdp-error", "Runtime.evaluate: no answer")
+        raise ControlError(ERR_CDP_ERROR, f"Runtime.evaluate: {e}") from e
+    raise ControlError(ERR_CDP_ERROR, "Runtime.evaluate: no answer")
 
 
 async def _evaluate_until(ws_url: str, expression: str, accept: Any,
@@ -534,8 +541,8 @@ async def _evaluate_until(ws_url: str, expression: str, accept: Any,
     except ControlError:
         raise
     except Exception as e:                                     # noqa: BLE001
-        raise ControlError("cdp-error", f"Runtime.evaluate: {e}") from e
-    raise ControlError("cdp-error", "Runtime.evaluate: no answer")
+        raise ControlError(ERR_CDP_ERROR, f"Runtime.evaluate: {e}") from e
+    raise ControlError(ERR_CDP_ERROR, "Runtime.evaluate: no answer")
 
 
 def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
@@ -547,7 +554,7 @@ def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
     (`eval-timeout`), and the transport itself failed (`cdp-error`).
     """
     if websockets is None:
-        fail("no-websockets",
+        fail(ERR_NO_WEBSOCKETS,
              "the `websockets` package is required to speak CDP "
              "(pip install websockets)")
     return asyncio.run(_evaluate(_checked_ws(ws_url, "tab"), expression,
@@ -563,7 +570,7 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
     connections.
     """
     if websockets is None:
-        fail("no-websockets",
+        fail(ERR_NO_WEBSOCKETS,
              "the `websockets` package is required to speak CDP "
              "(pip install websockets)")
     return asyncio.run(_evaluate_until(_checked_ws(ws_url, "tab"), expression,
@@ -589,7 +596,7 @@ class Session:
         dialog that is ALREADY up, because enabling the domain is what blocks
         on a parked tab while the handling command answers regardless."""
         if websockets is None:
-            fail("no-websockets",
+            fail(ERR_NO_WEBSOCKETS,
                  "the `websockets` package is required to speak CDP "
                  "(pip install websockets)")
         self._ws_url = _checked_ws(ws_url, "tab")
@@ -615,7 +622,7 @@ class Session:
                                        open_timeout=10))
             except Exception as e:                             # noqa: BLE001
                 self.close()
-                raise ControlError("cdp-error",
+                raise ControlError(ERR_CDP_ERROR,
                                    f"cannot open the tab's connection: "
                                    f"{e}") from e
             try:
@@ -632,7 +639,7 @@ class Session:
                 self.parked = e.code == "blocked"
             except Exception as e:                             # noqa: BLE001
                 self.close()
-                raise ControlError("cdp-error",
+                raise ControlError(ERR_CDP_ERROR,
                                    f"Page.enable: {e}") from e
             self._rid = 1 if self._page_domain else 0    # id 1 was Page.enable
         return self._ws
@@ -696,28 +703,26 @@ class Session:
                                                         timeout=wait))
             except TimeoutError as e:
                 if self._parked_now(parked_at):
-                    raise ControlError(
-                        "blocked",
+                    raise ControlError(ERR_BLOCKED,
                         f"{method}: no reply — the renderer is parked by a "
                         f"JavaScript dialog{self._blocked_hint()}") from e
-                code = ("eval-timeout" if method.startswith("Runtime.evaluate")
-                        else "cdp-error")
+                code = (ERR_EVAL_TIMEOUT if method.startswith("Runtime.evaluate")
+                        else ERR_CDP_ERROR)
                 if self.parked:
                     # the tab was parked before this session opened: one code
                     # for "the renderer is not answering", whatever the call
-                    code = "blocked"
+                    code = ERR_BLOCKED
                 raise ControlError(
                     code, f"{method}: no reply within {budget:g}s"
                     f"{self._blocked_hint()}") from e
             except (ValueError, TypeError) as e:
-                raise ControlError("cdp-error",
+                raise ControlError(ERR_CDP_ERROR,
                                    f"{method}: a frame that is not JSON "
                                    f"({e})") from e
             if msg.get("id") == rid:
                 err = msg.get("error")
                 if err:
-                    raise ControlError(
-                        "cdp-error", f"{method}: {foreign(err.get('message'))} "
+                    raise ControlError(ERR_CDP_ERROR, f"{method}: {foreign(err.get('message'))} "
                         f"(code {foreign(err.get('code'), 40)})")
                 return msg.get("result") or {}
             if msg.get("method"):
@@ -727,7 +732,7 @@ class Session:
                 if not parked_at and msg["method"] == DIALOG_EVENT:
                     parked_at = time.time() + DIALOG_GRACE_S
             if time.time() >= deadline:
-                raise ControlError("cdp-error",
+                raise ControlError(ERR_CDP_ERROR,
                                    f"{method}: no reply for id {rid} within "
                                    f"{budget:g}s{self._blocked_hint()}")
 
@@ -750,7 +755,7 @@ class Session:
         except ControlError:
             raise
         except Exception as e:                                 # noqa: BLE001
-            raise ControlError("cdp-error", f"{method}: {e}") from e
+            raise ControlError(ERR_CDP_ERROR, f"{method}: {e}") from e
 
     def evaluate(self, expression: str, timeout: float = 0.0) -> Any:
         """One Runtime.evaluate on the open connection, value semantics."""
@@ -773,7 +778,7 @@ class Session:
             exception = details.get("exception") or {}
             text = str(exception.get("description") or details.get("text")
                        or "page JS exception")
-            fail("js-error", f"Runtime.evaluate: {foreign(text)}")
+            fail(ERR_JS_ERROR, f"Runtime.evaluate: {foreign(text)}")
         return str((result.get("result") or {}).get("objectId") or "")
 
     def close(self) -> None:

@@ -46,7 +46,17 @@ from browser_control.lib.browser import (  # pyright: ignore[reportMissingImport
     scope,
 )
 from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
-from browser_control.lib.errors import fail  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ERR_BAD_ARGS,
+    ERR_NOT_MANAGED,
+    ERR_PROFILE_EXISTS,
+    ERR_PROFILE_LIVE,
+    ERR_RESET_FAILED,
+    ERR_RESET_NOT_VERIFIED,
+    ERR_SEED_FAILED,
+    ERR_SEED_NOT_VERIFIED,
+    fail,
+)
 from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
     LOCK_FILE,
     PID_FILE,
@@ -162,7 +172,7 @@ def _copy(source: str, target: str, dry: bool) -> dict:
         try:
             os.makedirs(there, exist_ok=True)
         except OSError as e:
-            fail("seed-failed", f"cannot create {there}: {e}")
+            fail(ERR_SEED_FAILED, f"cannot create {there}: {e}")
         try:
             children = list(os.scandir(here))
         except OSError:
@@ -191,7 +201,7 @@ def _copy(source: str, target: str, dry: bool) -> dict:
             try:
                 shutil.copy2(child.path, destination)
             except OSError as e:
-                fail("seed-failed", f"cannot copy {child.path}: {e}")
+                fail(ERR_SEED_FAILED, f"cannot copy {child.path}: {e}")
     return facts
 
 
@@ -232,7 +242,7 @@ def _target(profile: str = "", browser: str = "") -> str:
     if wanted:
         path = expand(wanted)
         if not is_managed(path):
-            fail("not-managed",
+            fail(ERR_NOT_MANAGED,
                  f"{path} is not under {root()} — this CLI only manages the "
                  "profiles in its own root (BROWSER_CONTROL_ROOT); it will not "
                  "reset or seed into somebody's real browser profile")
@@ -243,7 +253,7 @@ def _target(profile: str = "", browser: str = "") -> str:
         # guard in `_copy` cannot see the top level, and a wipe would follow
         # the link. Checked for the DEFAULT instance too, not only a named one
         # (a review found `seed` wrote through such a link into a live profile).
-        fail("not-managed",
+        fail(ERR_NOT_MANAGED,
              f"{path} is a symlink — this CLI manages real profile "
              "directories, and a link can point a seed or a wipe at a tree "
              "it does not own")
@@ -270,7 +280,7 @@ def _live_pid(profile: str) -> int:
 def _refuse_live(profile: str, verb: str) -> None:
     pid = _live_pid(profile)
     if pid:
-        fail("profile-live",
+        fail(ERR_PROFILE_LIVE,
              f"pid {pid} is running on {profile} — {verb} under a live browser "
              "corrupts the profile (Chrome's own singleton warning says why): "
              f"`close --profile {profile} --force` first")
@@ -290,7 +300,7 @@ def info(profile: str = "") -> dict:
     if wanted:
         wanted = expand(wanted)
         if not is_managed(wanted):
-            fail("not-managed",
+            fail(ERR_NOT_MANAGED,
                  f"{wanted} is not under {root()} — `profile info` reports "
                  "the profiles this CLI manages; name one under the root")
     rows: list[dict] = []
@@ -369,19 +379,19 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     reports what would land, in bytes and files, without writing anything.
     """
     if not source:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "profile seed: --from DIR is required — the profile to copy FROM "
              "(usually ~/.config/google-chrome/Default, or the whole "
              "~/.config/google-chrome user-data directory); this CLI will "
              "not guess which of your profiles to read")
     src = expand(source)
     if not os.path.isdir(src):
-        fail("bad-args", f"profile seed: {src} is not a directory")
+        fail(ERR_BAD_ARGS, f"profile seed: {src} is not a directory")
     target = _target(profile, browser)
     dest = _seed_destination(src, target)
     if src == dest or src.startswith(dest + os.sep) \
             or dest.startswith(src + os.sep):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"profile seed: the source and the destination are the same "
              f"tree ({src} and {dest})")
     _refuse_live(target, "seeding")
@@ -410,7 +420,7 @@ def seed(source: str = "", profile: str = "", browser: str = "",
             _refuse_live(target, "seeding")
         existing = _has_content(target)
         if existing and not force and not dry:
-            fail("profile-exists",
+            fail(ERR_PROFILE_EXISTS,
                  f"{target} already holds a profile — `profile seed --force` "
                  "overwrites it (logins and all), or `profile reset --force` "
                  "clears it first; `--dry` reports what this call would copy")
@@ -420,14 +430,14 @@ def seed(source: str = "", profile: str = "", browser: str = "",
         elif facts["unreadable"]:
             # a directory the walk could not read is not copied and cannot be
             # verified: a PARTIAL copy must never report as verified
-            fail("seed-not-verified",
+            fail(ERR_SEED_NOT_VERIFIED,
                  f"{len(facts['unreadable'])} director(ies) under {src} "
                  "could not be read, so this copy is PARTIAL and nothing "
                  "was verified: " + "; ".join(facts["unreadable"][:3]))
         else:
             absent = _missing(facts["entries"], src, dest)
             if absent:
-                fail("seed-not-verified",
+                fail(ERR_SEED_NOT_VERIFIED,
                      f"{len(absent)} file(s) did not land in {dest}: "
                      + ", ".join(absent[:4]))
     reply = {"ok": True, "from": src, "profile": target,
@@ -477,7 +487,7 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         # unreachable: `_target` refuses a symlinked profile before this verb
         # runs. Kept as a second line of defence for a link planted between
         # that check and here.
-        fail("not-managed",
+        fail(ERR_NOT_MANAGED,
              f"{target} is a symlink — this CLI wipes a profile directory, "
              "not a link to somebody else's")
     with (browser_lib._lock(browser_lib._lock_path(root()),  # noqa: SLF001
@@ -495,7 +505,7 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         facts = _tree(target, count_skips=True)
         if (facts["files"] or facts["dirs"] or facts["links"]
                 or facts["special"]) and not force:
-            fail("profile-exists",
+            fail(ERR_PROFILE_EXISTS,
                  f"{target} holds {facts['files']} file(s), {facts['bytes']} "
                  "bytes — `profile reset --force` wipes it, logins included; "
                  "`profile info` shows it first")
@@ -507,10 +517,10 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         try:
             shutil.rmtree(target)
         except OSError as e:
-            fail("reset-failed", f"cannot remove {target}: {e}")
+            fail(ERR_RESET_FAILED, f"cannot remove {target}: {e}")
         _remove(pid_file(target))
     if os.path.exists(target):
-        fail("reset-not-verified",
+        fail(ERR_RESET_NOT_VERIFIED,
              f"{target} still exists after the wipe — something recreated it")
     reply = {"ok": True, "profile": target, "reset": True,
              "files": facts["files"], "bytes_freed": facts["bytes"],

@@ -39,6 +39,27 @@ from typing import Any
 from browser_control.lib import cdp  # pyright: ignore[reportMissingImports]
 from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ERR_ACTIVATE_NOT_VERIFIED,
+    ERR_AMBIGUOUS_BROWSER,
+    ERR_ATTACH_FAILED,
+    ERR_BAD_ARGS,
+    ERR_BROWSER_NOT_STOPPED,
+    ERR_CDP_ERROR,
+    ERR_CDP_NOT_LOCAL,
+    ERR_CDP_UNREACHABLE,
+    ERR_CLOSE_TAB_NOT_VERIFIED,
+    ERR_LAUNCH_FAILED,
+    ERR_NAV_FAILED,
+    ERR_NAV_NOT_VERIFIED,
+    ERR_NO_BROWSER,
+    ERR_NO_PAGE_TAB,
+    ERR_NOT_ATTACHED,
+    ERR_NOT_MANAGED,
+    ERR_PROFILE_BUSY,
+    ERR_PROFILE_UNUSABLE,
+    ERR_RELOAD_NOT_VERIFIED,
+    ERR_TAB_AMBIGUOUS,
+    ERR_TABS_OPEN,
     ControlError,
     fail,
 )
@@ -50,6 +71,14 @@ from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
     pid_file,
     profile_dir,
     root,
+)
+from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+    POLL_FAST,
+    POLL_LOAD,
+    POLL_NORMAL,
+    POLL_SLOW,
+    deadline,
+    poll,
 )
 from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
     BROWSER_EXES,
@@ -63,14 +92,6 @@ from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
     pid_on_profile,
     record_pid,
     spawn,
-)
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
-    POLL_FAST,
-    POLL_LOAD,
-    POLL_NORMAL,
-    POLL_SLOW,
-    deadline,
-    poll,
 )
 from browser_control.lib.text import flat  # pyright: ignore[reportMissingImports]
 
@@ -123,14 +144,13 @@ def binary(name: str = "") -> str:
     if name:
         found = shutil.which(name)
         if not found:
-            raise ControlError("no-browser", f"{name!r} is not on PATH")
+            raise ControlError(ERR_NO_BROWSER, f"{name!r} is not on PATH")
         return found
     for candidate in BROWSER_BINS:
         found = shutil.which(candidate)
         if found:
             return found
-    raise ControlError(
-        "no-browser",
+    raise ControlError(ERR_NO_BROWSER,
         "no Chromium-family browser on PATH (looked for: "
         + ", ".join(BROWSER_BINS) + ")")
 
@@ -169,7 +189,7 @@ def instance_dir(binary_path: str) -> str:
     if not scoped:
         return profile_dir(binary_path)
     if not _is_managed(scoped):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"--profile {scoped} is not under {root()} — this CLI manages the "
              "profiles in its own root (set BROWSER_CONTROL_ROOT to move it, "
              "or `attach` a browser started elsewhere)")
@@ -195,7 +215,7 @@ def live_profiles() -> list[str]:
 def ensure_up(profile: str) -> None:
     """Refuse now when the verb needs a browser and none is drivable."""
     if not cdp.reachable(profile):
-        fail("cdp-unreachable",
+        fail(ERR_CDP_UNREACHABLE,
              f"no drivable browser on {profile} — run "
              "`browser-control-cli open`, or attach a running one with "
              "`browser-control-cli attach --port N`")
@@ -219,7 +239,7 @@ def safe_url(url: str) -> str:
     if text == "about:blank":
         return text
     if not re.fullmatch(r"https?://\S+", text):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"refusing {text[:60]!r} as a URL (http(s) or about:blank only)")
     return text
 
@@ -233,12 +253,12 @@ def _match_spec(tabs: list[dict], spec: str) -> list[dict]:
     """
     needle = str(spec or "").strip()
     if not needle:
-        fail("bad-args", "a TAB spec is required (id:<prefix> or a title/url "
+        fail(ERR_BAD_ARGS, "a TAB spec is required (id:<prefix> or a title/url "
                          "substring)")
     if needle.lower().startswith("id:"):
         want = needle[3:].strip().lower()
         if not want:
-            fail("bad-args", "id: needs a target id prefix")
+            fail(ERR_BAD_ARGS, "id: needs a target id prefix")
         return [t for t in tabs
                 if str(t.get("id") or "").lower().startswith(want)]
     low = needle.lower()
@@ -256,14 +276,14 @@ def resolve_tab(rows: list[dict], spec: str) -> dict:
     hits = _match_spec(rows, spec)
     if not hits:
         if needle.lower().startswith("id:"):
-            fail("no-page-tab", f"no tab with id {needle[3:]!r} "
+            fail(ERR_NO_PAGE_TAB, f"no tab with id {needle[3:]!r} "
                                 "(the tab was probably closed)")
         have = ", ".join(flat(r.get("title"), 30)
                           for r in rows[:4]) or "none"
-        fail("no-page-tab", f"no tab matches {needle!r} (have: {have})")
+        fail(ERR_NO_PAGE_TAB, f"no tab matches {needle!r} (have: {have})")
     if len(hits) > 1:
         titles = ", ".join(flat(r.get("title"), 30) for r in hits[:5])
-        fail("tab-ambiguous", f"{needle!r} matches {len(hits)} tabs: {titles}")
+        fail(ERR_TAB_AMBIGUOUS, f"{needle!r} matches {len(hits)} tabs: {titles}")
     return hits[0]
 
 
@@ -364,7 +384,7 @@ def _write_attached(records: dict[str, dict]) -> None:
                       handle, indent=1)
         os.replace(temp, path)
     except OSError as e:
-        fail("attach-failed", f"cannot write {path}: {e}")
+        fail(ERR_ATTACH_FAILED, f"cannot write {path}: {e}")
 
 
 def is_attached(profile: str) -> bool:
@@ -451,7 +471,7 @@ def _writable_profile(browser: str = "") -> str:
         # disagreed about the same argv.
         if not _is_managed(SCOPE["profile"]) \
                 and not is_attached(SCOPE["profile"]):
-            fail("not-managed",
+            fail(ERR_NOT_MANAGED,
                  f"--profile {SCOPE['profile']} is not a profile this CLI "
                  "manages or has attached — `open --profile DIR` starts one "
                  "under the root, or `attach --port N` hands one over")
@@ -461,7 +481,7 @@ def _writable_profile(browser: str = "") -> str:
         names = ", ".join(os.path.basename(str(r["profile"]))
                           + (" (attached)" if r["attached"] else "")
                           for r in rows)
-        fail("ambiguous-browser",
+        fail(ERR_AMBIGUOUS_BROWSER,
              f"{len(rows)} writable browsers are up ({names}) — pass "
              "--profile DIR to name the instance, --browser NAME, or "
              "`detach` one")
@@ -486,7 +506,7 @@ def managed_profile(browser: str = "") -> str:
         # nobody can act on (observed)
         names = "; ".join(f'{os.path.basename(str(r["profile"]))} '
                           f'(pid {r["pid"]}, {r["profile"]})' for r in rows)
-        fail("ambiguous-browser",
+        fail(ERR_AMBIGUOUS_BROWSER,
              f"{len(rows)} managed browsers are up: {names} — pass "
              "--browser NAME")
     if rows:
@@ -520,7 +540,7 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
     given = [name for name, value in (("--port", port), ("--pid", pid),
                                       ("--profile", profile)) if value]
     if len(given) != 1:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "attach: name ONE browser — --port N, --pid N or --profile DIR")
     rows = browsers()
     if pid:
@@ -533,10 +553,10 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
         row = next((r for r in rows
                     if as_int(r["cdp"]["port"]) == want_port), None)
     if row is None:
-        fail("no-browser",
+        fail(ERR_NO_BROWSER,
              f"no running Chromium-family browser matches {given[0]}")
     if not row["cdp"]["reachable"]:
-        fail("cdp-unreachable",
+        fail(ERR_CDP_UNREACHABLE,
              f"pid {row['pid']} does not answer CDP on port "
              f"{row['cdp']['port']} — attach needs a live endpoint")
     if not row["cdp"].get("verified"):
@@ -574,7 +594,7 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
     """`detach`: take the tab-write authorization away again."""
     if detach_all:
         if port or pid or profile:
-            fail("bad-args", "detach: --all takes no other selector")
+            fail(ERR_BAD_ARGS, "detach: --all takes no other selector")
         with _lock(_lock_path(root()), "detach") as lock:
             keys = sorted(_attached())
             _write_attached({})
@@ -585,7 +605,7 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
     given = [name for name, value in (("--port", port), ("--pid", pid),
                                       ("--profile", profile)) if value]
     if len(given) != 1:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "detach: name ONE browser — --port N, --pid N, --profile DIR, "
              "or --all")
     # the read-modify-write of the records runs under the root's lock, so two
@@ -601,7 +621,7 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
             keys = [key for key, rec in records.items()
                     if as_int(rec.get("port")) == as_int(port)]
         if not keys:
-            fail("not-attached", f"nothing is attached for {given[0]}")
+            fail(ERR_NOT_ATTACHED, f"nothing is attached for {given[0]}")
         for key in keys:
             records.pop(key, None)
         _write_attached(records)
@@ -672,7 +692,7 @@ def not_local_refusal(profile: str, port: int, reason: str) -> None:
     The advice is the mundane one, because the mundane cause is the common
     one: a stale port file, or a port that was taken after the browser died.
     """
-    fail("cdp-not-local",
+    fail(ERR_CDP_NOT_LOCAL,
          f"port {port} on {profile} answers, but it is not that profile's "
          f"browser: {reason}. Nothing was sent to it. Either the port file is "
          "stale or the port was taken — run `browser-control-cli close --force` "
@@ -730,7 +750,7 @@ def _tabs_or_fail(row: dict) -> list[dict]:
     """
     tabs, error = _tabs_of(row)
     if error:
-        fail("cdp-error", f"{row['exe']} on {row['profile']}: {error}")
+        fail(ERR_CDP_ERROR, f"{row['exe']} on {row['profile']}: {error}")
     return tabs
 
 
@@ -829,7 +849,7 @@ def browser_info(browser: str = "") -> dict:
         names = ", ".join(os.path.basename(str(r["profile"]))
                           + (" (attached)" if r["attached"] else "")
                           for r in live)
-        fail("ambiguous-browser",
+        fail(ERR_AMBIGUOUS_BROWSER,
              f"{len(live)} writable browsers are up ({names}) — name one with "
              "--profile DIR (the instance) or --browser NAME")
     if live:
@@ -934,7 +954,7 @@ def _require_tab_list_readable(profile: str, error: ControlError) -> None:
     fixed for (a review flagged it).
     """
     if error.code != "cdp-unreachable" or cdp.port_of(profile):
-        fail("close-tab-not-verified",
+        fail(ERR_CLOSE_TAB_NOT_VERIFIED,
              f"the tab list could not be read back after the close: "
              f"{error.message}")
 
@@ -972,7 +992,7 @@ def _verify_profile_endpoint(profile: str) -> None:
     """
     port = as_int(cdp.port_of(profile))
     if not port:
-        fail("cdp-unreachable",
+        fail(ERR_CDP_UNREACHABLE,
              f"no port file in {profile} — nothing to drive there")
     owner = endpoint_owner(profile, port)
     if not owner.get("verified"):
@@ -995,11 +1015,11 @@ def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
         result = cdp.browser_call(profile, "Target.createTarget", {"url": url})
         target_id = str(result.get("targetId") or "")
         if not target_id:
-            fail("no-page-tab", f"CDP made no tab for {url!r}")
+            fail(ERR_NO_PAGE_TAB, f"CDP made no tab for {url!r}")
         ids.append(target_id)
     found, missing = _wait_tabs(profile, ids)
     if missing:
-        fail("no-page-tab",
+        fail(ERR_NO_PAGE_TAB,
              f"{len(missing)} of {len(ids)} tabs never showed up in the tab "
              "list: " + ", ".join(missing[:4]))
     return [found[target_id] for target_id in ids]
@@ -1077,7 +1097,7 @@ def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
         except OSError as e:
             if _contention(e):
                 if _expired(deadline):
-                    fail("profile-busy",
+                    fail(ERR_PROFILE_BUSY,
                          f"another browser-control call holds {path} "
                          f"[{_holder_text(handle)}] and has been for "
                          f"{wait:g}s — nothing was started or stopped here. "
@@ -1176,7 +1196,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     try:
         os.makedirs(profile, exist_ok=True)
     except OSError as e:
-        raise ControlError("profile-unusable",
+        raise ControlError(ERR_PROFILE_UNUSABLE,
                            f"cannot create {profile}: {e}") from e
     with _lock(_lock_path(profile), "open") as lock:
         # the port is read INSIDE the lock: a value from before it can be 0
@@ -1205,12 +1225,12 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
             requests = [first, *wanted[1:]]
             record_pid(profile, spawn([path, *flags(profile), first]))
             if not _wait_own_port(profile):
-                fail("launch-failed",
+                fail(ERR_LAUNCH_FAILED,
                      f"started {path} on {profile} but no CDP endpoint "
                      f"answered within {LAUNCH_WAIT_S:g}s")
             row = _wait_url(profile, first)
             if row is None:
-                fail("no-page-tab",
+                fail(ERR_NO_PAGE_TAB,
                      f"{path} is up on {profile} but shows no tab for "
                      f"{first!r}")
             opened = [row]
@@ -1218,7 +1238,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
                 opened += _open_tabs(profile, wanted[1:])
         rows = _wait_rows(profile)
     if not rows:
-        fail("no-page-tab",
+        fail(ERR_NO_PAGE_TAB,
              f"{path} is up on {profile} but shows no page tab — pass a URL "
              "(browser-control-cli open https://…)")
     notes = [text for text in (stale, lock["warning"]) if text]
@@ -1278,15 +1298,15 @@ def _named_browser(selector: dict) -> dict:
                     if as_int(r["cdp"]["port"]) == port), None)
         what = f"--port {port}"
     if row is None:
-        fail("no-browser",
+        fail(ERR_NO_BROWSER,
              f"no running Chromium-family browser matches {what}")
     if not row["cdp"]["reachable"]:
-        fail("cdp-unreachable",
+        fail(ERR_CDP_UNREACHABLE,
              f"pid {row['pid']} does not answer CDP on port "
              f"{row['cdp']['port']} — a browser this CLI cannot reach is not "
              "one it stops by name")
     if not row["cdp"]["verified"]:
-        fail("cdp-not-local",
+        fail(ERR_CDP_NOT_LOCAL,
              f"the endpoint on port {row['cdp']['port']} is not pid "
              f"{row['pid']}'s ({row['cdp'].get('reason') or 'unknown'}) — "
              "refusing to signal it")
@@ -1318,7 +1338,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
     given = [name for name, value in (("--port", port), ("--pid", pid),
                                       ("--profile", profile)) if value]
     if len(given) > 1:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "close: name ONE browser — --port N, --pid N or --profile DIR")
     named = bool(given)
     row = _named_browser({"port": port, "pid": pid, "profile": profile}) \
@@ -1335,7 +1355,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
                 if lock["warning"]:
                     reply["warning"] = lock["warning"]
                 return reply
-            fail("browser-not-stopped",
+            fail(ERR_BROWSER_NOT_STOPPED,
                  f"a browser answers on {target} but no Chromium process on "
                  "it can be identified — refusing to signal a process this "
                  "CLI did not start")
@@ -1344,11 +1364,11 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
             # managed path took its pid before `_page_count` (an HTTP GET plus
             # a /proc walk), so a browser that exited in that window could have
             # its pid recycled under the SIGTERM (a review flagged it).
-            fail("browser-not-stopped",
+            fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} is gone, or no longer runs {target} — "
                  "nothing was signalled")
         if tabs and not force:
-            fail("tabs-open",
+            fail(ERR_TABS_OPEN,
                  f"{tabs} page tab(s) are open in {target} and stopping the "
                  "browser closes them with it (Chromium exits with its last "
                  "window) — pass --force to stop it anyway, or take the tabs "
@@ -1356,12 +1376,12 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
         try:
             os.kill(target_pid, signal.SIGTERM)
         except OSError as e:
-            fail("browser-not-stopped", f"cannot stop pid {target_pid}: {e}")
+            fail(ERR_BROWSER_NOT_STOPPED, f"cannot stop pid {target_pid}: {e}")
         _attempts, alive = poll(lambda: pid_alive(target_pid), timeout=STOP_WAIT_S,
                                 interval=POLL_NORMAL, accept=lambda a: not a,
                                 on_error=lambda _e: True)
         if alive:
-            fail("browser-not-stopped",
+            fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} survived SIGTERM for {STOP_WAIT_S:g}s — "
                  "stop it yourself; this CLI does not SIGKILL a browser")
         _attempts, answering = poll(lambda: cdp.reachable(target),
@@ -1370,7 +1390,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
                                     accept=lambda a: not a,
                                     on_error=lambda _e: True)
         if answering:
-            fail("browser-not-stopped",
+            fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} is gone but the CDP endpoint on {target} "
                  "still answers")
         Path(_pid_file(target)).unlink(missing_ok=True)
@@ -1447,7 +1467,7 @@ def _resolve_across(specs: list[str], browser: str,
             own = [row for row in rows if row["managed"] or row["attached"]]
             hits = _spec_hits(own, tabs_of, spec)
             if not hits:
-                fail("no-page-tab",
+                fail(ERR_NO_PAGE_TAB,
                      "no tab of a browser this CLI drives reports itself "
                      "VISIBLE — read one with `tab list`, or name it with "
                      "`--tab SPEC`")
@@ -1457,7 +1477,7 @@ def _resolve_across(specs: list[str], browser: str,
             have = ", ".join(f'{flat(t["title"], 20) or flat(t["url"], 20)} '
                              f'({r["exe"]})'
                              for r in rows for t in tabs_of[r["pid"]][:2])
-            fail("no-page-tab",
+            fail(ERR_NO_PAGE_TAB,
                  f"no tab matches {spec!r} (have: {have or 'none'})")
         if len(hits) > 1:
             # pid in the message: two browsers can share an executable name
@@ -1465,11 +1485,11 @@ def _resolve_across(specs: list[str], browser: str,
                 f'{flat(t["title"], 20) or flat(t["id"], 8)} in {r["exe"]}'
                 f':{os.path.basename(str(r["profile"]))} (pid {r["pid"]})'
                 for r, t, _index in hits[:4])
-            fail("tab-ambiguous",
+            fail(ERR_TAB_AMBIGUOUS,
                  f"{spec!r} matches {len(hits)} tabs: {where}")
         row, tab, index = hits[0]
         if for_write and not (row["managed"] or row["attached"]):
-            fail("not-managed",
+            fail(ERR_NOT_MANAGED,
                  f"{spec!r} is in {row['exe']} on {row['profile']}, which "
                  "this CLI neither manages nor has attached — `tab list` "
                  "and `tab info` read every drivable browser, but a write "
@@ -1608,7 +1628,7 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
     seen: set[str] = set()
     for spec in specs:
         if not loose and not str(spec).strip():
-            fail("bad-args", "tab close: a TAB spec cannot be empty")
+            fail(ERR_BAD_ARGS, "tab close: a TAB spec cannot be empty")
         hits = 0
         for row in rows:
             for index, tab in enumerate(_tabs_or_fail(row)):
@@ -1628,16 +1648,16 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
             have = ", ".join(f'{flat(t["title"], 20) or flat(t["url"], 20)}'
                              for r in rows for t in _tabs_or_fail(r)[:2])
             if loose:
-                fail("no-page-tab",
+                fail(ERR_NO_PAGE_TAB,
                      f"no tab contains {spec!r} in its title or URL "
                      f"(have: {have or 'none'})")
-            fail("no-page-tab",
+            fail(ERR_NO_PAGE_TAB,
                  f"no tab is NAMED {spec!r}: a SPEC names a tab exactly — its "
                  "whole URL, its whole title, or id:<prefix> — and for a "
                  f"substring sweep use `tab close --like {spec!r}` "
                  f"(have: {have or 'none'})")
         if not ours and foreign:
-            fail("not-managed",
+            fail(ERR_NOT_MANAGED,
                  f"every tab matching {spec!r} is in a browser this CLI did "
                  f"not start ({foreign[0]['exe']} on "
                  f"{foreign[0]['profile']}) — a write needs "
@@ -1682,40 +1702,40 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
     named = bool(specs) or title is not None or url is not None or bool(likes)
     for flag, value in (("--title", title), ("--url", url)):
         if value is not None and not str(value):
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  f"tab close: {flag} needs a value — an exact title or URL")
     if any(not str(spec) for spec in excepts):
-        fail("bad-args", "tab close: --except needs a value — a TAB spec")
+        fail(ERR_BAD_ARGS, "tab close: --except needs a value — a TAB spec")
     if any(not str(value) for value in likes):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: --like needs a value — the substring to sweep for")
     if any(not str(spec).strip() for spec in specs):
-        fail("bad-args", "tab close: a TAB spec cannot be empty")
+        fail(ERR_BAD_ARGS, "tab close: a TAB spec cannot be empty")
     if any(str(spec).strip().lower() in ("id:", "id: ")
            for spec in specs):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: `id:` needs a target id prefix — without one it "
              "names every tab")
     if title is not None and url is not None:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: name tabs by --title or by --url, not both")
     if specs and (title is not None or url is not None):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: name tabs by SPEC or by --title/--url, not both")
     if likes and (specs or title is not None or url is not None):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: --like is a substring sweep, so it takes no SPEC, "
              "--title or --url — name tabs one way per call")
     if all_tabs and named:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: --all takes no SPEC, --like, --title or --url — it "
              "already names every tab")
     if excepts and named:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: --except means EVERY tab but those, so it takes no "
              "SPEC, --like, --title or --url (add --all to say it explicitly)")
     if not named and not all_tabs and not excepts:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab close: name tabs with SPEC, --like VALUE, --title VALUE, "
              "--url URL, or --all [--except SPEC]")
     skipped: list[dict] = []
@@ -1725,11 +1745,11 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
         keepers: set[str] = set()
         for spec in excepts:
             if not str(spec).strip():
-                fail("bad-args", "tab close: a --except spec cannot be empty")
+                fail(ERR_BAD_ARGS, "tab close: a --except spec cannot be empty")
             matched = [tab for _r, tab, _i in ours if _match_spec([tab], spec)]
             matched += [tab for tab in foreign if _match_spec([tab], spec)]
             if not matched and (ours or foreign):
-                fail("no-page-tab",
+                fail(ERR_NO_PAGE_TAB,
                      f"tab close: --except {spec!r} matches no tab, so it "
                      "would keep nothing — `tab list` shows what is open")
             keepers |= {str(tab["id"]) for tab in matched}
@@ -1745,14 +1765,14 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
         filter_used = {field: value}
         if not ours:
             if skipped:
-                fail("not-managed",
+                fail(ERR_NOT_MANAGED,
                      f"{len(skipped)} tab(s) match {field} {value!r}, and "
                      f"every one of them is in a browser this CLI did not "
                      f"start ({skipped[0]['exe']} on "
                      f"{skipped[0]['profile']}) — a write needs "
                      "`attach --port N`, or `--browser NAME` to narrow it"
                      )
-            fail("no-page-tab",
+            fail(ERR_NO_PAGE_TAB,
                  f"no tab in a browser this CLI drives has {field} exactly "
                  f"{value!r} — `tab list` shows what is open")
     else:
@@ -1794,7 +1814,7 @@ def close_tabs(specs: list[str], browser: str = "", title: str | None = None,
     for profile, ids in by_profile.items():
         survivors += _wait_ids_gone(profile, ids)
     if survivors:
-        fail("close-tab-not-verified",
+        fail(ERR_CLOSE_TAB_NOT_VERIFIED,
              f"{len(survivors)} of {len(ours)} tabs are still open: "
              + ", ".join(str(i)[:10] for i in survivors[:4]))
     reply = {"ok": True, "closed": closing, "count": _tab_count()}
@@ -1867,7 +1887,7 @@ def _no_drive(browser: str = "", reason: str = "") -> None:
     where = f" {' '.join(asked)}" if asked else ""
     fix = (f"`open --profile {scoped}` starts it" if scoped
            else "run `browser-control-cli open`")
-    fail("cdp-unreachable",
+    fail(ERR_CDP_UNREACHABLE,
          f"no drivable browser{where} — {fix}"
          + (f" ({reason})" if reason else ""))
 
@@ -1900,7 +1920,7 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
         # which is a lie when no browser is running.
         strangers = _drivable(browser)
         if for_write and strangers:
-            fail("not-managed",
+            fail(ERR_NOT_MANAGED,
                  f"{_who(strangers)} is drivable, but this CLI neither manages "
                  "nor has attached it — a write needs a browser it started "
                  "(`open`), an `attach --port N` grant, or a --tab SPEC to "
@@ -1908,13 +1928,13 @@ def _one_tab(spec: str, browser: str, for_write: bool) -> tuple[dict, dict]:
         _no_drive(browser)
     pairs = [(row, tab) for row in rows for tab in _tabs_or_fail(row)]
     if not pairs:
-        fail("no-page-tab",
+        fail(ERR_NO_PAGE_TAB,
              "no page tabs to act on — open one with "
              "`browser-control-cli tab URL`")
     if len(pairs) > 1:
         where = ", ".join(f'{flat(t["title"], 20) or flat(t["url"], 30)} '
                           f'({r["exe"]})' for r, t in pairs[:5])
-        fail("tab-ambiguous",
+        fail(ERR_TAB_AMBIGUOUS,
              f"{len(pairs)} page tabs are open — name one with --tab SPEC "
              f"(id:<prefix> or a title/url substring): {where}")
     return pairs[0]
@@ -2064,11 +2084,11 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
         try:
             reply = session.call("Page.navigate", {"url": target})
         except ControlError as e:
-            fail("nav-failed",
+            fail(ERR_NAV_FAILED,
                  f"the browser refused to navigate to {target!r}: {e.message}")
     refused = str(reply.get("errorText") or "")
     if reply.get("isDownload"):
-        fail("nav-failed",
+        fail(ERR_NAV_FAILED,
              f"the browser treated {target!r} as a DOWNLOAD, so no page "
              "navigated and the tab is where it was")
     # `moved` is NULL when the address BEFORE could not be read (a parked tab is
@@ -2089,18 +2109,18 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
                                                                      target_id)
     url_read = _href(profile, target_id)
     if url_read.startswith("chrome-error://") or refused:
-        fail("nav-failed",
+        fail(ERR_NAV_FAILED,
              f"the browser could not load {target!r}"
              f"{f' ({refused})' if refused else ''} — the tab is on its own "
              "error page (a name that does not resolve, a refused connection "
              "or a certificate problem), not the requested document")
     if moved is None and (not url_read or not _same_page(target, url_read)):
-        fail("nav-not-verified",
+        fail(ERR_NAV_NOT_VERIFIED,
              f"this tab's address could not be read before the navigation and "
              f"reports {url_read!r} after it — the navigation did not verify "
              "(the tab may still be parked on a dialog: `tab dialog state`)")
     if moved is not None and not moved and not _same_page(target, before):
-        fail("nav-not-verified",
+        fail(ERR_NAV_NOT_VERIFIED,
              f"the tab is still at {before!r} after navigating to {target!r} "
              "— a beforeunload prompt the browser is waiting on (`tab dialog "
              "state`), or a navigation Chromium cancelled")
@@ -2123,7 +2143,7 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
     is this project's rule (a review flagged the `history.back()` call).
     """
     if direction not in ("back", "forward"):
-        fail("bad-args", f"history: {direction!r} is not back or forward")
+        fail(ERR_BAD_ARGS, f"history: {direction!r} is not back or forward")
     row, tab_row = _one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
     before = _href(profile, target_id)
@@ -2133,12 +2153,12 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
     index = as_int(listing.get("currentIndex")) if isinstance(listing, dict) \
         else -1
     if not isinstance(entries, list) or not entries:
-        fail("nav-failed",
+        fail(ERR_NAV_FAILED,
              f"the browser reports no history for this tab, so there is no "
              f"{direction} entry to move to")
     wanted = index - 1 if direction == "back" else index + 1
     if wanted < 0 or wanted >= len(entries):
-        fail("nav-failed",
+        fail(ERR_NAV_FAILED,
              f"the tab is at history entry {index + 1} of {len(entries)} — "
              f"there is no {direction} entry to move to")
     cdp.call(tab_ws, "Page.navigateToHistoryEntry",
@@ -2149,17 +2169,17 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
             # oracle: what proves the move is the tab answering on a real page
             after = _href(profile, target_id)
             if not after or after.startswith("chrome-error://"):
-                fail("nav-not-verified",
+                fail(ERR_NAV_NOT_VERIFIED,
                      f"this tab's address could not be read before {direction} "
                      f"and reports {after!r} after it — the move did not verify")
         else:
-            fail("nav-not-verified",
+            fail(ERR_NAV_NOT_VERIFIED,
                  f"the tab is still at {before!r} after {direction} — the "
                  "browser moved to a history entry whose address did not "
                  "change (a same-document entry), or the page re-set it")
     url_read = _href(profile, target_id)
     if url_read.startswith("chrome-error://"):
-        fail("nav-failed",
+        fail(ERR_NAV_FAILED,
              f"the {direction} entry did not load — the tab is on the "
              "browser's own error page")
     return {"ok": True, "direction": direction, "tab": f"id:{target_id}",
@@ -2196,7 +2216,7 @@ def activate(tab: str = "", browser: str = "") -> dict:
                                 interval=POLL_FAST,
                                 accept=lambda value: value == "visible")
     if after != "visible":
-        fail("activate-not-verified",
+        fail(ERR_ACTIVATE_NOT_VERIFIED,
              f"the tab still reports visibility={after or 'unreadable'!r} "
              "after `Page.bringToFront` — its window may be hidden entirely "
              "(another workspace, or iconified), and this CLI drives "
@@ -2222,12 +2242,12 @@ def reload(tab: str = "", browser: str = "") -> dict:      # noqa: A001
     profile, target_id = str(row["profile"]), str(tab_row["id"])
     before = _time_origin(profile, target_id)
     if before is None:
-        fail("reload-not-verified",
+        fail(ERR_RELOAD_NOT_VERIFIED,
              f"tab {target_id[:10]}… did not report a document time — there "
              "is nothing to compare a reload against")
     _eval(profile, target_id, "location.reload(); 'reloading'", timeout=10)
     if not _wait_new_document(profile, target_id, before):
-        fail("reload-not-verified",
+        fail(ERR_RELOAD_NOT_VERIFIED,
              f"no new document within {RELOAD_TIMEOUT_S:g}s — the page may "
              "block the reload, or it is still loading")
     return {"ok": True, "tab": f"id:{target_id}", "reloaded": True,

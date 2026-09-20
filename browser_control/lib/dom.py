@@ -64,6 +64,37 @@ from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports
     as_list,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ERR_AMBIGUOUS_ELEMENT,
+    ERR_AMBIGUOUS_OPTION,
+    ERR_BAD_ARGS,
+    ERR_CDP_ERROR,
+    ERR_CHECK_NOT_VERIFIED,
+    ERR_DIALOG_NOT_VERIFIED,
+    ERR_FILE_EXISTS,
+    ERR_FOCUS_NOT_VERIFIED,
+    ERR_FRAME_AMBIGUOUS,
+    ERR_FRAME_NOT_SEPARATE,
+    ERR_FRAME_UNATTRIBUTABLE,
+    ERR_HOVER_NOT_VERIFIED,
+    ERR_MEDIA_BLOCKED,
+    ERR_MEDIA_NOT_VERIFIED,
+    ERR_NO_DIALOG,
+    ERR_NO_FILE,
+    ERR_NO_FOCUS,
+    ERR_NO_FRAME,
+    ERR_NO_MATCH,
+    ERR_NO_MEDIA,
+    ERR_NO_VIEWPORT,
+    ERR_NO_VIEWPORT_TARGET,
+    ERR_NOT_A_SELECT,
+    ERR_NOT_CHECKABLE,
+    ERR_OCCLUDED,
+    ERR_SCREENSHOT_NOT_VERIFIED,
+    ERR_SCROLL_NOT_VERIFIED,
+    ERR_SELECT_NOT_VERIFIED,
+    ERR_UPLOAD_NOT_VERIFIED,
+    ERR_WAIT_TIMEOUT,
+    ERR_WRITE_FAILED,
     ControlError,
     fail,
 )
@@ -641,7 +672,7 @@ def _viewport(data: dict, target_id: str) -> list[int]:
     """The page's viewport, or a refusal when it has none."""
     viewport = as_ints(data.get("viewport"))
     if len(viewport) < 2 or viewport[0] <= 0 or viewport[1] <= 0:
-        fail("no-viewport",
+        fail(ERR_NO_VIEWPORT,
              f"tab {target_id[:10]}… reports no viewport ({viewport}) — a box "
              "in no viewport is not a target: this is a windowless or "
              "never-shown browser, so nothing can be measured in it")
@@ -802,7 +833,7 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
     """
     rows = frames_of(port, page_target)
     if not rows:
-        fail("no-frame", "this page has no iframes — `tab frames` lists them")
+        fail(ERR_NO_FRAME, "this page has no iframes — `tab frames` lists them")
     text_ = str(wanted or "").strip()
     if text_.isdigit():
         hits = [r for r in rows if as_int(r["index"]) == as_int(text_)]
@@ -812,15 +843,15 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
     if not hits:
         have = "; ".join(f"[{r['index']}] {str(r['url'])[:52] or 'srcdoc'}"
                          for r in rows[:4])
-        fail("no-frame", f"no frame matches {wanted!r} (have: {have})")
+        fail(ERR_NO_FRAME, f"no frame matches {wanted!r} (have: {have})")
     if len(hits) > 1:
         where = "; ".join(f"[{r['index']}] {str(r['url'])[:52]}" for r in hits[:4])
-        fail("frame-ambiguous",
+        fail(ERR_FRAME_AMBIGUOUS,
              f"{len(hits)} frames match {wanted!r} — pick one by index "
              f"(`--frame 0` … `--frame {len(rows) - 1}`): {where}")
     found = hits[0]
     if found.get("attribution"):
-        fail("frame-unattributable",
+        fail(ERR_FRAME_UNATTRIBUTABLE,
              f"frame [{found['index']}] "
              f"{str(found['url'])[:60] or 'srcdoc'} — this browser does not "
              "report which tab owns an iframe target, so the CLI cannot tell "
@@ -828,13 +859,13 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
              "a same-process frame, `tab click --at X,Y` hits one by "
              "coordinate, or drive the tab that owns it")
     if found.get("candidates"):
-        fail("frame-ambiguous",
+        fail(ERR_FRAME_AMBIGUOUS,
              f"frame [{found['index']}] {str(found['url'])[:60]} matches "
              f"{found['candidates']} targets in this browser and it does not "
              "say which tab owns them — run `tab frames` in the tab you mean "
              "and name the frame by its index there")
     if not found["target"]:
-        fail("frame-not-separate",
+        fail(ERR_FRAME_NOT_SEPARATE,
              f"frame [{found['index']}] "
              f"{str(found['url'])[:60] or 'srcdoc'} has no target of its OWN in "
              "this tab: either it shares the page's process (a same-origin or "
@@ -944,7 +975,7 @@ def _query_args(text: str | None, selector: str | None,
     needle = str(text or "").strip()
     css = str(selector or "").strip()
     if bool(needle) == bool(css):
-        fail("bad-args", f"{verb}: give TEXT or --selector CSS, not both")
+        fail(ERR_BAD_ARGS, f"{verb}: give TEXT or --selector CSS, not both")
     return needle, css
 
 
@@ -957,7 +988,7 @@ def _matches_in(session: cdp.Session, needle: str, css: str, cap: int) -> dict:
                   .replace("__CAP__", str(cap)))
     data = session.evaluate(expression)
     if not isinstance(data, dict):
-        fail("cdp-error", "the page did not answer with an object")
+        fail(ERR_CDP_ERROR, "the page did not answer with an object")
     return data
 
 
@@ -978,7 +1009,7 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
         hint = (f" — {offscreen} candidate(s) are rendered but NOT in the "
                 "viewport: `tab scroll TEXT` brings one into view"
                 if offscreen else "")
-        fail("no-match",
+        fail(ERR_NO_MATCH,
              f"no rendered element matches {needle or css!r} on "
              f"{str(data.get('title'))!r}{hint}"
              + _frames_note(row, tab_row))
@@ -986,13 +1017,13 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
         if len(rows) > 1:
             where = "; ".join(f"[{i}] {_describe(candidate)}"
                               for i, candidate in enumerate(rows[:5]))
-            fail("ambiguous-element",
+            fail(ERR_AMBIGUOUS_ELEMENT,
                  f"{len(rows)} elements match {needle or css!r} — pick one "
                  f"with --index N: {where}"
                  + _frames_note(row, tab_row))
         index = 0
     if not 0 <= index < len(rows):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"--index {index} is out of range: {len(rows)} element(s) match")
     return rows[index]
 
@@ -1125,7 +1156,7 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
     """
     expr = str(expression or "").strip()
     if not expr:
-        fail("bad-args", "tab js: an EXPRESSION is required")
+        fail(ERR_BAD_ARGS, "tab js: an EXPRESSION is required")
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         value = session.evaluate(expr)
@@ -1146,23 +1177,23 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     """
     name = mode_of(mode)
     if name not in WAIT_EXPRS:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab wait: --for is load|idle|element|js, got {mode!r}")
     if name == "element" and not selector:
-        fail("bad-args", "tab wait: --for element needs --selector CSS")
+        fail(ERR_BAD_ARGS, "tab wait: --for element needs --selector CSS")
     if name == "js" and not expr:
-        fail("bad-args", "tab wait: --for js needs --expr EXPRESSION")
+        fail(ERR_BAD_ARGS, "tab wait: --for js needs --expr EXPRESSION")
     if name != "element" and selector:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab wait: --selector is only for --for element (not {name})")
     if name != "js" and expr:
-        fail("bad-args", f"tab wait: --expr is only for --for js (not {name})")
+        fail(ERR_BAD_ARGS, f"tab wait: --expr is only for --for js (not {name})")
     try:
         seconds = float(timeout)
     except (TypeError, ValueError):
-        fail("bad-args", f"tab wait: --timeout needs a number, got {timeout!r}")
+        fail(ERR_BAD_ARGS, f"tab wait: --timeout needs a number, got {timeout!r}")
     if not 0 < seconds < 3600 or seconds != seconds:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab wait: --timeout must be finite and positive, got {timeout!r}")
     row, tab_row = _resolve(tab, browser, for_write=(name == "js"))
     profile, target_id = str(row["profile"]), str(tab_row["id"])
@@ -1178,14 +1209,14 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
         # measured: `Boolean(promise)` is TRUE the moment the promise is made,
         # so an async predicate passed before anything settled (a review found
         # it) — the expression reports the thenable instead of coercing it
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab wait --for js: the expression returned a Promise — a wait "
              "polls a BOOLEAN, and a Promise is truthy the moment it is made, "
              "so the wait would pass before anything settled (await it in the "
              "page, or set a flag and poll that)")
     if not value:
         what = selector or expr or ""
-        fail("wait-timeout",
+        fail(ERR_WAIT_TIMEOUT,
              f"tab wait --for {name}"
              + (f" {what!r}" if what else "")
              + f" did not pass within {seconds:g}s ({samples} samples)")
@@ -1248,12 +1279,12 @@ def _extract_field(spec: str, verb: str = "tab extract") -> tuple[str, dict]:
     name, sep, value = text.partition("=")
     name = name.strip()
     if not sep or not name:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: a field is NAME=SPEC (e.g. "
              "`--field text=[data-testid=tweetText]` or "
              f"`--field time=time@datetime`) — got {spec!r}")
     if not _FIELD_NAME.match(name):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: {name!r} is not a field name (letters, digits, `_` and "
              "`-`, starting with a letter or `_`)")
     sel = value.strip()
@@ -1262,7 +1293,7 @@ def _extract_field(spec: str, verb: str = "tab extract") -> tuple[str, dict]:
     if at and _ATTR_NAME.match(tail.strip()):
         sel, attr_name = head.strip(), tail.strip()
     if not sel and not attr_name:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: {spec!r} names neither a selector nor an attribute — "
              "use `name=SELECTOR`, `name=SELECTOR@attr` or `name=@attr`")
     return name, {"sel": sel, "attr": attr_name}
@@ -1274,21 +1305,21 @@ def _extract_schema(each: str, fields: list[str], cap: int = EXTRACT_CAP,
     """The JSON schema one extraction runs: parsed, validated, bounded."""
     selector = str(each or "").strip()
     if not selector:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: --each is required — the CSS selector of the repeated "
              "item (e.g. --each article)")
     if not fields:
-        fail("bad-args", f"{verb}: at least one --field NAME=SPEC is required")
+        fail(ERR_BAD_ARGS, f"{verb}: at least one --field NAME=SPEC is required")
     parsed: dict[str, dict] = {}
     for spec in fields:
         name, field = _extract_field(spec, verb)
         parsed[name] = field
     limit = as_int(cap, EXTRACT_CAP)
     if limit < 1:
-        fail("bad-args", f"{verb}: --cap must be at least 1")
+        fail(ERR_BAD_ARGS, f"{verb}: --cap must be at least 1")
     keep = as_int(chars, EXTRACT_FIELD_CHARS)
     if keep < 1:
-        fail("bad-args", f"{verb}: --chars must be at least 1")
+        fail(ERR_BAD_ARGS, f"{verb}: --chars must be at least 1")
     return {"each": selector, "fields": parsed,
             "cap": min(limit, EXTRACT_MAX_MATCHES),
             "chars": min(keep, EXTRACT_FIELD_MAX),
@@ -1338,7 +1369,7 @@ def extract(each: str = "", fields: list[str] | None = None,
     names = list(schema["fields"])
     wanted = str(unique or "").strip()
     if wanted and wanted not in names:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab extract: --unique {wanted!r} is not one of the fields "
              f"({', '.join(names)})")
     row, tab_row = _resolve(tab, browser, for_write=False)
@@ -1395,7 +1426,7 @@ def find(text: str | None = None, selector: str | None = None,
                                      ("tag", "box"))]
     if not matches:
         offscreen = as_int(data.get("offscreen"))
-        fail("no-match",
+        fail(ERR_NO_MATCH,
              f"no rendered element matches {needle or css!r} on "
              f"{str(data.get('title'))!r} (readyState {data.get('ready')!r}, "
              f"{as_int(data.get('total'))} candidate(s)"
@@ -1489,7 +1520,7 @@ def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
             "el.matches(':hover')}) })()")
     probe = probe if isinstance(probe, dict) else {}
     if not probe.get("hovered"):
-        fail("hover-not-verified",
+        fail(ERR_HOVER_NOT_VERIFIED,
              f"nothing at viewport {[x, y]} matches `:hover` after the pointer "
              f"moved there ({probe.get('under') or 'nothing'} is at that point)")
     reply = {"ok": True, "hovered": True, "verified": False,
@@ -1536,7 +1567,7 @@ def click(text: str | None = None, selector: str | None = None,
         else ("", "")
     if at is not None:
         if text or selector:
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  "tab click: --at is a POINT — give that or a TEXT/--selector, "
                  "not both")
         _at_point(at, "tab click")     # the POINT first: no browser needed
@@ -1548,12 +1579,12 @@ def click(text: str | None = None, selector: str | None = None,
         element = _pick(data, needle, css, index, row=row,
                            tab_row=tab_row)
         if not element.get("in_viewport"):
-            fail("no-viewport-target",
+            fail(ERR_NO_VIEWPORT_TARGET,
                  f"{_describe(element)} is at page {element.get('box')}, "
                  "outside the viewport — scroll it into view first: "
                  f"`tab scroll {needle or '--selector ' + css!r}`")
         if not element.get("hit"):
-            fail("occluded",
+            fail(ERR_OCCLUDED,
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
                  f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
@@ -1568,7 +1599,7 @@ def click(text: str | None = None, selector: str | None = None,
             # Runtime.evaluate, and "[7]" is not a point: refuse rather
             # than raise ValueError out of the verb (both review lanes
             # found the unpack behind the `_ints` guard)
-            fail("no-viewport-target",
+            fail(ERR_NO_VIEWPORT_TARGET,
                  f"{_describe(element)} reports no usable point "
                  f"({point!r}) — the page owns this value")
         x, y = point
@@ -1617,7 +1648,7 @@ def hover(text: str | None = None, selector: str | None = None,
     """
     if at is not None:
         if text or selector:
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  "tab hover: --at is a POINT — give that or a TEXT/--selector, "
                  "not both")
         _at_point(at, "tab hover")     # the POINT first: no browser needed
@@ -1630,12 +1661,12 @@ def hover(text: str | None = None, selector: str | None = None,
         element = _pick(data, needle, css, index, row=row,
                            tab_row=tab_row)
         if not element.get("in_viewport"):
-            fail("no-viewport-target",
+            fail(ERR_NO_VIEWPORT_TARGET,
                  f"{_describe(element)} is at page {element.get('box')}, "
                  "outside the viewport — scroll it into view first: "
                  f"`tab scroll {needle or '--selector ' + css!r}`")
         if not element.get("hit"):
-            fail("occluded",
+            fail(ERR_OCCLUDED,
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
                  f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
@@ -1646,7 +1677,7 @@ def hover(text: str | None = None, selector: str | None = None,
             # Runtime.evaluate, and "[7]" is not a point: refuse rather
             # than raise ValueError out of the verb (both review lanes
             # found the unpack behind the `_ints` guard)
-            fail("no-viewport-target",
+            fail(ERR_NO_VIEWPORT_TARGET,
                  f"{_describe(element)} reports no usable point "
                  f"({point!r}) — the page owns this value")
         x, y = point
@@ -1658,7 +1689,7 @@ def hover(text: str | None = None, selector: str | None = None,
             .replace("__X__", str(x)).replace("__Y__", str(y)))
     probe = probe if isinstance(probe, dict) else {}
     if not (probe.get("hovered") and probe.get("chain")):
-        fail("hover-not-verified",
+        fail(ERR_HOVER_NOT_VERIFIED,
              f"{_describe(element)} at viewport {[x, y]} does not match "
              "`:hover` after the pointer moved there "
              f"({probe.get('under') or 'nothing'} is at that point) — the "
@@ -1686,11 +1717,11 @@ def _checkable(probe: dict, element: dict) -> None:
         kind = str(probe.get("tag") or element.get("tag") or "element")
         type_ = str(probe.get("type") or "")
         label = f"{kind}[{type_}]" if type_ else kind
-        fail("not-checkable",
+        fail(ERR_NOT_CHECKABLE,
              f"{_describe(element)} is {label} — `tab check` drives a "
              "checkbox or a radio button")
     if probe.get("disabled"):
-        fail("not-checkable",
+        fail(ERR_NOT_CHECKABLE,
              f"{_describe(element)} is disabled — a user cannot change it, "
              "and neither will this")
 
@@ -1722,12 +1753,12 @@ def check(text: str | None = None, selector: str | None = None,
                     "tab": f"id:{tab_row['id']}",
                     "browser": tabs._brief(row)}       # noqa: SLF001
         if not element.get("in_viewport"):
-            fail("no-viewport-target",
+            fail(ERR_NO_VIEWPORT_TARGET,
                  f"{_describe(element)} is at page {element.get('box')}, "
                  "outside the viewport — scroll it into view first: "
                  f"`tab scroll {needle or '--selector ' + css!r}`")
         if not element.get("hit"):
-            fail("occluded",
+            fail(ERR_OCCLUDED,
                  f"{_describe(element)} is at viewport {element.get('point')} "
                  f"but that point reaches "
                  f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
@@ -1738,7 +1769,7 @@ def check(text: str | None = None, selector: str | None = None,
             # Runtime.evaluate, and "[7]" is not a point: refuse rather
             # than raise ValueError out of the verb (both review lanes
             # found the unpack behind the `_ints` guard)
-            fail("no-viewport-target",
+            fail(ERR_NO_VIEWPORT_TARGET,
                  f"{_describe(element)} reports no usable point "
                  f"({point!r}) — the page owns this value")
         x, y = point
@@ -1752,7 +1783,7 @@ def check(text: str | None = None, selector: str | None = None,
             timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,
             accept=lambda state: bool(state.get("checked")) == want)
     if bool(after.get("checked")) != want:
-        fail("check-not-verified",
+        fail(ERR_CHECK_NOT_VERIFIED,
              f"{_describe(element)} reports checked={after.get('checked')} "
              f"after the click at viewport {[x, y]} — the page may have "
              "re-set it, or the control is not the one that reacted")
@@ -1789,7 +1820,7 @@ def select(text: str | None = None, selector: str | None = None,
     needle, css = _query_args(text, selector, "tab select")
     wanted = str(value or "")
     if not wanted:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab select: --value is required — the option's value, or its "
              "exact label")
     row, tab_row = _resolve(tab, browser, for_write=True)
@@ -1800,15 +1831,15 @@ def select(text: str | None = None, selector: str | None = None,
         probe = _select_probe(session, needle, css, index, wanted)
         if not probe.get("is_select"):
             kind = str(probe.get("tag") or element.get("tag") or "?")
-            fail("not-a-select",
+            fail(ERR_NOT_A_SELECT,
                  f"{_describe(element)} is a {kind}, not a <select> — this "
                  "verb picks one option, and only a <select> has options")
         if probe.get("disabled"):
-            fail("not-a-select",
+            fail(ERR_NOT_A_SELECT,
                  f"{_describe(element)} is disabled — a user cannot choose in "
                  "it, and neither will this")
         if probe.get("multiple"):
-            fail("not-a-select",
+            fail(ERR_NOT_A_SELECT,
                  f"{_describe(element)} is a multiple select — it holds a "
                  "SET of options, and this verb sets one (use `tab js`)")
         matched = as_int(probe.get("matched"))
@@ -1816,13 +1847,13 @@ def select(text: str | None = None, selector: str | None = None,
             names = [foreign(name, 30)
                      for name in as_list(probe.get("labels"))[:12]]
             labels = ", ".join(names)
-            fail("no-match",
+            fail(ERR_NO_MATCH,
                  f"no <option> in {_describe(element)} has value or label "
                  f"{wanted!r} (have: {labels or 'none'})")
         if matched > 1:
             candidates = ", ".join(foreign(name, 30) for name in
                                    as_list(probe.get("candidates"))[:5])
-            fail("ambiguous-option",
+            fail(ERR_AMBIGUOUS_OPTION,
                  f"{matched} options in {_describe(element)} match "
                  f"{wanted!r}: {candidates} — their VALUES are what tell them "
                  "apart")
@@ -1842,13 +1873,13 @@ def select(text: str | None = None, selector: str | None = None,
         node_id = _node_of(session,
                            _match_args(ELEMENT_EXPR, needle, css, index))
         if not node_id:
-            fail("no-match",
+            fail(ERR_NO_MATCH,
                  f"{_describe(element)} left the document before the choice "
                  "could be made")
         try:
             session.call("DOM.focus", {"nodeId": node_id})
         except ControlError as e:
-            fail("select-not-verified",
+            fail(ERR_SELECT_NOT_VERIFIED,
                  f"{_describe(element)} cannot take the DOM focus, so the "
                  f"arrow keys would go elsewhere: {e.message}")
         key = KEYS["arrowdown" if delta > 0 else "arrowup"]
@@ -1868,7 +1899,7 @@ def select(text: str | None = None, selector: str | None = None,
             accept=lambda got: as_int(got.get("selected"), -1) == target)
     if as_int(after.get("selected"), -1) != target \
             or str(after.get("value")) != str(probe.get("target_value")):
-        fail("select-not-verified",
+        fail(ERR_SELECT_NOT_VERIFIED,
              f"{_describe(element)} reports "
              f"value={after.get('value')!r} at index "
              f"{after.get('selected')!r} after {abs(delta)} arrow key(s) — "
@@ -1928,7 +1959,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
     """
     name = mode_of(mode) or "state"
     if name not in ("state", "accept", "dismiss"):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab dialog: MODE is state, accept or dismiss, got {mode!r}")
     if name == "state":
         row, tab_row = _resolve(tab, browser, for_write=False)
@@ -1976,7 +2007,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
             session.call("Page.handleJavaScriptDialog", params)
         except ControlError as e:
             if _no_dialog(e):
-                fail("no-dialog", NO_DIALOG_NOTE)
+                fail(ERR_NO_DIALOG, NO_DIALOG_NOTE)
             raise
         def probe() -> bool:
             try:
@@ -1990,7 +2021,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
         _attempts, answered = poll(probe, timeout=DIALOG_CLEAR_S,
                                    interval=POLL_NORMAL)
     if not answered:
-        fail("dialog-not-verified",
+        fail(ERR_DIALOG_NOT_VERIFIED,
              f"the {name} was sent, but the tab still does not answer "
              f"within {DIALOG_CLEAR_S:g}s — a page can open another dialog "
              "immediately (see `tab dialog state`), or a script is spinning")
@@ -2027,11 +2058,11 @@ def _pixels(css: int, dpr: float) -> int:
     try:
         value = int(round(css * dpr))
     except (OverflowError, ValueError) as e:
-        fail("screenshot-not-verified",
+        fail(ERR_SCREENSHOT_NOT_VERIFIED,
              f"the page reports {css} px at devicePixelRatio {dpr:g}, which is "
              f"not a size ({e}) — nothing was written")
     if not 0 < value <= SHOT_MAX_PX:
-        fail("screenshot-not-verified",
+        fail(ERR_SCREENSHOT_NOT_VERIFIED,
              f"the page reports {css} px at devicePixelRatio {dpr:g}, i.e. "
              f"{value} device pixels — no screenshot of it exists — nothing "
              "was written")
@@ -2045,19 +2076,19 @@ def _shot_target(path: str) -> str:
         # the help and this function's own docstring say ABSOLUTE; a relative
         # path used to be silently resolved against the CLI's cwd (a review
         # flagged the mismatch with `tab upload`, which refuses one)
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab screenshot: {path!r} must be an absolute path — this tool "
              "writes where it was told, not where it happens to be run from")
     target = os.path.abspath(expanded)
     if os.path.isdir(target):
-        fail("bad-args", f"tab screenshot: {target} is a directory")
+        fail(ERR_BAD_ARGS, f"tab screenshot: {target} is a directory")
     if not target.lower().endswith(".png"):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab screenshot: {path!r} must end in .png — the data IS a PNG, "
              "and a name that says otherwise is a lie about the file")
     parent = os.path.dirname(target)
     if not os.path.isdir(parent):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab screenshot: {parent} is not a directory — create it first")
     return target
 
@@ -2075,11 +2106,11 @@ def _write_shot(target: str, data: bytes, force: bool) -> None:
             handle = os.open(target,
                              os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         except FileExistsError:
-            fail("file-exists",
+            fail(ERR_FILE_EXISTS,
                  f"tab screenshot: {target} already exists — pass --force to "
                  "replace it")
         except OSError as e:
-            fail("write-failed", f"tab screenshot: {target}: {e}")
+            fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
         try:
             with os.fdopen(handle, "wb") as out:
                 out.write(data)
@@ -2090,7 +2121,7 @@ def _write_shot(target: str, data: bytes, force: bool) -> None:
             # written (a review flagged it)
             with contextlib.suppress(OSError):
                 os.remove(target)
-            fail("write-failed", f"tab screenshot: {target}: {e}")
+            fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
         return
     temp = f"{target}.bc-{os.getpid()}.part"
     try:
@@ -2101,11 +2132,11 @@ def _write_shot(target: str, data: bytes, force: bool) -> None:
         handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                          | os.O_NOFOLLOW, 0o644)
     except FileExistsError:
-        fail("write-failed",
+        fail(ERR_WRITE_FAILED,
              f"tab screenshot: a leftover temporary file is in the way "
              f"({temp}) — remove it and try again")
     except OSError as e:
-        fail("write-failed", f"tab screenshot: {target}: {e}")
+        fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
     try:
         with os.fdopen(handle, "wb") as out:
             out.write(data)
@@ -2113,7 +2144,7 @@ def _write_shot(target: str, data: bytes, force: bool) -> None:
     except OSError as e:
         with contextlib.suppress(OSError):
             os.remove(temp)
-        fail("write-failed", f"tab screenshot: {target}: {e}")
+        fail(ERR_WRITE_FAILED, f"tab screenshot: {target}: {e}")
 
 
 def screenshot(path: str, full: bool = False, force: bool = False,
@@ -2135,7 +2166,7 @@ def screenshot(path: str, full: bool = False, force: bool = False,
     with _session(row, tab_row) as session:
         metrics = session.evaluate(SHOT_METRICS)
         if not isinstance(metrics, dict):
-            fail("cdp-error", "the page did not report its geometry")
+            fail(ERR_CDP_ERROR, "the page did not report its geometry")
         shot = session.call("Page.captureScreenshot",
                             {"format": "png",
                              "captureBeyondViewport": bool(full)})
@@ -2143,11 +2174,11 @@ def screenshot(path: str, full: bool = False, force: bool = False,
         try:
             data = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error) as e:
-            fail("cdp-error",
+            fail(ERR_CDP_ERROR,
                  f"Page.captureScreenshot: the data is not base64 ({e})")
     dpr = as_float(metrics.get("dpr"), 1.0)
     if not math.isfinite(dpr) or dpr <= 0:
-        fail("screenshot-not-verified",
+        fail(ERR_SCREENSHOT_NOT_VERIFIED,
              f"the page reports devicePixelRatio {metrics.get('dpr')!r}, which "
              "no size can be checked against — nothing was written")
     want = ([as_int(metrics.get("sw")), as_int(metrics.get("sh"))] if full
@@ -2155,11 +2186,11 @@ def screenshot(path: str, full: bool = False, force: bool = False,
     expected = [_pixels(css, dpr) for css in want]
     size = _png_size(data)
     if not size:
-        fail("screenshot-not-verified",
+        fail(ERR_SCREENSHOT_NOT_VERIFIED,
              "the bytes are not a PNG (no signature, no IHDR) — nothing was "
              "written")
     if size != expected:
-        fail("screenshot-not-verified",
+        fail(ERR_SCREENSHOT_NOT_VERIFIED,
              f"the PNG is {size[0]}x{size[1]} but this page says the "
              f"{'document' if full else 'viewport'} is {want[0]}x{want[1]} CSS "
              f"px at devicePixelRatio {dpr:g} ({expected[0]}x{expected[1]} "
@@ -2199,16 +2230,16 @@ def scroll(by: int | None = None, edge: str | None = None,
              (("--by", by), ("--edge", edge),
               ("element", text or selector)) if value is not None]
     if len(modes) != 1:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              "tab scroll: name ONE of --by PIXELS, --edge top|bottom, or an "
              "element (TEXT / --selector CSS)")
     if at is not None and modes[0] != "--by":
-        fail("bad-args", "tab scroll: --at goes with --by")
+        fail(ERR_BAD_ARGS, "tab scroll: --at goes with --by")
     # the arguments are checked BEFORE a browser is asked about anything
     if modes[0] == "--by" and not as_int(by):
-        fail("bad-args", "tab scroll: --by needs a non-zero PIXELS")
+        fail(ERR_BAD_ARGS, "tab scroll: --by needs a non-zero PIXELS")
     if edge is not None and str(edge) not in ("top", "bottom"):
-        fail("bad-args", f"tab scroll: --edge is top|bottom, got {edge!r}")
+        fail(ERR_BAD_ARGS, f"tab scroll: --edge is top|bottom, got {edge!r}")
     if at is not None:
         _at_point(at)                      # syntax now; the RANGE needs the
     row, tab_row = _resolve(tab, browser, for_write=True)   # real viewport
@@ -2232,7 +2263,7 @@ def _at_point(at: str, verb: str = "tab scroll") -> tuple[int, int]:
     """
     parts = str(at).replace(" ", "").split(",")
     if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
-        fail("bad-args", f"{verb}: --at needs X,Y numbers, got {at!r}")
+        fail(ERR_BAD_ARGS, f"{verb}: --at needs X,Y numbers, got {at!r}")
     return as_int(parts[0], -1), as_int(parts[1], -1)
 
 
@@ -2249,7 +2280,7 @@ def _point(at: str | None, viewport: list[int],
         return viewport[0] // 2, viewport[1] // 2
     x, y = _at_point(at, verb)
     if not (0 <= x < viewport[0] and 0 <= y < viewport[1]):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{verb}: --at {at!r} is outside the viewport {viewport}")
     return x, y
 
@@ -2300,7 +2331,7 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
                        or (abs(as_int(before.get("y"))
                                - as_int(before.get("max"))) <= 2 and delta > 0))
             if not at_edge:
-                fail("scroll-not-verified",
+                fail(ERR_SCROLL_NOT_VERIFIED,
                      f"nothing moved: the document is still at y="
                      f"{as_int(after.get('y'))} (max {as_int(after.get('max'))}) "
                      f"and no scroller under ({x}, {y}) moved — the wheel may "
@@ -2323,7 +2354,7 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
             after = moved
         want = 0 if direction < 0 else as_int(after.get("max"))
         if abs(as_int(after.get("y")) - want) > 2:
-            fail("scroll-not-verified",
+            fail(ERR_SCROLL_NOT_VERIFIED,
                  f"the document stopped at y={as_int(after.get('y'))} of "
                  f"max {as_int(after.get('max'))} after {steps} wheel step(s) — "
                  "the bottom/top was not reached (a sticky scroller, or a "
@@ -2347,7 +2378,7 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
     needle, css = _query_args(text, selector, "tab scroll")
     node_id = _node_of(session, _match_args(ELEMENT_EXPR, needle, css, index))
     if not node_id:
-        fail("no-match",
+        fail(ERR_NO_MATCH,
              f"no rendered element matches {needle or css!r}"
              + (f" (--index {index} is past the end)" if index else "")
              + _frames_note(row, tab_row))
@@ -2364,7 +2395,7 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
     rows = _well_formed(found.get("matches") or [], ("tag", "box"))
     inside = [row for row in rows if row.get("in_viewport")]
     if not inside:
-        fail("scroll-not-verified",
+        fail(ERR_SCROLL_NOT_VERIFIED,
              f"{needle or css!r} is still outside the viewport after "
              "DOM.scrollIntoViewIfNeeded — the element may be inside a "
              "container that cannot scroll it into view")
@@ -2390,9 +2421,9 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
                                 .replace("__CAP__", str(limit)))
         frames_here = _frame_summary(row, tab_row, session)
     if not isinstance(data, dict):
-        fail("cdp-error", "tab text: the page did not answer with an object")
+        fail(ERR_CDP_ERROR, "tab text: the page did not answer with an object")
     if not data.get("found"):
-        fail("no-match", f"tab text: no element matches {css!r}"
+        fail(ERR_NO_MATCH, f"tab text: no element matches {css!r}"
              + _frames_note(row, tab_row))
     reply = _reply(row, tab_row, data)
     reply.update({"ok": True, "selector": data.get("selector"),
@@ -2425,7 +2456,7 @@ def focus(text: str | None = None, selector: str | None = None,
         node_id = _node_of(session,
                            _match_args(ELEMENT_EXPR, needle, css, index))
         if not node_id:
-            fail("no-match",
+            fail(ERR_NO_MATCH,
                  f"{_describe(element)} left the document before the focus "
                  "could be set")
         try:
@@ -2434,12 +2465,12 @@ def focus(text: str | None = None, selector: str | None = None,
             # the protocol says WHY (a disabled control, an element that
             # cannot be focused): that is the verb's own verdict, not a
             # generic CDP failure
-            fail("focus-not-verified",
+            fail(ERR_FOCUS_NOT_VERIFIED,
                  f"{_describe(element)} cannot take the DOM focus: {e.message}")
         probe = session.evaluate(_match_args(FOCUS_PROBE, needle, css, index))
     probe = probe if isinstance(probe, dict) else {}
     if not probe.get("focused"):
-        fail("focus-not-verified",
+        fail(ERR_FOCUS_NOT_VERIFIED,
              f"{_describe(element)} did not take the DOM focus — "
              f"{probe.get('active') or 'nothing'} has it instead (a disabled "
              "control, or an element that cannot be focused)")
@@ -2459,7 +2490,7 @@ def press(key: str, tab: str = "", browser: str = "") -> dict:
     """
     name = str(key or "").strip().lower()
     if name not in KEYS:
-        fail("bad-args", f"tab press: unknown key {key!r} "
+        fail(ERR_BAD_ARGS, f"tab press: unknown key {key!r} "
                          f"(have: {', '.join(sorted(KEYS))})")
     key_name, code, vk, text = KEYS[name]
     row, tab_row = _resolve(tab, browser, for_write=True)
@@ -2492,11 +2523,11 @@ def _preflight(session: cdp.Session, text: str, verb: str) -> dict:
     """
     before = _text_target(session)
     if not before.get("focused"):
-        fail("no-focus",
+        fail(ERR_NO_FOCUS,
              f"{verb}: nothing is focused, so there is nowhere to put the text "
              "— run `tab focus TEXT` first")
     if not before.get("editable"):
-        fail("no-focus",
+        fail(ERR_NO_FOCUS,
              f"{verb}: the focus is on {before.get('active')!r}, which takes "
              "no text — run `tab focus TEXT` first")
     if _is_secret(before):
@@ -2535,7 +2566,7 @@ def insert(text: str, tab: str = "", browser: str = "") -> dict:
     """
     value = str(text or "")
     if not value:
-        fail("bad-args", "tab insert: TEXT is required")
+        fail(ERR_BAD_ARGS, "tab insert: TEXT is required")
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         before = _preflight(session, value, "tab insert")
@@ -2556,7 +2587,7 @@ def type_text(text: str, tab: str = "", browser: str = "") -> dict:
     """
     value = str(text or "")
     if not value:
-        fail("bad-args", "tab type: TEXT is required")
+        fail(ERR_BAD_ARGS, "tab type: TEXT is required")
     row, tab_row = _resolve(tab, browser, for_write=True)
     with _session(row, tab_row) as session:
         before = _preflight(session, value, "tab type")
@@ -2601,10 +2632,10 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     """
     file_path = str(path or "")
     if not os.path.isabs(file_path):
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"tab upload: FILE must be an absolute path, got {file_path!r}")
     if not os.path.isfile(file_path):
-        fail("no-file", f"tab upload: no such file: {file_path}")
+        fail(ERR_NO_FILE, f"tab upload: no such file: {file_path}")
     size = os.path.getsize(file_path)
     css = str(selector or "").strip() or UPLOAD_DEFAULT_SELECTOR
     row, tab_row = _resolve(tab, browser, for_write=True)
@@ -2617,7 +2648,7 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
         handle = session.handle(_match_args(ELEMENT_EXPR, "", css, index,
                                             visible=False))
         if not handle:
-            fail("no-match",
+            fail(ERR_NO_MATCH,
                  f"tab upload: {element.get('tag')} left the document before "
                  "the file could be set")
         session.call("DOM.setFileInputFiles",
@@ -2631,7 +2662,7 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     name = os.path.basename(file_path)
     if len(files) != 1 or first.get("name") != name \
             or as_int(first.get("size"), -1) != size:
-        fail("upload-not-verified",
+        fail(ERR_UPLOAD_NOT_VERIFIED,
              f"tab upload: the page holds {files!r}, not one file named "
              f"{name!r} of {size} bytes")
     return {"ok": True, "file": file_path,
@@ -2703,15 +2734,15 @@ def media(mode: str, index: int | None = None, tab: str = "",
     """
     name = mode_of(mode)
     if name not in ("state", "play", "pause"):
-        fail("bad-args", f"tab media: MODE is state|play|pause, got {mode!r}")
+        fail(ERR_BAD_ARGS, f"tab media: MODE is state|play|pause, got {mode!r}")
     if index is not None and name == "state":
-        fail("bad-args", "tab media state: --index is for play/pause")
+        fail(ERR_BAD_ARGS, "tab media state: --index is for play/pause")
     row, tab_row = _resolve(tab, browser, for_write=(name != "state"))
     with _session(row, tab_row) as session:
         before = session.evaluate(MEDIA_STATE_EXPR)
         before = before if isinstance(before, dict) else {}
         if not before.get("found"):
-            fail("no-media",
+            fail(ERR_NO_MEDIA,
                  f"tab media: the page has no video or audio element "
                  f"({as_int(before.get('count'))} found)")
         if name == "state":
@@ -2724,14 +2755,14 @@ def media(mode: str, index: int | None = None, tab: str = "",
                      str(-1 if index is None else as_int(index))))
         after = _poll_media(session, name, before)
     if not after.get("found"):
-        fail("no-media", f"tab media {name}: the element left the page")
+        fail(ERR_NO_MEDIA, f"tab media {name}: the element left the page")
     verified, why = _playback_verdict(name, before, after)
     if not verified:
         if after.get("error"):
-            fail("media-blocked",
+            fail(ERR_MEDIA_BLOCKED,
                  f"tab media {name}: the page refused: {after['error']}" + (
                      " — if that is the autoplay policy, a real gesture is "
                      "needed first (`tab click` the player)"
                      if "interact" in str(after.get("error")) else ""))
-        fail("media-not-verified", f"tab media {name}: {why}")
+        fail(ERR_MEDIA_NOT_VERIFIED, f"tab media {name}: {why}")
     return _media_reply(row, tab_row, after, name, before)

@@ -15,6 +15,7 @@ import http.server
 import io
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -35,6 +36,7 @@ from browser_control.lib import (  # noqa: E402
     capabilities,
     cdp,
     dom,
+    errors,
 )
 from browser_control.lib import (
     profile as profile_lib,
@@ -2854,6 +2856,34 @@ def t_x_plugin_offline() -> None:
             os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
 
 
+def t_error_codes_are_registered() -> None:
+    """Every refusal code is registered, and every constant is a code.
+
+    A code is the contract a caller branches on; a typo at a raise site used
+    to ship as a string nobody could branch on. This reads the source: a
+    literal first argument must be in `errors.CODES`, and every `ERR_` name
+    used must resolve to a value the registry holds. The registry and the
+    constants are two spellings of one vocabulary, so they must agree.
+    """
+    root = Path(__file__).resolve().parent.parent / "browser_control"
+    literal = re.compile(r'\b(?:fail|ControlError)\(\s*"([^"]+)"')
+    named = re.compile(r"\bERR_[A-Z0-9_]+\b")
+    for path in sorted(root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for code in literal.findall(source):
+            assert code in errors.CODES, \
+                f"{path}: {code!r} is not registered"
+        for name in sorted(set(named.findall(source))):
+            value = getattr(errors, name, None)
+            assert value is not None, f"{path}: {name} is not defined"
+            assert value in errors.CODES, \
+                f"{path}: {name} is not registered"
+    registered = {value for name, value in vars(errors).items()
+                  if name.startswith("ERR_")}
+    assert registered == set(errors.CODES), \
+        sorted(registered ^ set(errors.CODES))
+
+
 def main() -> int:
     global SUITE_LOG
     # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
@@ -2903,6 +2933,7 @@ def main() -> int:
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("frames bind to their tab", t_frames_bind_to_their_tab),
         ("every verb is classified", t_capability_surface),
+        ("every refusal code is registered", t_error_codes_are_registered),
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),
         ("media argv", t_cli_media_grammar),

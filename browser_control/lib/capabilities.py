@@ -32,7 +32,10 @@ from __future__ import annotations
 
 import os
 
-from browser_control.lib.errors import fail  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ERR_BAD_ARGS,
+    fail,
+)
 
 CLASSES = ("egress", "file", "code", "read", "write")
 
@@ -181,7 +184,7 @@ def _classes(text: str, what: str) -> tuple[str, ...]:
         if part in EVERY:
             return tuple(CLASSES)
         if part not in CLASSES:
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  f"{what}: {part!r} is not a capability class (have: "
                  + ", ".join(CLASSES) + ", or * for all)")
         if part not in out:
@@ -202,7 +205,7 @@ def _classes_of(value: str, what: str) -> tuple[str, ...]:
     if not text:
         return ()
     if not [part for part in text.replace(" ", "").split(",") if part]:
-        fail("bad-args",
+        fail(ERR_BAD_ARGS,
              f"{what}: names no class — name them, use * for every class, or "
              "`--deny *` to allow nothing")
     return _classes(text, what)
@@ -231,7 +234,7 @@ def policy(allow: str | None = None, deny: str | None = None) -> dict:
                                (env_allow, ALLOW_ENV, "--deny *"),
                                (env_deny, DENY_ENV, "--deny *")):
         if value is not None and not str(value).strip():
-            fail("bad-args",
+            fail(ERR_BAD_ARGS,
                  f"{what}: names no class — name them, use * for every class, "
                  f"or `{spell}` to allow nothing (unset it for no policy)")
     env_allow = env_allow or ""

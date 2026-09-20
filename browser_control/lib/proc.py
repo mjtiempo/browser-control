@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ERR_LAUNCH_FAILED,
     ControlError,
 )
 from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
@@ -214,7 +215,7 @@ def spawn(argv: list[str]) -> int:
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
     except OSError as e:
-        raise ControlError("launch-failed",
+        raise ControlError(ERR_LAUNCH_FAILED,
                            f"cannot start {argv[0]}: {e}") from e
     return proc.pid
 
