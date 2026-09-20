@@ -65,7 +65,11 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                      browser is on one, whether it is attached
   profile seed --from DIR [--force] [--dry]
                      copy a source profile's LOGINS into a managed one (no
-                     caches, no lock files, read back; --dry counts first)
+                     caches, no lock files, read back; --dry counts first);
+                     DIR is one Chrome profile (.../Default, Profile 1) or a
+                     whole user-data directory — either lands where Chrome
+                     reads it (a profile directory under the instance's
+                     Default/)
   profile reset [--force]
                      wipe a managed profile, logins included
   tab [URL...]       open one tab per URL (about:blank when none)

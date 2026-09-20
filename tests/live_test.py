@@ -1827,7 +1827,9 @@ def c_profile_verbs() -> str:
     try:
         os.makedirs(Path(source, "Cache"))
         Path(source, "Cookies").write_text("cookie-bytes" * 8, encoding="utf-8")
-        Path(source, "Preferences").write_text("{}", encoding="utf-8")
+        Path(source, "Preferences").write_text(
+            json.dumps({"profile": {"name": "battery-seeded"}}),
+            encoding="utf-8")
         Path(source, "SingletonLock").write_text("lock", encoding="utf-8")
         Path(source, "Cache", "data").write_text("junk" * 64,
                                                   encoding="utf-8")
@@ -1838,18 +1840,20 @@ def c_profile_verbs() -> str:
                      if row.get("live", {}).get("pid") == STATE["pid"]), None)
         assert ours is not None, listed
         assert ours["managed"] is True and ours["files"] > 0, ours
-        # seed: the two login files land, the lock and the cache do not
+        # seed: the two login files land in <instance>/Default — the
+        # subdirectory Chrome actually reads — and the lock and the cache do
+        # not travel at all
         reply = ok_json("profile", "seed", "--from", source,
                         "--profile", target)
         assert reply["copied_files"] == 2, reply
         assert reply["verified"] is True, reply
+        assert reply["profile_dir"] == os.path.join(target, "Default"), reply
         assert {"Cache", "SingletonLock"} <= set(reply["skipped"]), reply
-        # our OWN bookkeeping does not count as profile content (the lock lives
-        # inside the profile, and `seed` does not overwrite it)
-        bookkeeping = (".browser-control.lock", ".pid")
-        landed = sorted(name for name in os.listdir(target)
-                        if name not in bookkeeping)
+        seeded_dir = os.path.join(target, "Default")
+        landed = sorted(os.listdir(seeded_dir))
         assert landed == ["Cookies", "Preferences"], landed
+        assert not os.path.exists(os.path.join(target, "Cookies")), \
+            "a profile file landed in the instance root, where Chrome ignores it"
         # an existing profile is only overwritten on purpose
         refuses("profile-exists", "profile", "seed", "--from", source,
                 "--profile", target)
@@ -1857,9 +1861,7 @@ def c_profile_verbs() -> str:
                           "--dry", "--profile", target)
         assert preview["dry"] is True and preview["verified"] is False, preview
         assert preview["copied_files"] == 2, preview
-        assert sorted(name for name in os.listdir(target)
-                      if name not in bookkeeping) == landed, \
-            "--dry wrote something"
+        assert sorted(os.listdir(seeded_dir)) == landed, "--dry wrote something"
         # a running profile is never seeded or wiped
         refuses("profile-live", "profile", "reset", "--profile",
                 str(ours["path"]))
@@ -1875,6 +1877,23 @@ def c_profile_verbs() -> str:
         live = ok_json("profile", "seed", "--from", str(ours["path"]),
                        "--force", "--profile", target)
         assert "in use" in str(live.get("warning", "")), live
+
+        # Chrome READS a seeded profile directory: launch a browser on one and
+        # require the seeded Preferences to survive as the profile's own. The
+        # old root-level placement was silently ignored, so this is the check
+        # the battery was missing (found in use: a "seeded" browser showed the
+        # x.com login wall while the cookies sat at the instance root).
+        read_target = os.path.join(ROOT, "instance-read")
+        read_seed = ok_json("profile", "seed", "--from", source,
+                            "--profile", read_target)
+        assert read_seed["profile_dir"] == os.path.join(read_target,
+                                                        "Default"), read_seed
+        ok_json("open", "--profile", read_target, "about:blank")
+        ok_json("close", "--force", "--profile", read_target)
+        prefs = json.loads(Path(read_target, "Default", "Preferences").read_text(
+            encoding="utf-8"))
+        assert prefs.get("profile", {}).get("name") == "battery-seeded", prefs
+        ok_json("profile", "reset", "--force", "--profile", read_target)
         assert live["verified"] is True, live
         # somebody's real profile is not one of ours to touch
         outside = fixture_profile()

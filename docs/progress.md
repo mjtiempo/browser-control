@@ -947,6 +947,29 @@ harness cannot exercise at all —
   and the CLI exposes no launcher flag for it, so the arithmetic is only
   exercised at dpr 1 (the PNG's own IHDR is still what proves every shot).
 
+### 5.26 `profile seed` lands where Chrome reads it — done
+
+Found in use, not by a lane: seeding a real login (`profile seed --from
+~/.config/google-chrome/Default`, the documented source) put the cookies in the
+managed INSTANCE root, while `open` launches Chrome with `--user-data-dir=`
+that instance and Chrome reads its profile from the `Default/` subdirectory. The
+seeded login was real (`auth_token`, `ct0`, `twid` all present) and completely
+ignored — x.com showed the login wall on a "seeded" browser.
+
+The layout rule is now explicit (`profile._seed_destination`): a source that is
+a USER-DATA directory (`Default/` child, or `Local State` beside it) copies into
+the instance root, bringing `Default/` with it; a source that is a single
+PROFILE directory (`~/.config/google-chrome/Default`, `Profile 1`, a snap or
+Flatpak path) copies into `<instance>/Default/`, where Chrome reads it. The
+reply names both paths (`profile` the instance, `profile_dir` the destination),
+and the same-tree refusal compares against the real destination.
+
+The gap in the evidence was the real lesson: the battery seeded a fixture and
+asserted two files landed in the target, but never LAUNCHED a browser on the
+seeded profile. It now does: after seeding a profile directory, it opens the
+instance, closes it, and requires the seeded `profile.name` to still be there in
+`Default/Preferences` — the file Chrome actually used — then wipes it.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs

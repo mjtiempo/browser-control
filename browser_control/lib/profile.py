@@ -328,6 +328,29 @@ def info(profile: str = "") -> dict:
                      "name, which is the `name` above")}
 
 
+def _seed_destination(src: str, target: str) -> str:
+    """Where a source profile's files go inside the managed INSTANCE.
+
+    Chrome's `--user-data-dir` (the instance, the unit `--profile DIR` names)
+    holds a `Default/` subdirectory, and THAT is the profile Chrome actually
+    reads. Two source shapes must therefore land in two different places:
+
+    * a whole USER-DATA directory (`Default/` is a child, or `Local State`
+      sits beside it): its contents land in the instance root and bring
+      `Default/` with them;
+    * a single PROFILE directory (`~/.config/google-chrome/Default`,
+      `Profile 1`, a snap or Flatpak path): its contents land in
+      `<instance>/Default/`. Written to the instance root they were ignored
+      by Chrome — cookies and all — so a "seeded" browser still showed the
+      login wall (found in use: the documented `--from .../Default` produced
+      a profile Chrome never read).
+    """
+    if os.path.isdir(os.path.join(src, "Default")) \
+            or os.path.isfile(os.path.join(src, "Local State")):
+        return target
+    return os.path.join(target, "Default")
+
+
 def seed(source: str = "", profile: str = "", browser: str = "",
          force: bool = False, dry: bool = False) -> dict:
     """`profile seed --from DIR [--profile DIR] [--force] [--dry]`.
@@ -335,25 +358,31 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     `--from` is REQUIRED and never guessed: which of your profiles to read is
     your decision, and the usual answers are
     `~/.config/google-chrome/Default` (or `Profile 1`), a snap path, or a
-    Flatpak one. The TARGET is a managed profile (scoped, or the default
-    instance for `--browser`), it must not be running, and an existing one must
-    be overwritten on purpose (`--force`) — `--dry` first reports what would
-    land, in bytes and files, without writing anything.
+    Flatpak one — or the whole user-data directory
+    (`~/.config/google-chrome`), which also works because it brings its own
+    `Default/` with it. A profile directory's contents are placed in the
+    instance's `Default/`, the subdirectory Chrome reads (see
+    `_seed_destination`). The TARGET is a managed profile (scoped, or the
+    default instance for `--browser`), it must not be running, and an
+    existing one must be overwritten on purpose (`--force`) — `--dry` first
+    reports what would land, in bytes and files, without writing anything.
     """
     if not source:
         fail("bad-args",
              "profile seed: --from DIR is required — the profile to copy FROM "
-             "(usually ~/.config/google-chrome/Default); this CLI will not "
-             "guess which of your profiles to read")
+             "(usually ~/.config/google-chrome/Default, or the whole "
+             "~/.config/google-chrome user-data directory); this CLI will "
+             "not guess which of your profiles to read")
     src = os.path.abspath(os.path.expanduser(str(source)))
     if not os.path.isdir(src):
         fail("bad-args", f"profile seed: {src} is not a directory")
     target = _target(profile, browser)
-    if src == target or src.startswith(target + os.sep) \
-            or target.startswith(src + os.sep):
+    dest = _seed_destination(src, target)
+    if src == dest or src.startswith(dest + os.sep) \
+            or dest.startswith(src + os.sep):
         fail("bad-args",
-             f"profile seed: the source and the target are the same tree "
-             f"({src})")
+             f"profile seed: the source and the destination are the same "
+             f"tree ({src} and {dest})")
     _refuse_live(target, "seeding")
     # the SOURCE may be running: that is a legitimate snapshot, so it is a
     # warning and not a refusal — Chrome flushes cookies to disk lazily, so what
@@ -384,7 +413,7 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                  f"{target} already holds a profile — `profile seed --force` "
                  "overwrites it (logins and all), or `profile reset --force` "
                  "clears it first; `--dry` reports what this call would copy")
-        facts = _copy(src, target, dry)
+        facts = _copy(src, dest, dry)
         if dry:
             held = False
         elif facts["unreadable"]:
@@ -395,12 +424,13 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                  "could not be read, so this copy is PARTIAL and nothing "
                  "was verified: " + "; ".join(facts["unreadable"][:3]))
         else:
-            absent = _missing(facts["entries"], src, target)
+            absent = _missing(facts["entries"], src, dest)
             if absent:
                 fail("seed-not-verified",
-                     f"{len(absent)} file(s) did not land in {target}: "
+                     f"{len(absent)} file(s) did not land in {dest}: "
                      + ", ".join(absent[:4]))
-    reply = {"ok": True, "from": src, "profile": target, "dry": bool(dry),
+    reply = {"ok": True, "from": src, "profile": target,
+             "profile_dir": dest, "dry": bool(dry),
              "copied_bytes": facts["bytes"], "copied_files": facts["files"],
              "dirs": facts["dirs"],
              "skipped": sorted(set(facts["skipped"])),

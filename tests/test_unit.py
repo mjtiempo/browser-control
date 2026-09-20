@@ -2438,6 +2438,46 @@ def t_profile_symlink_target_is_refused() -> None:
         _restore_root(keep_root)
 
 
+def t_seed_lands_where_chrome_reads() -> None:
+    """A profile dir seeds into <instance>/Default; a user-data dir into root.
+
+    Chrome reads `<user-data-dir>/Default`, so a profile directory written to
+    the instance ROOT was a profile the browser never read — cookies and all
+    (found in use: a "seeded" browser showed a login wall while the real
+    login sat one directory above the profile Chrome opened).
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        # a single PROFILE directory -> <instance>/Default
+        profile_src = os.path.join(root, "src-profile")
+        os.makedirs(profile_src)
+        Path(profile_src, "Cookies").write_text("cookie", encoding="utf-8")
+        Path(profile_src, "Preferences").write_text("{}", encoding="utf-8")
+        target = os.path.join(root, "instance-a")
+        reply = profile_lib.seed(source=profile_src, profile=target,
+                                 force=True)
+        assert reply["profile_dir"] == os.path.join(target, "Default"), reply
+        assert Path(target, "Default", "Cookies").read_text() == "cookie"
+        assert not os.path.exists(os.path.join(target, "Cookies")), \
+            "a profile file landed in the instance root, where Chrome ignores it"
+
+        # a whole USER-DATA directory -> the instance root (its Default/ travels)
+        data_src = os.path.join(root, "src-data")
+        os.makedirs(os.path.join(data_src, "Default"))
+        Path(data_src, "Local State").write_text("{}", encoding="utf-8")
+        Path(data_src, "Default", "Cookies").write_text("cookie2",
+                                                          encoding="utf-8")
+        target2 = os.path.join(root, "instance-b")
+        reply = profile_lib.seed(source=data_src, profile=target2, force=True)
+        assert reply["profile_dir"] == target2, reply
+        assert Path(target2, "Default", "Cookies").read_text() == "cookie2"
+        assert Path(target2, "Local State").exists()
+    finally:
+        _restore_root(keep_root)
+
+
 def t_seed_dry_writes_nothing() -> None:
     """`--dry` promises "without writing anything" — it creates no target."""
     root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
@@ -2604,11 +2644,12 @@ def t_audit_modes_caps_redirect_and_symlink() -> None:
         source = os.path.join(tmp, "source")
         target = os.path.join(tmp, "target")
         os.makedirs(source)
-        os.makedirs(target)
+        os.makedirs(os.path.join(target, "Default"))
         Path(source, "Cookies").write_text("login", encoding="utf-8")
         victim = os.path.join(tmp, "victim")
         Path(victim).write_text("keep", encoding="utf-8")
-        os.symlink(victim, os.path.join(target, "Cookies"))
+        # the destination a profile-dir source now lands in
+        os.symlink(victim, os.path.join(target, "Default", "Cookies"))
         keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         try:
@@ -2693,6 +2734,7 @@ def main() -> int:
         ("a symlinked profile target is refused",
          t_profile_symlink_target_is_refused),
         ("seed --dry writes nothing", t_seed_dry_writes_nothing),
+        ("seed lands where Chrome reads", t_seed_lands_where_chrome_reads),
         ("reset counts skipped content",
          t_reset_guard_counts_skipped_content),
         ("screenshot rules and symlinks", t_screenshot_rules_and_symlinks),
