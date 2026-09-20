@@ -323,6 +323,7 @@ def t_expressions_and_shot_rules() -> None:
     """
     placeholders = {"__MODE__": '"text"', "__NEEDLE__": '"x"',
                     "__SELECTOR__": '"#x"', "__INDEX__": "0",
+                    "__ACTION__": '"play"',
                     "__VISIBLE__": "true", "__CAP__": "1",
                     "__VALUE__": '"v"', "__X__": "1", "__Y__": "1",
                     "__EXPR__": "true", "__IDLE_MS__": "100",
@@ -943,6 +944,19 @@ def t_cli_dom_grammar() -> None:
                  ["tab", "wait", "--for", "load", "--timeout", "0"]):
         rc, _out, err = run_cli(argv)
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
+def t_fill_refuses_leftovers() -> None:
+    """`fill()` refuses an unknown name and a leftover placeholder.
+
+    A missed placeholder used to ship as a runtime `js-error` from the page;
+    the refusal is the point of the helper.
+    """
+    assert dom.fill("a __X__ b", x="1") == "a 1 b"
+    refusal(lambda: dom.fill("a __X__ b"), "bad-args")          # leftover
+    refusal(lambda: dom.fill("a __X__ b", y="1"), "bad-args")   # unknown
+    refusal(lambda: dom.fill("no placeholders", x="1"), "bad-args")
+    assert dom.FIND_EXPR.count("__SELECTOR__") == 1
 
 
 def t_dom_shape_filters() -> None:
@@ -2974,6 +2988,7 @@ def main() -> int:
         ("input verbs' argv", t_cli_input_grammar),
         ("media verdict and argv", t_media_verdict),
         ("media argv", t_cli_media_grammar),
+        ("fill refuses leftovers", t_fill_refuses_leftovers),
         ("dom shape filters", t_dom_shape_filters),
         ("extract schema and records", t_extract_schema_and_records),
         ("tab extract grammar", t_cli_extract_grammar),

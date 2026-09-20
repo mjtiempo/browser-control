@@ -12,6 +12,9 @@ from browser_control.lib import (
     cdp,  # pyright: ignore[reportMissingImports]
 )
 from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+    DIALOG_AWAKE,
+)
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BAD_ARGS,
     ERR_DIALOG_NOT_VERIFIED,
@@ -75,7 +78,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
         try:
             with _pkg._session(row, tab_row) as session:
                 try:
-                    session.evaluate("1", timeout=DIALOG_PROBE_S)
+                    session.evaluate(DIALOG_AWAKE, timeout=DIALOG_PROBE_S)
                     opened, verified = False, True
                     note = ("the tab answers, so no dialog is blocking it "
                             "(a dialog parks the renderer)")
@@ -117,7 +120,7 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
             raise
         def probe() -> bool:
             try:
-                session.evaluate("1", timeout=0.8)
+                session.evaluate(DIALOG_AWAKE, timeout=0.8)
                 return True
             except ControlError as e:
                 if e.code not in ("eval-timeout", "cdp-error", "blocked"):

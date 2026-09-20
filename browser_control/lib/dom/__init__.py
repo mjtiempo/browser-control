@@ -101,6 +101,7 @@ from browser_control.lib.dom.screenshot import (  # noqa: F401
 from browser_control.lib.dom.scripts import (  # noqa: F401
     CANDIDATES_EXPR,
     CHECK_READ,
+    DIALOG_AWAKE,
     ELEMENT_EXPR,
     EXTRACT_EXPR,
     FILES_EXPR,
@@ -110,6 +111,8 @@ from browser_control.lib.dom.scripts import (  # noqa: F401
     HOVER_PROBE,
     MEDIA_ACTION_EXPR,
     MEDIA_STATE_EXPR,
+    POINT_HOVER_PROBE,
+    POINT_PROBE,
     PRELUDE,
     SCROLL_PROBE,
     SELECT_PROBE,
@@ -119,6 +122,7 @@ from browser_control.lib.dom.scripts import (  # noqa: F401
     TEXT_TARGET_EXPR,
     UPLOAD_DEFAULT_SELECTOR,
     WAIT_EXPRS,
+    fill,
 )
 from browser_control.lib.dom.scroll import (  # noqa: F401
     SCROLL_EDGE_STEP,

@@ -6,6 +6,14 @@ what an element IS, shared by every matcher.
 """
 from __future__ import annotations
 
+import re
+from typing import Any
+
+from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+    ERR_BAD_ARGS,
+    fail,
+)
+
 PRELUDE = r"""
   const INTERACTIVE = 'a,button,input,textarea,select,summary,label,' +
     '[role],[contenteditable="true"],[tabindex],h1,h2,h3,h4,h5,h6';
@@ -261,7 +269,7 @@ MEDIA_STATE_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
 })())""")
 
 MEDIA_ACTION_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
-  const mode = __MODE__, index = __INDEX__;
+  const action = __ACTION__, index = __INDEX__;
   const all = Array.from(document.querySelectorAll('video, audio'));
   const area = (el) => { const r = el.getBoundingClientRect();
                          return Math.round(r.width * r.height); };
@@ -275,7 +283,7 @@ MEDIA_ACTION_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   window.__bcMediaError = null;
   let thrown = null;
   try {
-    if (mode === 'play') {
+    if (action === 'play') {
       const promised = el.play();
       if (promised && typeof promised.catch === 'function') {
         promised.catch((e) => { window.__bcMediaError =
@@ -439,3 +447,38 @@ EXTRACT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
     total: candidates.length, matches: records,
     truncated: budget_hit || candidates.length > records.length};
 })())""")
+
+
+POINT_PROBE = ("(() => { const el = document.elementFromPoint(__X__, __Y__); "
+               "return el ? el.tagName.toLowerCase()"
+               " + (el.id ? '#' + el.id : '') : null })()")
+
+POINT_HOVER_PROBE = (
+    "(() => { const el = document.elementFromPoint(__X__, __Y__); return "
+    "JSON.stringify({under: el ? el.tagName.toLowerCase() + "
+    "(el.id ? '#' + el.id : '') : null, hovered: !!el && "
+    "el.matches(':hover')}) })()")
+
+#: The one value the dialog probes evaluate: the page answering at all is the
+#: fact, and a constant keeps that from being spelled as a literal twice.
+DIALOG_AWAKE = "1"
+
+
+def fill(expression: str, **values: Any) -> str:
+    """One expression with its placeholders filled, or a refusal.
+
+    A missed placeholder used to ship as a runtime `js-error`; this refuses an
+    unknown name (a caller that renamed one side) and a LEFTOVER placeholder (a
+    template that grew a new one) at the point of the call.
+    """
+    for name, value in values.items():
+        token = f"__{name.upper()}__"
+        if token not in expression:
+            fail(ERR_BAD_ARGS,
+                 f"fill: {token} is not a placeholder in this expression")
+        expression = expression.replace(token, str(value))
+    leftovers = sorted(set(re.findall(r"__[A-Z0-9_]+__", expression)))
+    if leftovers:
+        fail(ERR_BAD_ARGS,
+             f"fill: unfilled placeholder(s) {', '.join(leftovers)}")
+    return expression

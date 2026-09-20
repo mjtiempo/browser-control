@@ -21,6 +21,7 @@ from browser_control.lib.dom.queries import (  # pyright: ignore[reportMissingIm
 from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
     ELEMENT_EXPR,
     SCROLL_PROBE,
+    fill,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BAD_ARGS,
@@ -116,8 +117,7 @@ def _point(at: str | None, viewport: list[int],
 
 def _probe(session: cdp.Session, x: int, y: int) -> dict:
     """The document's scroll position and the scroller under (x, y)."""
-    data = session.evaluate(
-        SCROLL_PROBE.replace("__X__", str(x)).replace("__Y__", str(y)))
+    data = session.evaluate(fill(SCROLL_PROBE, x=str(x), y=str(y)))
     return data if isinstance(data, dict) else {}
 
 def _settle(session: cdp.Session, x: int, y: int, before: dict,

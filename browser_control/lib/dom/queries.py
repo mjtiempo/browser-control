@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 from browser_control.lib import (
     browser as browser_lib,  # pyright: ignore[reportMissingImports]
@@ -28,6 +29,7 @@ from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingIm
     FIND_EXPR,
     TEXT_EXPR,
     WAIT_EXPRS,
+    fill,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_AMBIGUOUS_ELEMENT,
@@ -71,11 +73,10 @@ def _query_args(text: str | None, selector: str | None,
 
 def _matches_in(session: cdp.Session, needle: str, css: str, cap: int) -> dict:
     """The page's answer to the shared matcher (see `FIND_EXPR`)."""
-    expression = (FIND_EXPR
-                  .replace("__MODE__", json.dumps("selector" if css else "text"))
-                  .replace("__NEEDLE__", json.dumps(needle.lower()))
-                  .replace("__SELECTOR__", json.dumps(css))
-                  .replace("__CAP__", str(cap)))
+    expression = fill(
+        FIND_EXPR, mode=json.dumps("selector" if css else "text"),
+        needle=json.dumps(needle.lower()), selector=json.dumps(css),
+        cap=str(cap))
     data = session.evaluate(expression)
     if not isinstance(data, dict):
         fail(ERR_CDP_ERROR, "the page did not answer with an object")
@@ -117,16 +118,23 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
     return rows[index]
 
 def _match_args(expression: str, needle: str, css: str,
-                index: int | None = None, visible: bool = True) -> str:
-    """Fill the placeholders every matcher expression shares."""
-    filled = (expression
-              .replace("__MODE__", json.dumps("selector" if css else "text"))
-              .replace("__NEEDLE__", json.dumps(needle.lower()))
-              .replace("__SELECTOR__", json.dumps(css))
-              .replace("__VISIBLE__", "true" if visible else "false"))
-    if "__INDEX__" in filled:
-        filled = filled.replace("__INDEX__", str(as_int(index)))
-    return filled
+                index: int | None = None, visible: bool = True,
+                **extra: Any) -> str:
+    """Fill the placeholders every matcher expression shares.
+
+    `extra` carries the tokens only SOME matchers have (`__CAP__`, `__X__`/
+    `__Y__`, `__VALUE__`): the strict `fill` refuses an unknown name and a
+    leftover, so a caller must declare everything its expression holds.
+    """
+    values: dict = {"mode": json.dumps("selector" if css else "text"),
+                    "needle": json.dumps(needle.lower()),
+                    "selector": json.dumps(css)}
+    if "__VISIBLE__" in expression:
+        values["visible"] = "true" if visible else "false"
+    if "__INDEX__" in expression:
+        values["index"] = str(as_int(index))
+    values.update(extra)
+    return fill(expression, **values)
 
 def _node_of(session: cdp.Session, expression: str) -> int:
     """The DOM node an element-returning expression resolves to.
@@ -192,10 +200,15 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
              f"tab wait: --timeout must be finite and positive, got {timeout!r}")
     row, tab_row = _pkg._resolve(tab, browser, for_write=(name == "js"))
     profile, target_id = str(row["profile"]), str(tab_row["id"])
-    expression = (WAIT_EXPRS[name]
-                  .replace("__SELECTOR__", json.dumps(str(selector or "")))
-                  .replace("__EXPR__", str(expr or "false"))
-                  .replace("__IDLE_MS__", str(as_int(idle_ms, IDLE_DEFAULT_MS))))
+    template = WAIT_EXPRS[name]
+    values: dict = {}
+    if "__SELECTOR__" in template:
+        values["selector"] = json.dumps(str(selector or ""))
+    if "__EXPR__" in template:
+        values["expr"] = str(expr or "false")
+    if "__IDLE_MS__" in template:
+        values["idle_ms"] = str(as_int(idle_ms, IDLE_DEFAULT_MS))
+    expression = fill(template, **values)
     started = time.time()
     value, samples = cdp.evaluate_until(
         _pkg._document_ws(cdp.port_of(profile), target_id), expression, bool,
@@ -325,7 +338,7 @@ def extract(each: str = "", fields: list[str] | None = None,
     row, tab_row = _pkg._resolve(tab, browser, for_write=False)
     with _pkg._session(row, tab_row) as session:
         data = session.evaluate(
-            EXTRACT_EXPR.replace("__SCHEMA__", json.dumps(schema)))
+            fill(EXTRACT_EXPR, schema=json.dumps(schema)))
     data = data if isinstance(data, dict) else {}
     raw = _extract_records(data.get("matches"), names)
     records = raw
@@ -353,7 +366,7 @@ def find(text: str | None = None, selector: str | None = None,
     Only interactive or labelled elements match; each match carries its box in
     PAGE coordinates and in the viewport's, whether it is `in_viewport`, and
     whether a click at its centre would reach it (`hit` — a real
-    `elementFromPoint`). An element below the fold is RETURNED with
+    the element-at-point probe). An element below the fold is RETURNED
     `in_viewport: false`, not hidden behind `no-match`: the caller can see that
     it exists and scroll to it.
     """
@@ -403,9 +416,8 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
     limit = max(1, min(TEXT_CAP, as_int(chars, TEXT_CAP)))
     row, tab_row = _pkg._resolve(tab, browser, for_write=False)
     with _pkg._session(row, tab_row) as session:
-        data = session.evaluate(TEXT_EXPR.replace("__SELECTOR__",
-                                                  json.dumps(css))
-                                .replace("__CAP__", str(limit)))
+        data = session.evaluate(
+            fill(TEXT_EXPR, selector=json.dumps(css), cap=str(limit)))
         frames_here = _pkg._frame_summary(row, tab_row, session)
     if not isinstance(data, dict):
         fail(ERR_CDP_ERROR, "tab text: the page did not answer with an object")

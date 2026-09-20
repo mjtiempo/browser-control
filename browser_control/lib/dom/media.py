@@ -21,6 +21,7 @@ from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports
 from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
     MEDIA_ACTION_EXPR,
     MEDIA_STATE_EXPR,
+    fill,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BAD_ARGS,
@@ -133,9 +134,8 @@ def media(mode: str, index: int | None = None, tab: str = "",
         # `__MODE__` here is play|pause, NOT the matcher's text|selector, so
         # this expression is filled directly (and -1 means "the preferred one")
         session.evaluate(
-            MEDIA_ACTION_EXPR.replace("__MODE__", json.dumps(name))
-            .replace("__INDEX__",
-                     str(-1 if index is None else as_int(index))))
+            fill(MEDIA_ACTION_EXPR, action=json.dumps(name),
+                 index=str(-1 if index is None else as_int(index))))
         after = _poll_media(session, name, before)
     if not after.get("found"):
         fail(ERR_NO_MEDIA, f"tab media {name}: the element left the page")

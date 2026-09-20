@@ -33,9 +33,12 @@ from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingIm
     FILES_EXPR,
     FOCUS_PROBE,
     HOVER_PROBE,
+    POINT_HOVER_PROBE,
+    POINT_PROBE,
     SELECT_PROBE,
     STATE_EXPR,
     UPLOAD_DEFAULT_SELECTOR,
+    fill,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_AMBIGUOUS_OPTION,
@@ -65,15 +68,12 @@ from browser_control.lib.text import (  # pyright: ignore[reportMissingImports]
 CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
 
 def _under_point(session: cdp.Session, x: int, y: int) -> object:
-    """What `document.elementFromPoint` reaches at that point, as a short name.
+    """What the element-at-point probe reaches there, as a short name.
 
     The one probe both `--at` and the element path use, so "what is actually
     there" is measured the same way after every dispatch.
     """
-    return session.evaluate(
-        "(() => { const el = document.elementFromPoint("
-        f"{x}, {y}); return el ? el.tagName.toLowerCase()"
-        " + (el.id ? '#' + el.id : '') : null })()")
+    return session.evaluate(fill(POINT_PROBE, x=str(x), y=str(y)))
 
 def _at_point_click(session: cdp.Session, x: int, y: int) -> dict:
     """A move, a press and a release at a viewport point, and what is there."""
@@ -131,11 +131,7 @@ def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
                      {"type": "mouseMoved", "x": x, "y": y,
                       "button": "none", "buttons": 0})
         probe = session.evaluate(
-            "(() => { const el = document.elementFromPoint("
-            f"{x}, {y}); return "
-            "JSON.stringify({under: el ? el.tagName.toLowerCase() + "
-            "(el.id ? '#' + el.id : '') : null, hovered: !!el && "
-            "el.matches(':hover')}) })()")
+            fill(POINT_HOVER_PROBE, x=str(x), y=str(y)))
     probe = probe if isinstance(probe, dict) else {}
     if not probe.get("hovered"):
         fail(ERR_HOVER_NOT_VERIFIED,
@@ -287,8 +283,8 @@ def hover(text: str | None = None, selector: str | None = None,
                      {"type": "mouseMoved", "x": x, "y": y,
                       "button": "none", "buttons": 0})
         probe = session.evaluate(
-            _pkg._match_args(HOVER_PROBE, needle, css, index)
-            .replace("__X__", str(x)).replace("__Y__", str(y)))
+            _pkg._match_args(HOVER_PROBE, needle, css, index,
+                             x=str(x), y=str(y)))
     probe = probe if isinstance(probe, dict) else {}
     if not (probe.get("hovered") and probe.get("chain")):
         fail(ERR_HOVER_NOT_VERIFIED,
@@ -396,8 +392,8 @@ def check(text: str | None = None, selector: str | None = None,
 def _select_probe(session: cdp.Session, needle: str, css: str,
                   index: int | None, value: str) -> dict:
     """Which option a value names, and what the control holds (see the SQL)."""
-    expression = (_pkg._match_args(SELECT_PROBE, needle, css, index)
-                  .replace("__VALUE__", json.dumps(str(value))))
+    expression = _pkg._match_args(SELECT_PROBE, needle, css, index,
+                                  value=json.dumps(str(value)))
     probe = session.evaluate(expression)
     return probe if isinstance(probe, dict) else {}
 
@@ -523,7 +519,7 @@ def focus(text: str | None = None, selector: str | None = None,
     so it works on a background tab and while a layer surface owns the pointer;
     it does scroll the element into view, which is why an element outside the
     viewport is a perfectly good target. `DOM.focus` is the CDP method, and the
-    read-back is `document.activeElement`.
+    read-back is the page's own active element.
     """
     needle, css = _pkg._query_args(text, selector, "tab focus")
     row, tab_row = _pkg._resolve(tab, browser, for_write=True)
@@ -580,8 +576,7 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     row, tab_row = _pkg._resolve(tab, browser, for_write=True)
     with _pkg._session(row, tab_row) as session:
         data = session.evaluate(
-            _pkg._match_args(CANDIDATES_EXPR, "", css).replace("__CAP__",
-                                                          str(FIND_CAP)))
+            _pkg._match_args(CANDIDATES_EXPR, "", css, cap=str(FIND_CAP)))
         element = _pkg._pick(data if isinstance(data, dict) else {},
                         "", css, index, row=row, tab_row=tab_row)
         handle = session.handle(_pkg._match_args(ELEMENT_EXPR, "", css, index,
