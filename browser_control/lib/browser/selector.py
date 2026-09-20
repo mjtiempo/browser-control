@@ -78,4 +78,4 @@ class Selector:
                          if norm(str(r["profile"])) == want), None)
         want_port = as_int(self.port)
         return next((r for r in rows
-                     if as_int(r["cdp"]["port"]) == want_port), None)
+                     if as_int((r.get("cdp") or {}).get("port")) == want_port), None)

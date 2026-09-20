@@ -11,9 +11,12 @@ import os
 from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
 from browser_control.lib import (
     cdp,  # pyright: ignore[reportMissingImports]
-    )
+)
 from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
     ACTIVE_SPEC,
+)
+from browser_control.lib.browser.machine import (  # pyright: ignore[reportMissingImports]
+    may_write,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_BAD_ARGS,
@@ -126,7 +129,7 @@ def resolve_across(specs: list[str], browser: str,
         # make every `--tab active` refuse — the same reason an unqualified tab
         # verb picks among OUR browsers instead of every browser on the machine
         if str(spec).strip().lower() == ACTIVE_SPEC:
-            own = [row for row in rows if row["managed"] or row["attached"]]
+            own = [row for row in rows if may_write(row)]
             hits = _spec_hits(own, tabs_of, spec)
             if not hits:
                 fail(ERR_NO_PAGE_TAB,
@@ -150,7 +153,7 @@ def resolve_across(specs: list[str], browser: str,
             fail(ERR_TAB_AMBIGUOUS,
                  f"{spec!r} matches {len(hits)} tabs: {where}")
         row, tab, index = hits[0]
-        if for_write and not (row["managed"] or row["attached"]):
+        if for_write and not may_write(row):
             fail(ERR_NOT_MANAGED,
                  f"{spec!r} is in {row['exe']} on {row['profile']}, which "
                  "this CLI neither manages nor has attached — `tab list` "
@@ -193,7 +196,7 @@ def _exact_matches(field: str, value: str,
         for index, tab in enumerate(_pkg._tabs_or_fail(row)):
             if str(tab.get(field) or "").lower() != wanted:
                 continue
-            if row["managed"] or row["attached"]:
+            if may_write(row):
                 ours.append((row, tab, index))
             else:
                 foreign.append(_pkg._foreign_row(row, tab))
@@ -262,7 +265,7 @@ def _spec_matches(specs: list[str], browser: str, loose: bool = False) -> tuple[
                 hits += 1
                 if str(tab["id"]) in seen:
                     continue
-                if row["managed"] or row["attached"]:
+                if may_write(row):
                     seen.add(str(tab["id"]))
                     ours.append((row, tab, index))
                 else:

@@ -13,6 +13,9 @@ from browser_control.lib import (
 from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
     LAUNCH_WAIT_S,
 )
+from browser_control.lib.browser.machine import (  # pyright: ignore[reportMissingImports]
+    endpoint_of,
+)
 from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
     as_int,
 )
@@ -31,7 +34,64 @@ from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
     pid_on_marker,
 )
 
-_OWNER_CACHE: dict[tuple[str, int], dict] = {}
+
+class EndpointGuard:
+    """The kernel memo: one /proc walk per (profile, port) per process.
+
+    A verdict is about a LISTENER, and a listener can change: `forget()` is
+    how a caller that just started or stopped one says so, and `refresh=True`
+    is the same thing for one read. Keeping the eviction API on the object
+    replaced two hand-written pops in two modules — the failure mode the
+    docstring on the old cache described in prose.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[str, int], dict] = {}
+
+    def verdict(self, profile: str, port: int, *,
+                refresh: bool = False) -> dict:
+        """The verdict for that endpoint, from the memo or a fresh walk."""
+        key = (profile, port)
+        if refresh:
+            self._cache.pop(key, None)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        verdict = self._judge(profile, port)
+        self._cache[key] = verdict
+        return verdict
+
+    def forget(self, profile: str, port: int) -> None:
+        """Evict one (profile, port) verdict."""
+        self._cache.pop((profile, port), None)
+
+    @staticmethod
+    def _judge(profile: str, port: int) -> dict:
+        owner = cdp.listener_of(port)
+        pid = as_int(owner.get("pid"))
+        exe = str(owner.get("exe") or "")
+        cmd = str(owner.get("cmd") or "")
+        profile_pid = find_pid(profile) if profile else 0
+        if not owner:
+            return {"verified": False, "pid": 0, "exe": "",
+                    "profile_pid": profile_pid,
+                    "reason": ("no process holds the port "
+                               "(the socket is gone)")}
+        if exe not in BROWSER_EXES:
+            return {"verified": False, "pid": pid, "exe": exe,
+                    "profile_pid": profile_pid,
+                    "reason": f"pid {pid} holds the port and is not a "
+                              f"Chromium-family browser ({exe or 'unknown'})"}
+        if profile and not pid_on_marker(pid, cmd, profile):
+            return {"verified": False, "pid": pid, "exe": exe,
+                    "profile_pid": profile_pid,
+                    "reason": f"pid {pid} holds the port, but its own command "
+                              f"line does not run {profile}"}
+        return {"verified": True, "pid": pid, "exe": exe,
+                "profile_pid": profile_pid, "reason": ""}
+
+
+GUARD = EndpointGuard()
 
 def endpoint_owner(profile: str, port: int) -> dict:
     """Is the process holding that port the browser this profile says it is?
@@ -53,34 +113,8 @@ def endpoint_owner(profile: str, port: int) -> dict:
       endpoint refuses instead (`cdp-not-local`). A local process that names
       itself `chrome` cannot be told apart, and docs/progress.md says so.
     """
-    key = (profile, port)
-    cached = _OWNER_CACHE.get(key)
-    if cached is not None:
-        return cached
-    owner = cdp.listener_of(port)
-    pid = as_int(owner.get("pid"))
-    exe = str(owner.get("exe") or "")
-    cmd = str(owner.get("cmd") or "")
-    profile_pid = find_pid(profile) if profile else 0
-    if not owner:
-        verdict = {"verified": False, "pid": 0, "exe": "",
-                   "profile_pid": profile_pid,
-                   "reason": "no process holds the port (the socket is gone)"}
-    elif exe not in BROWSER_EXES:
-        verdict = {"verified": False, "pid": pid, "exe": exe,
-                   "profile_pid": profile_pid,
-                   "reason": f"pid {pid} holds the port and is not a "
-                             f"Chromium-family browser ({exe or 'unknown'})"}
-    elif profile and not pid_on_marker(pid, cmd, profile):
-        verdict = {"verified": False, "pid": pid, "exe": exe,
-                   "profile_pid": profile_pid,
-                   "reason": f"pid {pid} holds the port, but its own command "
-                             f"line does not run {profile}"}
-    else:
-        verdict = {"verified": True, "pid": pid, "exe": exe,
-                   "profile_pid": profile_pid, "reason": ""}
-    _OWNER_CACHE[key] = verdict
-    return verdict
+    return GUARD.verdict(profile, port)
+
 
 def not_local_refusal(profile: str, port: int, reason: str) -> None:
     """Refuse to drive an endpoint that is not the browser we think it is.
@@ -100,12 +134,12 @@ def not_local_refusal(profile: str, port: int, reason: str) -> None:
 
 def _drive_refusal(browser: str, rows: list[dict]) -> None:
     """Refuse a drive when the only candidates answered but did not verify."""
-    suspects = _pkg._narrow([r for r in rows if r["cdp"].get("reachable")
-                        and not r["cdp"].get("verified")], browser)
+    suspects = _pkg._narrow([r for r in rows if endpoint_of(r).get("reachable")
+                        and not endpoint_of(r).get("verified")], browser)
     if suspects:
         row = suspects[0]
-        not_local_refusal(str(row["profile"]), as_int(row["cdp"]["port"]),
-                          str(row["cdp"].get("reason") or "unknown"))
+        not_local_refusal(str(row["profile"]), as_int(endpoint_of(row)["port"]),
+                          str(endpoint_of(row).get("reason") or "unknown"))
 
 def verify_profile_endpoint(profile: str) -> None:
     """Refuse when the endpoint on that profile is not the browser we think.
@@ -149,7 +183,7 @@ def _await_owner(profile: str, port: int) -> dict:
     if not owner or owner.get("verified") or not owner.get("profile_pid"):
         return owner
     def probe() -> dict:
-        _OWNER_CACHE.pop((profile, port), None)
+        GUARD.forget(profile, port)
         return _pkg.endpoint_owner(profile, port) if cdp.reachable(profile) else {}
 
     return poll(probe, timeout=LAUNCH_WAIT_S, interval=POLL_SLOW,

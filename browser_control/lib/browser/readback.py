@@ -15,7 +15,7 @@ from browser_control.lib.browser.constants import (  # pyright: ignore[reportMis
     TAB_WAIT_S,
 )
 from browser_control.lib.browser.owners import (  # pyright: ignore[reportMissingImports]
-    _OWNER_CACHE,
+    GUARD,
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_CLOSE_TAB_NOT_VERIFIED,
@@ -47,7 +47,7 @@ def _wait_own_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
         port = cdp.port_of(profile)
         if not port:
             return False
-        _OWNER_CACHE.pop((profile, port), None)
+        GUARD.forget(profile, port)
         return bool(_pkg.endpoint_owner(profile, port).get("verified"))
 
     return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])

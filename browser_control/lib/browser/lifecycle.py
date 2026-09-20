@@ -30,6 +30,9 @@ from browser_control.lib.browser.constants import (  # pyright: ignore[reportMis
     PORT_WAIT_S,
     STOP_WAIT_S,
 )
+from browser_control.lib.browser.machine import (  # pyright: ignore[reportMissingImports]
+    endpoint_of,
+)
 from browser_control.lib.browser.selector import (
     Selector,  # pyright: ignore[reportMissingImports]
 )
@@ -217,7 +220,7 @@ def managed_profile(browser: str = "") -> str:
     would start. An attached browser is never a candidate — attaching grants
     tab writes, not the right to stop somebody else's browser."""
     rows = _pkg._narrow([r for r in _pkg.browsers()
-                    if r["managed"] and r["cdp"]["reachable"]], browser)
+                    if r["managed"] and endpoint_of(r)["reachable"]], browser)
     if not rows and _scoped():
         # a scoped call is about THAT instance, running or not: `open` starts
         # it, and nothing here may silently fall back to some other profile
@@ -244,7 +247,7 @@ def attachments() -> dict:
         record = dict(records[key])
         row = live.get(key)
         record["running"] = row is not None
-        record["reachable"] = bool(row and row["cdp"]["reachable"])
+        record["reachable"] = bool(row and endpoint_of(row)["reachable"])
         record["managed"] = bool(row and row["managed"])
         rows.append(record)
     return {"ok": True, "count": len(rows), "attached": rows}
@@ -264,19 +267,19 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
     if row is None:
         fail(ERR_NO_BROWSER,
              f"no running Chromium-family browser matches {given[0]}")
-    if not row["cdp"]["reachable"]:
+    if not endpoint_of(row)["reachable"]:
         fail(ERR_CDP_UNREACHABLE,
              f"pid {row['pid']} does not answer CDP on port "
              f"{row['cdp']['port']} — attach needs a live endpoint")
-    if not row["cdp"].get("verified"):
+    if not endpoint_of(row).get("verified"):
         # an endpoint that ANSWERS is not proof of WHOSE it is, and this record
         # is what opens the tab-write gate: `_named_browser` refuses an
         # unverified endpoint, and so must this (a review measured the gap —
         # a stale port was enough to authorise a write path)
-        _pkg.not_local_refusal(str(row["profile"]), as_int(row["cdp"]["port"]),
-                          str(row["cdp"].get("reason") or "unknown"))
+        _pkg.not_local_refusal(str(row["profile"]), as_int(endpoint_of(row)["port"]),
+                          str(endpoint_of(row).get("reason") or "unknown"))
     record = {"profile": norm(row["profile"]), "pid": row["pid"],
-              "port": as_int(row["cdp"]["port"]), "exe": row["exe"],
+              "port": as_int(endpoint_of(row)["port"]), "exe": row["exe"],
               "managed": row["managed"],
               "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     # the read-modify-write of the records runs under the root's lock (the
@@ -459,12 +462,12 @@ def _named_browser(selector: Selector) -> dict:
     if row is None:
         fail(ERR_NO_BROWSER,
              f"no running Chromium-family browser matches {what}")
-    if not row["cdp"]["reachable"]:
+    if not endpoint_of(row)["reachable"]:
         fail(ERR_CDP_UNREACHABLE,
              f"pid {row['pid']} does not answer CDP on port "
              f"{row['cdp']['port']} — a browser this CLI cannot reach is not "
              "one it stops by name")
-    if not row["cdp"]["verified"]:
+    if not endpoint_of(row)["verified"]:
         fail(ERR_CDP_NOT_LOCAL,
              f"the endpoint on port {row['cdp']['port']} is not pid "
              f"{row['pid']}'s ({row['cdp'].get('reason') or 'unknown'}) — "

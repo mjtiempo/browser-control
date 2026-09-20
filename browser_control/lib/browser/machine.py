@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 from browser_control.lib import (
     attachments as attachments_lib,  # pyright: ignore[reportMissingImports]
@@ -77,13 +78,13 @@ def browsers() -> list[dict]:
                      "cdp": endpoint})
     # ours first, then the attached ones, then whatever can be driven, by pid
     return sorted(rows, key=lambda r: (not r["managed"], not r["attached"],
-                                       not r["cdp"]["verified"], r["pid"]))
+                                       not endpoint_of(r)["verified"], r["pid"]))
 
 def list_browsers() -> dict:
     """`list`: every browser running here, drivable or not."""
     rows = _pkg.browsers()
     return {"ok": True, "count": len(rows),
-            "drivable": sum(1 for r in rows if r["cdp"]["verified"]),
+            "drivable": sum(1 for r in rows if endpoint_of(r)["verified"]),
             "browsers": rows}
 
 def is_attached(profile: str) -> bool:
@@ -110,6 +111,110 @@ def _narrow(rows: list[dict], browser: str) -> list[dict]:
         out.append(row)
     return out
 
+def endpoint_of(row: dict) -> dict:
+    """The endpoint block of a browser row — the ONE place that names it.
+
+    The row stays a dict (it IS the wire format); reading it through one
+    helper is what stops thirty call sites from indexing the nested
+    endpoint key and spelling the shape differently.
+    """
+    return row.get("cdp") or {}
+
+
+def may_write(row: dict) -> bool:
+    """May this CLI WRITE into that browser? Managed, or attached to it.
+
+    The rule the README promises, named once: the fallback to "every drivable
+    browser" that used to be spelled inline here sent `tab press` and
+    `tab about:blank` into a stranger's session.
+    """
+    return bool(row.get("managed") or row.get("attached"))
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """A browser's CDP endpoint, as one row reports it."""
+
+    port: int = 0
+    reachable: bool = False
+    verified: bool = False
+    listener: dict | None = None
+    tabs: int | None = None
+    reason: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Endpoint:
+        return cls(port=as_int(data.get("port")),
+                   reachable=bool(data.get("reachable")),
+                   verified=bool(data.get("verified")),
+                   listener=(dict(data["listener"])
+                             if isinstance(data.get("listener"), dict)
+                             else None),
+                   tabs=(as_int(data["tabs"])
+                         if data.get("tabs") is not None else None),
+                   reason=str(data.get("reason") or ""))
+
+    def as_reply(self) -> dict:
+        """The endpoint keys, in the order the wire format carries them."""
+        out: dict = {"port": self.port, "reachable": self.reachable,
+                     "verified": self.verified}
+        if self.listener is not None:
+            out["listener"] = dict(self.listener)
+        if self.tabs is not None:
+            out["tabs"] = self.tabs
+        if self.reason:
+            out["reason"] = self.reason
+        return out
+
+
+@dataclass(frozen=True)
+class BrowserRow:
+    """One browser on this machine: identity, profile, and its endpoint."""
+
+    pid: int = 0
+    exe: str = ""
+    path: str = ""
+    profile: str = ""
+    profile_from: str = ""
+    managed: bool = False
+    attached: bool = False
+    endpoint: Endpoint = Endpoint()
+
+    @classmethod
+    def from_dict(cls, row: dict) -> BrowserRow:
+        return cls(pid=as_int(row.get("pid")), exe=str(row.get("exe") or ""),
+                   path=str(row.get("path") or ""),
+                   profile=str(row.get("profile") or ""),
+                   profile_from=str(row.get("profile_from") or ""),
+                   managed=bool(row.get("managed")),
+                   attached=bool(row.get("attached")),
+                   endpoint=Endpoint.from_dict(endpoint_of(row)))
+
+    def as_reply(self) -> dict:
+        """The row as the wire format carries it (endpoint included)."""
+        return {"pid": self.pid, "exe": self.exe, "path": self.path,
+                "profile": self.profile, "profile_from": self.profile_from,
+                "managed": self.managed, "attached": self.attached,
+                "cdp": self.endpoint.as_reply()}
+
+    def as_brief(self) -> dict:
+        """The row small enough to ride along in a tab reply."""
+        return {"pid": self.pid, "exe": self.exe, "profile": self.profile,
+                "managed": self.managed, "attached": self.attached,
+                "port": self.endpoint.port}
+
+    def as_row(self) -> dict:
+        """The row without its endpoint block (reported apart)."""
+        return {"pid": self.pid, "exe": self.exe, "path": self.path,
+                "profile": self.profile, "profile_from": self.profile_from,
+                "managed": self.managed, "attached": self.attached}
+
+    @property
+    def may_write(self) -> bool:
+        """May this CLI write into this browser?"""
+        return bool(self.managed or self.attached)
+
+
 def _who(rows: list[dict]) -> str:
     """The browsers in a message, named so a caller can act on them."""
     return "; ".join(f"{r['exe']} on {r['profile']}" for r in rows)
@@ -128,8 +233,7 @@ def _writable(browser: str = "") -> list[dict]:
     then gained a tab it never asked for. `_one_tab` and `_writable_profile`
     name the stranger and refuse instead of picking it.
     """
-    return [r for r in _drivable(browser, strict=False)
-            if r["managed"] or r["attached"]]
+    return [r for r in _drivable(browser, strict=False) if may_write(r)]
 
 def _readable(browser: str = "") -> list[dict]:
     """The browsers a READ may target: ours and attached first, else every
@@ -157,11 +261,11 @@ def _drivable(browser: str = "", strict: bool = True) -> list[dict]:
     (`cdp-not-local`) rather than a silent omission — `list` wants the row, a
     drive wants the refusal. Nothing is ever driven from an unverified row.
     """
-    answering = [r for r in _pkg.browsers() if r["cdp"].get("reachable")]
-    verified = [r for r in answering if r["cdp"].get("verified")]
+    answering = [r for r in _pkg.browsers() if endpoint_of(r).get("reachable")]
+    verified = [r for r in answering if endpoint_of(r).get("verified")]
     matches = _narrow(verified, browser)
     if browser and matches:
-        rows = [r for r in matches if r["managed"] or r["attached"]] or matches
+        rows = [r for r in matches if may_write(r)] or matches
     else:
         rows = matches
     if strict and not rows:
@@ -189,30 +293,26 @@ def tabs_of(row: dict) -> tuple[list[dict], str]:
     endpoint did not VERIFY is reported the same way — the tab list of a
     stranger is not this browser's tab list, and no count is claimed.
     """
-    if row["cdp"].get("reachable") and not row["cdp"].get("verified"):
-        return [], str(row["cdp"].get("reason") or
+    if endpoint_of(row).get("reachable") and not endpoint_of(row).get("verified"):
+        return [], str(endpoint_of(row).get("reason") or
                        "the endpoint is not this profile's browser")
     try:
-        port = as_int(row["cdp"]["port"])
+        port = as_int(endpoint_of(row)["port"])
         return cdp.rows_to_tabs(cdp.page_rows_at(port)), ""
     except ControlError as e:
         return [], e.message
 
 def brief(row: dict) -> dict:
     """One browser row, small enough to ride along in a tab reply."""
-    return {"pid": row["pid"], "exe": row["exe"], "profile": row["profile"],
-            "managed": row["managed"], "attached": row["attached"],
-            "port": as_int(row["cdp"]["port"])}
+    return BrowserRow.from_dict(row).as_brief()
 
 def _row(row: dict) -> dict:
     """One browser row without its endpoint block (reported apart)."""
-    return {key: row[key] for key in ("pid", "exe", "path", "profile",
-                                      "profile_from", "managed",
-                                      "attached")}
+    return BrowserRow.from_dict(row).as_row()
 
 def _endpoint_details(row: dict) -> dict:
     """One browser row's endpoint, with the version it reports itself."""
-    details = dict(row["cdp"])
+    details = dict(endpoint_of(row))
     if details.get("reachable"):
         version = cdp.version_at(as_int(details.get("port")))
         details["version"] = str(version.get("Browser") or "")
@@ -244,12 +344,12 @@ def list_tabs(browser: str = "") -> dict:
         groups.append(group)
     reply: dict = {"ok": True, "count": total, "browsers": groups}
     suspects = _narrow([r for r in _pkg.browsers()
-                        if r["cdp"].get("reachable")
-                        and not r["cdp"].get("verified")], browser)
+                        if endpoint_of(r).get("reachable")
+                        and not endpoint_of(r).get("verified")], browser)
     if suspects:
         reply["unverified"] = [
-            {**_pkg._brief(r), "listener": r["cdp"].get("listener"),
-             "reason": r["cdp"].get("reason")}
+            {**_pkg._brief(r), "listener": endpoint_of(r).get("listener"),
+             "reason": endpoint_of(r).get("reason")}
             for r in suspects]
     return reply
 
@@ -266,7 +366,7 @@ def browser_info(browser: str = "") -> dict:
     rows = _narrow(_pkg.browsers(), browser)
     # ours first, then an attached one: those are the browsers a tab write
     # could reach, and the one `info` is really about
-    live = [r for r in rows if r["managed"] or r["attached"]]
+    live = [r for r in rows if may_write(r)]
     if len(live) > 1:
         names = ", ".join(os.path.basename(str(r["profile"]))
                           + (" (attached)" if r["attached"] else "")
@@ -282,7 +382,7 @@ def browser_info(browser: str = "") -> dict:
         # than pretend. With no name and no scope, an unmanaged and unreachable
         # browser is not an answer at all — say `running: false` instead.
         row = rows[0]
-        return {"ok": True, "running": bool(row["cdp"]["reachable"]),
+        return {"ok": True, "running": bool(endpoint_of(row)["reachable"]),
                 "browser": _row(row), "cdp": _endpoint_details(row)}
     path = _pkg.binary(browser) if browser else _pkg.binary()
     profile = _pkg.instance_dir(path)
@@ -318,7 +418,7 @@ def _split(rows: list[dict]) -> tuple[list[tuple[dict, dict, int]],
     foreign: list[dict] = []
     for row in rows:
         for index, tab in enumerate(_tabs_or_fail(row)):
-            if row["managed"] or row["attached"]:
+            if may_write(row):
                 ours.append((row, tab, index))
             else:
                 foreign.append(_foreign_row(row, tab))

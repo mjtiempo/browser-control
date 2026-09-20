@@ -37,6 +37,8 @@ from browser_control.lib.browser.lifecycle import (  # noqa: F401
     stop,
 )
 from browser_control.lib.browser.machine import (  # noqa: F401
+    BrowserRow,
+    Endpoint,
     _closeable,
     _drivable,
     _endpoint_details,
@@ -51,9 +53,11 @@ from browser_control.lib.browser.machine import (  # noqa: F401
     brief,
     browser_info,
     browsers,
+    endpoint_of,
     is_attached,
     list_browsers,
     list_tabs,
+    may_write,
     tabs_of,
 )
 from browser_control.lib.browser.nav import (  # noqa: F401
@@ -79,6 +83,8 @@ from browser_control.lib.browser.nav import (  # noqa: F401
     reload_page,
 )
 from browser_control.lib.browser.owners import (  # noqa: F401
+    GUARD,
+    EndpointGuard,
     _await_owner,
     _drive_refusal,
     endpoint_owner,
