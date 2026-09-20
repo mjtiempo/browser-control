@@ -19,7 +19,7 @@ from browser_control.lib import (
 from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
 from browser_control.lib import (
     cdp,  # pyright: ignore[reportMissingImports]
-    )
+)
 from browser_control.lib import (
     scope as scope_state,  # pyright: ignore[reportMissingImports]
 )
@@ -29,6 +29,9 @@ from browser_control.lib.browser.constants import (  # pyright: ignore[reportMis
     LAUNCH_WAIT_S,
     PORT_WAIT_S,
     STOP_WAIT_S,
+)
+from browser_control.lib.browser.selector import (
+    Selector,  # pyright: ignore[reportMissingImports]
 )
 from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
     as_int,
@@ -254,21 +257,10 @@ def attach(port: int = 0, pid: int = 0, profile: str = "") -> dict:
     must belong to a running, answering Chromium-family process of this
     machine — which is where the identity comes from, not from the caller.
     """
-    given = [name for name, value in (("--port", port), ("--pid", pid),
-                                      ("--profile", profile)) if value]
-    if len(given) != 1:
-        fail(ERR_BAD_ARGS,
-             "attach: name ONE browser — --port N, --pid N or --profile DIR")
-    rows = _pkg.browsers()
-    if pid:
-        row = next((r for r in rows if r["pid"] == as_int(pid)), None)
-    elif profile:
-        want = norm(profile)
-        row = next((r for r in rows if norm(r["profile"]) == want), None)
-    else:
-        want_port = as_int(port)
-        row = next((r for r in rows
-                    if as_int(r["cdp"]["port"]) == want_port), None)
+    selector = Selector(port, pid, profile)
+    selector.require_one("attach")
+    given = selector.given()
+    row = selector.find(_pkg.browsers())
     if row is None:
         fail(ERR_NO_BROWSER,
              f"no running Chromium-family browser matches {given[0]}")
@@ -310,15 +302,14 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
         reply = {"ok": True, "detached": keys, "count": 0}
         lock.warn(reply)
         return reply
-    given = [name for name, value in (("--port", port), ("--pid", pid),
-                                      ("--profile", profile)) if value]
-    if len(given) != 1:
-        fail(ERR_BAD_ARGS,
-             "detach: name ONE browser — --port N, --pid N, --profile DIR, "
-             "or --all")
+    selector = Selector(port, pid, profile)
+    selector.require_one("detach", extra=", or --all")
+    given = selector.given()
     # the read-modify-write of the records runs under the root's lock (the
     # store owns it), so two `attach`/`detach` calls cannot lose each other's line
-    keys, lock = attachments_lib.STORE.drop(profile, pid=pid, port=port)
+    keys, lock = attachments_lib.STORE.drop(selector.profile,
+                                             pid=selector.pid,
+                                             port=selector.port)
     if not keys:
         fail(ERR_NOT_ATTACHED, f"nothing is attached for {given[0]}")
     reply = {"ok": True, "detached": keys,
@@ -455,7 +446,7 @@ def _page_count(profile: str) -> int | None:
     except ControlError:
         return None
 
-def _named_browser(selector: dict) -> dict:
+def _named_browser(selector: Selector) -> dict:
     """The one live browser a caller NAMED, verified like `attach` verifies.
 
     The same bar as `attach`: a running Chromium-family MAIN process of this
@@ -463,21 +454,8 @@ def _named_browser(selector: dict) -> dict:
     the pid about to be signalled is the process holding that port. Naming it
     is the consent; this is what makes the name mean something.
     """
-    rows = _pkg.browsers()
-    port = as_int(selector.get("port"))
-    pid = as_int(selector.get("pid"))
-    profile = str(selector.get("profile") or "")
-    if pid:
-        row = next((r for r in rows if r["pid"] == pid), None)
-        what = f"--pid {pid}"
-    elif profile:
-        want = norm(profile)
-        row = next((r for r in rows if norm(r["profile"]) == want), None)
-        what = f"--profile {profile}"
-    else:
-        row = next((r for r in rows
-                    if as_int(r["cdp"]["port"]) == port), None)
-        what = f"--port {port}"
+    row = selector.find(_pkg.browsers())
+    what = selector.what()
     if row is None:
         fail(ERR_NO_BROWSER,
              f"no running Chromium-family browser matches {what}")
@@ -515,14 +493,10 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
     Nothing is SIGKILLed, and a pid that no longer claims that profile is never
     signalled.
     """
-    given = [name for name, value in (("--port", port), ("--pid", pid),
-                                      ("--profile", profile)) if value]
-    if len(given) > 1:
-        fail(ERR_BAD_ARGS,
-             "close: name ONE browser — --port N, --pid N or --profile DIR")
-    named = bool(given)
-    row = _named_browser({"port": port, "pid": pid, "profile": profile}) \
-        if named else {}
+    selector = Selector(port, pid, profile)
+    selector.require_one("close", allow_none=True)
+    named = selector.named()
+    row = _named_browser(selector) if named else {}
     target = str(row["profile"]) if row else managed_profile(browser)
     with _pkg._lock(lock_path(target), "close") as lock:
         target_pid = as_int(row["pid"]) if row else pid_of(target)

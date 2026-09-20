@@ -97,6 +97,7 @@ from browser_control.lib.browser.readback import (  # noqa: F401
     _wait_url,
     rows,
 )
+from browser_control.lib.browser.selector import Selector  # noqa: F401
 from browser_control.lib.browser.tabs import (  # noqa: F401
     ACTIVE_SPEC,
     _exact_matches,
