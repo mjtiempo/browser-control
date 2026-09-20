@@ -36,12 +36,13 @@ def rows(profile: str) -> list[dict]:
 def _wait_own_port(profile: str, timeout: float = LAUNCH_WAIT_S) -> bool:
     """The endpoint THIS call started must ANSWER and VERIFY.
 
-    `_wait_port` only proves something answers, and the port file it reads can
-    be the stale one the caller just decided to ignore: `open` then reported
+    "Something answers" is not enough, and the port file it reads can be the
+    stale one the caller just decided to ignore: `open` then reported
     `started: true` with a stranger's port and the stranger's tabs (a review
-    flagged it). The owner is re-judged on the CURRENT port file, memo evicted,
-    until it verifies — the browser this call spawned names the profile in its
-    own command line, so its endpoint is the one that can pass.
+    flagged it). The owner is re-judged on the CURRENT port file, with the
+    memo evicted through `GUARD.forget`, until it verifies — the browser this
+    call spawned names the profile in its own command line, so its endpoint is
+    the one that can pass.
     """
     def probe() -> bool:
         port = cdp.port_of(profile)

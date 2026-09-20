@@ -27,6 +27,7 @@ browser-control-cli = "browser_control.cli.main:main"
 [tool.setuptools]
 packages = ["browser_control", "browser_control.lib",
             "browser_control.lib.browser", "browser_control.lib.cdp",
+            "browser_control.lib.dom",
             "browser_control.cli"]
 
 [tool.setuptools.dynamic]
