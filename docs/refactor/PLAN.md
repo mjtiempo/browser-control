@@ -351,7 +351,7 @@ blocking; if the architect overrides one, record the override here before the af
 ## Phase 2 — state owners (classes that own what globals/private reaches own today)
 
 ### RF-11 — `lib/locks.py`: typed lock + one root→profile choreography
-- status: todo
+- status: done (commit 1b88aba)
 - priority: P1
 - category: class/dedup
 - findings: lane-2 F-2.5, lane-5 F-5.2
@@ -372,7 +372,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-5-profile-plugins.md#F-5.2`, `lane-2-browser.md#F-2.5`
 
 ### RF-12 — `lib/attachments.py`: one owner for `attached.json`
-- status: todo
+- status: done (commit 5b1d51e)
 - priority: P1
 - category: class/dedup
 - findings: lane-2 F-2.4, lane-5 F-5.3
@@ -411,7 +411,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-2-browser.md#F-2.6`, `lane-6-crosscutting.md#F-6.7`
 
 ### RF-14 — `lib/instance.py::Instance`: the profile instance as a value
-- status: todo
+- status: done (commit 29d809e)
 - priority: P1
 - category: class
 - findings: lane-5 F-5.1
@@ -433,7 +433,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-5-profile-plugins.md#F-5.1`
 
 ### RF-15 — audit: `ActionLog` with a sink; `lib/logfile.py` owns file policy
-- status: todo
+- status: done (commit 5feb828)
 - priority: P1
 - category: lib
 - findings: lane-4 F-4.8, lane-4 F-4.7 (begin reset), lane-6 F-6.1 (`_SCRATCH`)
@@ -453,7 +453,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-4-cli.md#F-4.8`, `lane-4-cli.md#F-4.7`
 
 ### RF-16 — `lib/cdp/` package behind a facade (pure move)
-- status: todo
+- status: done (commit 7faca8f)
 - priority: P1
 - category: package
 - findings: lane-1 F-1.3
@@ -472,7 +472,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-1-transport.md#F-1.3`
 
 ### RF-17 — one RPC send/await/demux path
-- status: todo
+- status: done (commit 7bb0930)
 - priority: P1
 - category: dedup
 - findings: lane-1 F-1.2
@@ -487,7 +487,7 @@ blocking; if the architect overrides one, record the override here before the af
 - evidence: `docs/refactor/evidence/lane-1-transport.md#F-1.2`
 
 ### RF-18 — `Session` is the only connection owner
-- status: todo
+- status: done (commit 20b3190)
 - priority: P1
 - category: class
 - findings: lane-1 F-1.1
@@ -917,14 +917,14 @@ blocking; if the architect overrides one, record the override here before the af
  {"id":"RF-08","phase":1,"title":"lib/scope.py::Scope: own profile+frame","status":"done (commit 4e8cddf)","deps":[],"risk":"high","priority":"P1","findings":["F-6.1","F-2.2","F-3.6"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py"],"target":["browser_control/lib/scope.py"]},
  {"id":"RF-09","phase":1,"title":"capabilities Surface + policy Policy","status":"done (commit f4f88fe)","deps":[],"risk":"medium","priority":"P1","findings":["F-1.4","F-6.1"],"files":["browser_control/lib/capabilities.py"],"target":["browser_control/lib/capabilities.py","browser_control/lib/policy.py"]},
  {"id":"RF-10","phase":1,"title":"publish seams, delete dead, fix naming","status":"done (commit 5196cf2)","deps":[],"risk":"medium","priority":"P1","findings":["F-2.9","F-2.10","F-3.11","F-4.7","F-6.11","F-6.12","F-6.13"],"files":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py","browser_control/lib/audit.py"],"target":["browser_control/lib/browser.py","browser_control/lib/dom.py","browser_control/cli/main.py"]},
- {"id":"RF-11","phase":2,"title":"lib/locks.py: typed lock + choreography","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-2.5","F-5.2"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py"],"target":["browser_control/lib/locks.py"]},
- {"id":"RF-12","phase":2,"title":"lib/attachments.py: one attached.json owner","status":"todo","deps":["RF-11"],"risk":"medium","priority":"P1","findings":["F-2.4","F-5.3"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py"],"target":["browser_control/lib/attachments.py"]},
+ {"id":"RF-11","phase":2,"title":"lib/locks.py: typed lock + choreography","status":"done (commit 1b88aba)","deps":[],"risk":"medium","priority":"P1","findings":["F-2.5","F-5.2"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py"],"target":["browser_control/lib/locks.py"]},
+ {"id":"RF-12","phase":2,"title":"lib/attachments.py: one attached.json owner","status":"done (commit 5b1d51e)","deps":["RF-11"],"risk":"medium","priority":"P1","findings":["F-2.4","F-5.3"],"files":["browser_control/lib/browser.py","browser_control/lib/profile.py"],"target":["browser_control/lib/attachments.py"]},
  {"id":"RF-13","phase":2,"title":"Selector: one named-browser value object","status":"todo","deps":["RF-05","RF-19"],"risk":"medium","priority":"P1","findings":["F-2.6","F-6.7"],"files":["browser_control/lib/browser.py","browser_control/cli/main.py"],"target":["browser_control/lib/browser/selector.py"]},
- {"id":"RF-14","phase":2,"title":"lib/instance.py::Instance","status":"todo","deps":["RF-05","RF-11","RF-12"],"risk":"medium","priority":"P1","findings":["F-5.1"],"files":["browser_control/lib/profile.py","browser_control/lib/browser.py"],"target":["browser_control/lib/instance.py"]},
- {"id":"RF-15","phase":2,"title":"audit ActionLog sink + lib/logfile.py","status":"todo","deps":[],"risk":"medium","priority":"P1","findings":["F-4.7","F-4.8","F-6.1"],"files":["browser_control/lib/audit.py","browser_control/cli/main.py"],"target":["browser_control/lib/audit.py","browser_control/lib/logfile.py"]},
- {"id":"RF-16","phase":2,"title":"lib/cdp/ package behind facade","status":"todo","deps":["RF-03"],"risk":"medium","priority":"P1","findings":["F-1.3"],"files":["browser_control/lib/cdp.py"],"target":["browser_control/lib/cdp/"]},
- {"id":"RF-17","phase":2,"title":"one RPC send/await/demux path","status":"todo","deps":["RF-16"],"risk":"medium","priority":"P1","findings":["F-1.2"],"files":["browser_control/lib/cdp/"],"target":["browser_control/lib/cdp/rpc.py"]},
- {"id":"RF-18","phase":2,"title":"Session is the only connection owner","status":"todo","deps":["RF-17"],"risk":"high","priority":"P1","findings":["F-1.1","F-1.6"],"files":["browser_control/lib/cdp/"],"target":["browser_control/lib/cdp/session.py"]},
+ {"id":"RF-14","phase":2,"title":"lib/instance.py::Instance","status":"done (commit 29d809e)","deps":["RF-05","RF-11","RF-12"],"risk":"medium","priority":"P1","findings":["F-5.1"],"files":["browser_control/lib/profile.py","browser_control/lib/browser.py"],"target":["browser_control/lib/instance.py"]},
+ {"id":"RF-15","phase":2,"title":"audit ActionLog sink + lib/logfile.py","status":"done (commit 5feb828)","deps":[],"risk":"medium","priority":"P1","findings":["F-4.7","F-4.8","F-6.1"],"files":["browser_control/lib/audit.py","browser_control/cli/main.py"],"target":["browser_control/lib/audit.py","browser_control/lib/logfile.py"]},
+ {"id":"RF-16","phase":2,"title":"lib/cdp/ package behind facade","status":"done (commit 7faca8f)","deps":["RF-03"],"risk":"medium","priority":"P1","findings":["F-1.3"],"files":["browser_control/lib/cdp.py"],"target":["browser_control/lib/cdp/"]},
+ {"id":"RF-17","phase":2,"title":"one RPC send/await/demux path","status":"done (commit 7bb0930)","deps":["RF-16"],"risk":"medium","priority":"P1","findings":["F-1.2"],"files":["browser_control/lib/cdp/"],"target":["browser_control/lib/cdp/rpc.py"]},
+ {"id":"RF-18","phase":2,"title":"Session is the only connection owner","status":"done (commit 20b3190)","deps":["RF-17"],"risk":"high","priority":"P1","findings":["F-1.1","F-1.6"],"files":["browser_control/lib/cdp/"],"target":["browser_control/lib/cdp/session.py"]},
  {"id":"RF-19","phase":3,"title":"lib/browser/ package behind facade","status":"todo","deps":["RF-05","RF-08","RF-10","RF-11","RF-12","RF-14"],"risk":"high","priority":"P1","findings":["F-2.8","F-6.8"],"files":["browser_control/lib/browser.py"],"target":["browser_control/lib/browser/"]},
  {"id":"RF-20","phase":3,"title":"BrowserRow + Endpoint dataclasses","status":"todo","deps":["RF-19"],"risk":"medium","priority":"P1","findings":["F-2.1"],"files":["browser_control/lib/browser/"],"target":["browser_control/lib/browser/machine.py"]},
  {"id":"RF-21","phase":3,"title":"one write/read authorisation predicate","status":"todo","deps":["RF-19","RF-20"],"risk":"low","priority":"P1","findings":["F-2.7"],"files":["browser_control/lib/browser/"],"target":["browser_control/lib/browser/machine.py"]},
