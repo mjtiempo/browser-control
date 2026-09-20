@@ -21,6 +21,7 @@ from collections.abc import Callable
 # index does not see the sibling modules, and the per-line ignores it wanted
 # pushed every line past the formatter's limit, so they are gone.
 from browser_control import __version__
+from browser_control.cli import registry
 from browser_control.lib import audit, capabilities, cdp, dom
 from browser_control.lib import browser as browser_lib
 from browser_control.lib import plugins as plugins_lib
@@ -1074,91 +1075,18 @@ def _bare_tab_word(word: str) -> None:
              + (f" — did you mean `tab {near[0]}`?" if near else ""))
 
 
-def _modes(head: str) -> tuple[str, ...]:
-    """The modes a mode-carrying `tab` subcommand accepts.
-
-    Read from the DECLARED surface, so no list is kept twice: `tab dialog
-    accept` and `tab media play` are actions, and `--for` takes the values its
-    own table holds (`tab wait --for js` is the one that changes class).
-    """
-    if head == "wait":
-        return tuple(dom.WAIT_EXPRS)
-    prefix = f"tab {head} "
-    return tuple(entry[len(prefix):] for entry in capabilities.ACTIONS
-                 if entry.startswith(prefix))
-
-
-def resolved_mode(verb: str, rest: list[str]) -> str:
-    """The mode a call will RUN — read the way its handler will read it.
-
-    The gate authorises a mode-carrying subcommand BY its mode, so it has to
-    resolve that mode exactly as the verb does: the LAST `--for` (what `_pop`
-    leaves), normalised by `dom.mode_of` (the one normaliser in the codebase),
-    and for a positional mode the first positional left once that verb's own
-    flags are out of the way. A mode the gate cannot read is one it cannot
-    authorise, so an unrecognised one is refused here rather than guessed at —
-    a typo has to be `bad-args` whether or not a policy is in force.
-    """
-    if verb != "tab" or not rest:
-        return ""
-    head = str(rest[0])
-    if head == "wait":
-        # `--tab` FIRST, exactly as `cmd_tab_wait` pops it: a `--tab` value that
-        # is literally `--for` must not be read as the mode
-        args = list(rest[1:])
-        args, _spec = _pop(args, "--tab", "tab wait")
-        _kept, value = _pop(args, "--for", "tab wait")
-        if value is None:
-            return ""
-        raw = str(value)
-    elif head in ("dialog", "media"):
-        args = list(rest[1:])
-        args, _spec = _pop(args, "--tab", f"tab {head}")
-        value_flag = "--text" if head == "dialog" else "--index"
-        args, _value = _pop(args, value_flag, f"tab {head}")
-        raw = next((str(arg) for arg in args
-                    if not str(arg).startswith("-")), "")
-        if not raw:
-            return ""
-    else:
-        return ""
-    mode = dom.mode_of(raw)
-    modes = _modes(head)
-    if mode not in modes:
-        fail(ERR_BAD_ARGS,
-             f"tab {head}: {'--for' if head == 'wait' else 'MODE'} is "
-             + "|".join(modes) + f", got {raw!r}")
-    return mode
-
-
 def action(verb: str, rest: list[str]) -> str:
     """Which DECLARED action a call is: verb, subcommand, and its mode.
 
-    Three subcommands answer differently by mode — `tab wait --for js` is code
-    while `tab wait` reads, `tab dialog accept` writes while `state` reads,
-    `tab media play` writes while `state` reads — so the gate asks for the mode
-    on exactly those, resolved by `resolved_mode` (the reading its verb does),
-    and for the plain key on everything else. A caller cannot get a write past
-    the gate by spelling it as a read: `--for JS`, `--for " js "` and a repeated
-    `--for` all resolve to the mode the verb will actually run.
-
-    "" means "this call declares no action" — a subcommand nobody has — and the
-    gate then stays out of the way, so the caller sees the verb's own
-    `bad-args` rather than `not-allowed` for a typo.
+    The reading itself lives in `cli.registry.action_of` — the SAME function the
+    gate and the verb use, so a mode-carrying subcommand cannot be a read to the
+    gate and a write to the browser (`--for JS` is refused because both read it
+    as `js`).
     """
-    head = str(rest[0]) if rest else ""
-    if verb == "tab":
-        if head not in TAB_SUBCOMMANDS:
-            return verb              # a URL: the URL path, which is `tab`
-        if head == "wait":
-            return ("tab wait --for js" if resolved_mode(verb, rest) == "js"
-                    else "tab wait")
-        if head in ("dialog", "media"):
-            return f"tab {head} {resolved_mode(verb, rest) or 'state'}"
-        return f"tab {head}"
-    if verb == "profile":
-        return f"profile {head}" if head in PROFILE_SUBCOMMANDS else ""
-    return verb
+    return registry.action_of(verb, rest,
+                              tab_subcommands=TAB_SUBCOMMANDS,
+                              profile_subcommands=PROFILE_SUBCOMMANDS,
+                              pop=_pop)
 
 
 # The plugins loaded for THIS invocation: replaced at the top of `main`, so
