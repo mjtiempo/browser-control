@@ -10,7 +10,7 @@ import time
 from browser_control.lib import (
     audit,  # pyright: ignore[reportMissingImports]
     cdp,  # pyright: ignore[reportMissingImports]
-    )
+)
 from browser_control.lib import (
     browser as browser_lib,  # pyright: ignore[reportMissingImports]
 )
@@ -22,6 +22,9 @@ from browser_control.lib.dom.keys import (  # pyright: ignore[reportMissingImpor
     KEYS,
     key_event,
     typed_events,
+)
+from browser_control.lib.dom.result import (
+    Verdict,  # pyright: ignore[reportMissingImports]
 )
 from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
     TEXT_TARGET_EXPR,
@@ -60,7 +63,7 @@ def _is_secret(probe: dict) -> bool:
     return bool(probe.get("secret") or probe.get("frame")
                 or probe.get("unreadable"))
 
-def _text_verdict(before: dict, after: dict, chars: int) -> tuple[bool | None, str]:
+def _text_verdict(before: dict, after: dict, chars: int) -> Verdict:
     """(verified, why) for a text verb.
 
     True  — the field is readable and its text grew: the text landed.
@@ -70,13 +73,13 @@ def _text_verdict(before: dict, after: dict, chars: int) -> tuple[bool | None, s
     """
     if after.get("frame") or before.get("frame") \
             or after.get("length") is None:
-        return None, "the focused field is not readable from this document"
+        return Verdict(None, "the focused field is not readable from this document")
     if after.get("target") != before.get("target"):
-        return None, "the focus moved while the text was being written"
+        return Verdict(None, "the focus moved while the text was being written")
     grew = as_int(after.get("length")) - as_int(before.get("length"))
     if grew > 0:
-        return True, f"the field grew by {grew} character(s) for {chars}"
-    return False, "the focused field did not change"
+        return Verdict(True, f"the field grew by {grew} character(s) for {chars}")
+    return Verdict(False, "the focused field did not change")
 
 def press(key: str, tab: str = "", browser: str = "") -> dict:
     """`tab press`: one key event at the DOM focus (CDP `Input`).

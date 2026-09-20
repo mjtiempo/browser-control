@@ -96,6 +96,10 @@ from browser_control.lib.dom.queries import (  # noqa: F401
     text,
     wait,
 )
+from browser_control.lib.dom.result import (  # noqa: F401
+    PageState,
+    Verdict,
+)
 from browser_control.lib.dom.screenshot import (  # noqa: F401
     screenshot,
 )

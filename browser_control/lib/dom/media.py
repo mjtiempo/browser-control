@@ -18,6 +18,9 @@ from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports
     as_float,
     as_int,
 )
+from browser_control.lib.dom.result import (
+    Verdict,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
     MEDIA_ACTION_EXPR,
     MEDIA_STATE_EXPR,
@@ -37,7 +40,7 @@ from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
 
 MEDIA_TIMEOUT_S = 5.0       # how long a play/pause is given to take effect
 
-def _playback_verdict(mode: str, before: dict, after: dict) -> tuple[bool, str]:
+def _playback_verdict(mode: str, before: dict, after: dict) -> Verdict:
     """Did the play/pause take effect? Judged ONLY from the read-back.
 
     `play` is verified when the CLOCK MOVED — not merely when the element
@@ -48,14 +51,14 @@ def _playback_verdict(mode: str, before: dict, after: dict) -> tuple[bool, str]:
     """
     if mode == "play":
         if as_float(after.get("time")) > as_float(before.get("time")):
-            return True, "the clock advanced"
+            return Verdict(True, "the clock advanced")
         if as_int(after.get("ready_state")) == 0:
-            return False, ("the element has nothing to play (readyState 0: no "
-                           "supported source)")
-        return False, "the clock did not advance"
+            return Verdict(False, ("the element has nothing to play "
+                                  "(readyState 0: no supported source)"))
+        return Verdict(False, "the clock did not advance")
     if after.get("paused"):
-        return True, "the element reports paused"
-    return False, "the element is still playing"
+        return Verdict(True, "the element reports paused")
+    return Verdict(False, "the element is still playing")
 
 def _media_reply(row: dict, tab_row: dict, state: dict, mode: str,
                  before: dict | None = None) -> dict:

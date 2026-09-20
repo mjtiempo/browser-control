@@ -26,6 +26,9 @@ from browser_control.lib.dom.keys import (  # pyright: ignore[reportMissingImpor
 from browser_control.lib.dom.queries import (  # pyright: ignore[reportMissingImports]
     FIND_CAP,
 )
+from browser_control.lib.dom.result import (
+    PageState,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
     CANDIDATES_EXPR,
     CHECK_READ,
@@ -103,11 +106,7 @@ def _click_at(row: dict, tab_row: dict, at: str) -> dict:
         after = session.evaluate(STATE_EXPR)
     before = before if isinstance(before, dict) else {}
     after = after if isinstance(after, dict) else {}
-    changed = (after.get("url") != before.get("url")
-               or after.get("title") != before.get("title")
-               or after.get("active") != before.get("active")
-               or [after.get("x"), after.get("y")]
-               != [before.get("x"), before.get("y")])
+    changed = PageState.from_dict(after).changed(PageState.from_dict(before))
     reply = {"ok": True, "clicked": True, "point": [x, y],
              "under": probe.get("under"), "changed": changed,
              "verified": False,
@@ -215,10 +214,7 @@ def click(text: str | None = None, selector: str | None = None,
     after = after if isinstance(after, dict) else {}
     before = {"url": data.get("url"), "title": data.get("title"),
               "active": data.get("active"), "scroll": data.get("scroll")}
-    changed = (after.get("url") != before["url"]
-               or after.get("title") != before["title"]
-               or after.get("active") != before["active"]
-               or [after.get("x"), after.get("y")] != before["scroll"])
+    changed = PageState.from_dict(after).changed(PageState.from_dict(before))
     return {"ok": True, "clicked": True, "element": _pkg._element(element),
             "point": [x, y], "changed": changed, "under": under,
             "before": before,
