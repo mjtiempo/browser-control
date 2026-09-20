@@ -148,6 +148,29 @@ DOM_FRAME = ("<!doctype html><title>frame</title>"
 EDGES_PAGE = """<!doctype html><meta charset="utf-8"><title>edges</title>
 <button id="ask" onclick="window.__prompt = prompt('name', '')">ask</button>
 <a id="dl" href="/attachment">download</a>"""
+EXTRACT_PAGE = """<!doctype html><meta charset="utf-8"><title>extract fixture</title>
+<section id="posts">
+  <article>
+    <h2><a href="/alice/status/101">Alice</a></h2>
+    <time datetime="2026-01-02T03:04:05.000Z">t1</time>
+    <p class="body">First post body</p>
+  </article>
+  <article>
+    <h2><a href="/bob/status/102">Bob</a></h2>
+    <time datetime="2026-01-02T03:05:06.000Z">t2</time>
+    <p class="body">Second post body</p>
+  </article>
+  <article>
+    <h2><a href="/carol/status/103">Carol</a></h2>
+    <time datetime="2026-01-02T03:06:07.000Z">t3</time>
+    <p class="body">Third post body</p>
+  </article>
+  <article hidden>
+    <h2><a href="/dave/status/104">Dave</a></h2>
+    <time datetime="2026-01-02T03:07:08.000Z">t4</time>
+    <p class="body">Hidden post body</p>
+  </article>
+</section>"""
 FRAME_TOP = """<!doctype html><meta charset="utf-8"><title>frames</title>
 <p>TOP_MARKER</p>
 <button id="at-target" style="padding:14px"
@@ -391,6 +414,9 @@ def start_server() -> None:
                 self.send_response(302)
                 self.send_header("Location", "/eight-b")
                 self.end_headers()
+                return
+            if self.path.startswith("/extract"):
+                self._send(EXTRACT_PAGE.encode())
                 return
             if self.path.startswith("/edges"):
                 self._send(EDGES_PAGE.encode())
@@ -706,6 +732,42 @@ def c_dom_text_reads_the_page() -> str:
     assert cut["truncated"] is True and len(cut["text"]) == 20, cut
     assert cut["length"] > 20, cut
     return f'{full["length"]} chars; a 20-char read still reports the full length'
+
+
+def c_tab_extract() -> str:
+    """`tab extract`: repeated items as records, with no caller code.
+
+    The fixture is four articles — one `hidden` — so projection, DOM order,
+    the `--visible` filter, `--chars` slicing and the cap are all read back
+    from a real browser through the generic engine (no `tab js` involved).
+    """
+    tab = f"id:{STATE['tab'][:8]}"
+    ok_json("tab", "nav", f"{base_url()}/extract", "--tab", tab)
+    ok_json("tab", "wait", "--for", "idle", "--tab", tab)
+    data = ok_json("tab", "extract",
+                   "--each", "#posts article",
+                   "--field", "text=.body",
+                   "--field", "time=time@datetime",
+                   "--field", "url=a@href",
+                   "--cap", "5", "--tab", tab)
+    assert data["count"] == 4, data
+    assert data["total"] == 4 and data["truncated"] is False, data
+    assert data["matches"][0]["text"] == "First post body", data
+    assert data["matches"][0]["time"] == "2026-01-02T03:04:05.000Z", data
+    assert data["matches"][0]["url"] == "/alice/status/101", data
+    assert data["matches"][2]["text"] == "Third post body", data
+    visible = ok_json("tab", "extract", "--each", "#posts article",
+                      "--field", "text=.body", "--visible", "--cap", "5",
+                      "--tab", tab)
+    assert visible["count"] == 3 and visible["total"] == 3, visible
+    small = ok_json("tab", "extract", "--each", "#posts article",
+                    "--field", "text=.body", "--chars", "5", "--cap", "2",
+                    "--tab", tab)
+    assert small["count"] == 2 and small["truncated"] is True, small
+    assert small["matches"][0]["text"] == "First", small
+    # leave the tab where the DOM checks expect it (this check navigated away)
+    ok_json("tab", "nav", f"{base_url()}/dom", "--tab", tab)
+    return "4 articles -> records; --visible skips the hidden one; cap slices"
 
 
 def c_dom_find_resolves_targets() -> str:
@@ -2116,6 +2178,7 @@ CHECKS = (
     ("tab reload makes a new document", c_reload_makes_a_new_document),
     ("tab nav names the tab", c_nav_names_the_tab),
     ("tab text reads the page", c_dom_text_reads_the_page),
+    ("tab extract reads records", c_tab_extract),
     ("tab find resolves targets", c_dom_find_resolves_targets),
     ("tab js is declared unverified", c_dom_js_is_declared_unverified),
     ("tab wait polls", c_dom_wait_polls),

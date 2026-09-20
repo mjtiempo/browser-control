@@ -80,6 +80,7 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "tab media pause": ("write",),
     "tab find": ("read",),
     "tab text": ("read",),
+    "tab extract": ("read",),
     "tab wait": ("read",),
     "tab wait --for js": ("code",),
     "tab js": ("code", "write"),
@@ -117,12 +118,35 @@ def unclassified(handlers: dict,
 
 
 def by_class() -> dict[str, list[str]]:
-    """The surface the other way round: which actions hold each class."""
+    """The surface the other way round: which actions hold each class.
+
+    Plugin-declared actions are included (see `set_plugins`): a caller asking
+    "what can run under `--deny code`" should see them too.
+    """
     grouped: dict[str, list[str]] = {name: [] for name in CLASSES}
-    for action, classes in sorted(ACTIONS.items()):
-        for name in classes:
-            grouped.setdefault(name, []).append(action)
+    for source in (ACTIONS, PLUGIN_ACTIONS):
+        for action, classes in sorted(source.items()):
+            for name in classes:
+                grouped.setdefault(name, []).append(action)
     return grouped
+
+
+#: Actions a PLUGIN declared when it was loaded. Kept apart from `ACTIONS`
+#: because the built-in table is checked against the handler tables (a plugin
+#: verb is not a handler), but it is the same closed vocabulary and the same
+#: gate.
+PLUGIN_ACTIONS: dict[str, tuple[str, ...]] = {}
+
+
+def set_plugins(actions: dict[str, tuple[str, ...]]) -> None:
+    """Replace the plugin-declared actions — called once per CLI invocation.
+
+    Replacing (rather than adding) means a process that loads plugins for one
+    call cannot leave a ghost action behind for the next one.
+    """
+    PLUGIN_ACTIONS.clear()
+    for action, classes in actions.items():
+        PLUGIN_ACTIONS[action] = tuple(classes)
 
 
 # ---------------------------------------------------------------- the gate
@@ -257,7 +281,7 @@ def allowed(action: str) -> tuple[bool, str]:
     """May that action run under the policy in force? (yes, or why not)."""
     if not POLICY["enforced"]:
         return True, ""
-    classes = ACTIONS.get(action)
+    classes = ACTIONS.get(action) or PLUGIN_ACTIONS.get(action)
     if not classes:
         return False, (f"{action} is not in the declared surface (see "
                        "`selftest`), and an unclassified verb is refused")

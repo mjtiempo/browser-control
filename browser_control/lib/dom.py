@@ -48,6 +48,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import time
 from typing import Any
 
@@ -63,6 +64,13 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
+EXTRACT_CAP = 10            # records `extract` returns by default
+EXTRACT_MAX_MATCHES = 500   # and the most it will return at all
+EXTRACT_FIELD_CHARS = 1_000  # chars kept of ONE field (sliced IN the page)
+EXTRACT_FIELD_MAX = 20_000  # and the most one field may keep
+EXTRACT_TOTAL_CHARS = 20_000  # field text across the whole reply, page-side
+_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+_ATTR_NAME = re.compile(r"^[A-Za-z_:][A-Za-z0-9_:.-]*$")
 WAIT_POLL_S = 0.4           # how often a `wait` samples
 WAIT_DEFAULT_S = 15.0
 IDLE_DEFAULT_MS = 500
@@ -133,7 +141,7 @@ def mode_of(mode: str | None) -> str:
 FRAME_VERBS = frozenset({
     "js", "wait", "find", "text", "click", "hover", "check", "select",
     "scroll", "focus", "press", "insert", "type", "upload", "media",
-    "screenshot",
+    "screenshot", "extract",
 })
 CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
 DIALOG_PROBE_S = 1.5        # how long the tab is given to prove it is awake
@@ -1193,6 +1201,178 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     return {"ok": True, "for": name, "waited_s": round(time.time() - started, 1),
             "samples": samples, "tab": f"id:{target_id}",
             "browser": tabs._brief(row)}  # noqa: SLF001
+
+
+EXTRACT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
+  const schema = __SCHEMA__;
+  const scan = (root, selector) => {
+    const out = [];
+    const visit = (r) => {
+      for (const el of r.querySelectorAll(selector)) out.push(el);
+      if (r.shadowRoot) visit(r.shadowRoot);
+    };
+    visit(root);
+    return out;
+  };
+  const candidates = query(schema.each)
+    .filter((el) => !schema.visible || rendered(el));
+  const chosen = candidates.slice(0, schema.cap);
+  const records = [];
+  let used = 0;
+  let budget_hit = false;
+  for (const el of chosen) {
+    const row = {};
+    for (const name of Object.keys(schema.fields)) {
+      const spec = schema.fields[name];
+      const target = spec.sel ? (scan(el, spec.sel)[0] || null) : el;
+      let value = null;
+      if (target) value = spec.attr ? attr(target, spec.attr) : textOf(target);
+      if (typeof value === 'string') {
+        value = value.trim().slice(0, schema.chars);
+      }
+      row[name] = value;
+    }
+    used += JSON.stringify(row).length;
+    records.push(row);
+    if (used >= schema.budget) { budget_hit = true; break; }
+  }
+  return {
+    url: location.href, title: document.title,
+    visibility: document.visibilityState,
+    total: candidates.length, matches: records,
+    truncated: budget_hit || candidates.length > records.length};
+})())""")
+
+
+def _extract_field(spec: str, verb: str = "tab extract") -> tuple[str, dict]:
+    """One `NAME=SELECTOR[@ATTR]` field spec, parsed and validated.
+
+    `@ATTR` at the end names an attribute; with nothing before it (`name=@href`)
+    the attribute is read from the MATCH element itself, and `:scope` as the
+    selector reads the match's own text. A selector may legitimately contain
+    `@` (`[href*="@"]`), so the tail only counts as an attribute when it looks
+    like one.
+    """
+    text = str(spec or "")
+    name, sep, value = text.partition("=")
+    name = name.strip()
+    if not sep or not name:
+        fail("bad-args",
+             f"{verb}: a field is NAME=SPEC (e.g. "
+             "`--field text=[data-testid=tweetText]` or "
+             f"`--field time=time@datetime`) — got {spec!r}")
+    if not _FIELD_NAME.match(name):
+        fail("bad-args",
+             f"{verb}: {name!r} is not a field name (letters, digits, `_` and "
+             "`-`, starting with a letter or `_`)")
+    sel = value.strip()
+    attr_name = ""
+    head, at, tail = sel.rpartition("@")
+    if at and _ATTR_NAME.match(tail.strip()):
+        sel, attr_name = head.strip(), tail.strip()
+    if not sel and not attr_name:
+        fail("bad-args",
+             f"{verb}: {spec!r} names neither a selector nor an attribute — "
+             "use `name=SELECTOR`, `name=SELECTOR@attr` or `name=@attr`")
+    return name, {"sel": sel, "attr": attr_name}
+
+
+def _extract_schema(each: str, fields: list[str], cap: int = EXTRACT_CAP,
+                    chars: int = EXTRACT_FIELD_CHARS, visible: bool = False,
+                    verb: str = "tab extract") -> dict:
+    """The JSON schema one extraction runs: parsed, validated, bounded."""
+    selector = str(each or "").strip()
+    if not selector:
+        fail("bad-args",
+             f"{verb}: --each is required — the CSS selector of the repeated "
+             "item (e.g. --each article)")
+    if not fields:
+        fail("bad-args", f"{verb}: at least one --field NAME=SPEC is required")
+    parsed: dict[str, dict] = {}
+    for spec in fields:
+        name, field = _extract_field(spec, verb)
+        parsed[name] = field
+    limit = _int(cap, EXTRACT_CAP)
+    if limit < 1:
+        fail("bad-args", f"{verb}: --cap must be at least 1")
+    keep = _int(chars, EXTRACT_FIELD_CHARS)
+    if keep < 1:
+        fail("bad-args", f"{verb}: --chars must be at least 1")
+    return {"each": selector, "fields": parsed,
+            "cap": min(limit, EXTRACT_MAX_MATCHES),
+            "chars": min(keep, EXTRACT_FIELD_MAX),
+            "visible": bool(visible), "budget": EXTRACT_TOTAL_CHARS}
+
+
+def _extract_records(rows: object, names: list[str]) -> list[dict]:
+    """The record list a page answered, filtered to shape.
+
+    A row that is not an object, or a value that is not a string or null, is
+    DROPPED rather than raised: the page owns every value on this path, the
+    same rule `find` follows for its rows.
+    """
+    if not isinstance(rows, list):
+        return []
+    out: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        out.append({name: (row.get(name)
+                           if isinstance(row.get(name), str) else None)
+                    for name in names})
+    return out
+
+
+def extract(each: str = "", fields: list[str] | None = None,
+            cap: int = EXTRACT_CAP, chars: int = EXTRACT_FIELD_CHARS,
+            visible: bool = False, unique: str = "",
+            tab: str = "", browser: str = "") -> dict:
+    """`tab extract`: the page's repeated items as records, declaratively.
+
+    A READ: no caller code, no writes. `--each SELECTOR` names the repeated
+    element; each `--field NAME=SELECTOR[@ATTR]` names one value inside it —
+    innerText by default, an attribute with `@ATTR`, `@ATTR` alone for the
+    match itself, `:scope` for the match's own text. Values are sliced IN THE
+    PAGE (`--chars`) and the whole answer is budgeted page-side, so a document
+    cannot flood the reply; `--visible` skips what the page does not render and
+    `--unique FIELD` keeps the first of duplicates.
+
+    Everything here is the PAGE's own answer, exactly like `find` and `text`:
+    the selector language is CSS, the values are DOM text/attributes, and no
+    claim beyond "this is what the page showed" is made. `total` counts the
+    matches the selector reached; `truncated` says the cap or the budget cut
+    the list.
+    """
+    schema = _extract_schema(each, list(fields or []), cap, chars, visible)
+    names = list(schema["fields"])
+    wanted = str(unique or "").strip()
+    if wanted and wanted not in names:
+        fail("bad-args",
+             f"tab extract: --unique {wanted!r} is not one of the fields "
+             f"({', '.join(names)})")
+    row, tab_row = _resolve(tab, browser, for_write=False)
+    with _session(row, tab_row) as session:
+        data = session.evaluate(
+            EXTRACT_EXPR.replace("__SCHEMA__", json.dumps(schema)))
+    data = data if isinstance(data, dict) else {}
+    raw = _extract_records(data.get("matches"), names)
+    records = raw
+    if wanted:
+        seen: set = set()
+        records = []
+        for record in raw:
+            value = record.get(wanted)
+            if value in seen:
+                continue
+            seen.add(value)
+            records.append(record)
+    reply = _reply(row, tab_row, data)
+    reply.update({"ok": True, "each": schema["each"], "fields": names,
+                  "count": len(records), "total": _int(data.get("total")),
+                  "truncated": (bool(data.get("truncated"))
+                                or len(records) < len(raw)),
+                  "matches": records})
+    return _with_frame(reply)
 
 
 def find(text: str | None = None, selector: str | None = None,

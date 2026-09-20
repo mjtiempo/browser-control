@@ -23,6 +23,7 @@ from collections.abc import Callable
 from browser_control import __version__
 from browser_control.lib import audit, capabilities, cdp, dom
 from browser_control.lib import browser as browser_lib
+from browser_control.lib import plugins as plugins_lib
 from browser_control.lib import profile as profile_lib
 from browser_control.lib.browser import (
     activate,
@@ -102,6 +103,13 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  a visible element, in PAGE coordinates
   tab text [--selector CSS] [--chars N] [--tab SPEC]
                                  the rendered text, truncated in the page
+  tab extract --each CSS --field NAME=SPEC [--field ...] [--cap N]
+           [--chars N] [--visible] [--unique FIELD] [--tab SPEC]
+                                 the repeated items as RECORDS: each --each
+                                 match yields one object, and each --field is
+                                 NAME=SELECTOR (innerText), NAME=SELECTOR@attr
+                                 or NAME=@attr (the match itself); CSS only,
+                                 no code, values sliced and budgeted
   tab wait --for load|idle|element|js [--selector CSS] [--expr EXPR]
            [--timeout S] [--idle-ms MS] [--tab SPEC]
                                  poll a predicate to a wall-clock deadline
@@ -129,7 +137,8 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab media state|play|pause [--index N] [--tab SPEC]
                                  read or drive the page's video/audio
   selftest           prove the install: interpreter, websockets, verbs
-  help               this text (also `-h` and `--help`)
+  help               this text (also `-h` and `--help`), then any plugin
+                     actions installed (see `selftest`)
 
 SPEC   a CDP target id prefix (`id:2D4BC76C`), `active` (the tab whose page
        reports itself visible — only one per window), or a title/url
@@ -376,6 +385,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
                                 "profile": PROFILE_SUBCOMMANDS})},
              "policy": capabilities.describe(),
              "browsers": found}
+    reply.update(_plugins_report())
     if browser:
         reply["requested"] = {"name": browser,
                               "path": shutil.which(browser) or ""}
@@ -652,6 +662,25 @@ def cmd_tab_screenshot(rest: list[str], browser: str) -> dict:
              ".png)")
     return dom.screenshot(target, full=full, force=force, tab=spec,
                           browser=browser)
+
+
+def cmd_tab_extract(rest: list[str], browser: str) -> dict:
+    """`tab extract --each CSS --field NAME=SPEC ...` — records, no code."""
+    rest, spec = _tab_flag(rest, "tab extract")
+    rest, each = _pop(rest, "--each", "tab extract")
+    rest, cap = _pop(rest, "--cap", "tab extract")
+    rest, chars = _pop(rest, "--chars", "tab extract")
+    rest, visible = _switch(rest, "--visible")
+    rest, unique = _pop(rest, "--unique", "tab extract")
+    rest, fields = _pop_all(rest, "--field", "tab extract")
+    _none(rest, "tab extract")
+    return dom.extract(
+        each or "", fields,
+        cap=(_int(cap, "tab extract --cap") if cap is not None
+             else dom.EXTRACT_CAP),
+        chars=(_int(chars, "tab extract --chars") if chars is not None
+               else dom.EXTRACT_FIELD_CHARS),
+        visible=visible, unique=unique or "", tab=spec, browser=browser)
 
 
 def cmd_tab_js(rest: list[str], browser: str) -> dict:
@@ -931,6 +960,7 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
     "js": cmd_tab_js,
     "find": cmd_tab_find,
     "text": cmd_tab_text,
+    "extract": cmd_tab_extract,
     "wait": cmd_tab_wait,
     "click": cmd_tab_click,
     "scroll": cmd_tab_scroll,
@@ -1124,10 +1154,33 @@ def action(verb: str, rest: list[str]) -> str:
     return verb
 
 
+# The plugins loaded for THIS invocation: replaced at the top of `main`, so
+# one call can never inherit another's actions (or leave a ghost behind).
+PLUGINS = plugins_lib.Registry()
+
+
+def _verb_names() -> list[str]:
+    """Every top-level verb a caller can run: built-ins first, then plugins."""
+    return [*HANDLERS, *PLUGINS.actions]
+
+
+def _plugins_report() -> dict:
+    return {"plugins": PLUGINS.describe(), "plugin_errors": PLUGINS.errors}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    # Plugins load once per invocation, BEFORE the help text and the gate:
+    # `--help`/`selftest` report them, and the classes they declare have to be
+    # in the surface before `allowed()` is asked anything.
+    global PLUGINS
+    PLUGINS = plugins_lib.load(reserved=set(HANDLERS) | {"help"})
+    capabilities.set_plugins({verb: tuple(spec["classes"])
+                              for verb, spec in PLUGINS.actions.items()})
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)
+        for spec in PLUGINS.actions.values():
+            print(f"  {spec['usage']}")
         return 0
     verb = ""
     rest: list[str] = []
@@ -1141,7 +1194,7 @@ def main(argv: list[str] | None = None) -> int:
             # flagged it)
             print(USAGE, file=sys.stderr)
             print("ERR[bad-args]: a verb is required "
-                  f"(have: {', '.join(HANDLERS)})", file=sys.stderr)
+                  f"(have: {', '.join(_verb_names())})", file=sys.stderr)
             code = "bad-args"
             return 2
         rest, flags = _flags(args)
@@ -1153,7 +1206,7 @@ def main(argv: list[str] | None = None) -> int:
             given = ", ".join(f"{key}={value!r}"
                               for key, value in flags.items() if value)
             print("ERR[bad-args]: a verb is required "
-                  f"(have: {', '.join(HANDLERS)})"
+                  f"(have: {', '.join(_verb_names())})"
                   + (f" — {given} was given, but no verb to run"
                      if given else ""), file=sys.stderr)
             code = "bad-args"           # so the audit line carries the code
@@ -1182,8 +1235,11 @@ def main(argv: list[str] | None = None) -> int:
         audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:
+            plugin = PLUGINS.actions.get(verb)
+            handler = plugin["run"] if plugin is not None else None
+        if handler is None:
             raise ControlError("unknown-command",
-                               f"{verb} (have: {', '.join(HANDLERS)})")
+                               f"{verb} (have: {', '.join(_verb_names())})")
         head = str(rest[0]) if rest else ""
         if verb == "tab" and head and head not in TAB_SUBCOMMANDS:
             _bare_tab_word(head)

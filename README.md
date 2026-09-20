@@ -73,10 +73,9 @@ Browser level — `open`, `close`, `list`, `info`, `attach`, `detach`,
 `profile info|seed|reset`, `selftest`.
 
 Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
-`reload`, `activate`, `frames`, `find`, `text`, `js`, `wait`, `click`,
-`hover`, `check`,
-`select`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`,
-`screenshot`, `dialog`, `media`.
+`reload`, `activate`, `frames`, `find`, `text`, `extract`, `js`, `wait`,
+`click`, `hover`, `check`, `select`, `scroll`, `focus`, `press`, `insert`,
+`type`, `upload`, `screenshot`, `dialog`, `media`.
 
 `browser-control-cli --help` lists every flag; `docs/plan.md` has the design and
 `docs/progress.md` the state of the work.
@@ -126,6 +125,51 @@ Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
 - The **action log** is JSONL (`BROWSER_CONTROL_LOG`, default
   `~/.local/state/browser-control/actions.jsonl`, `off` to disable). A password
   a verb *proves* it touched is written as a length, never as text.
+
+## Extraction — records, no code
+
+`tab extract` turns a page's repeated items into records, declaratively:
+
+```console
+$ browser-control-cli tab extract --each article \
+    --field 'text=[data-testid="tweetText"]' \
+    --field time=time@datetime \
+    --field url='a[href*="/status/"]@href' --cap 5
+{"ok": true, "count": 5, "total": 32, "truncated": true,
+ "matches": [{"text": "…", "time": "2026-09-20T07:37:24.000Z", "url": "/…/status/…"}, …]}
+```
+
+- `--each CSS` names the repeated element; `--field NAME=SPEC` names one value
+  inside it — `NAME=SELECTOR` (innerText), `NAME=SELECTOR@attr` (attribute),
+  `NAME=@attr` (attribute of the match) or `NAME=:scope` (the match's text).
+- `--cap N`, `--chars N`, `--visible`, `--unique FIELD` bound and filter the
+  answer; values are sliced **in the page**, so a huge document cannot flood
+  the reply.
+- It is a **read**: CSS selectors only, no JavaScript, classified `read`, so a
+  host running `--deny code` can still extract. The values are the page's own
+  DOM text/attributes — the same oracle as `find`/`text`, with no claim beyond
+  "this is what the page showed".
+
+## Plugins — site actions on top of the core
+
+The core is generic; a **plugin** teaches it one site: which URL, which
+selectors, what to call the fields, and the capability classes the action
+holds. Plugins are Python files loaded from `BROWSER_CONTROL_PLUGIN_PATH`
+(colon-separated; setting it replaces the default) or
+`~/.local/share/browser-control/plugins/`. `selftest` lists what loaded and
+what did not; `--help` appends their usage lines.
+
+This repo ships one, `plugins/x_reader.py` — read-only X search:
+
+```console
+$ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
+    x search '"Pardon Snowden"' --latest --cap 5
+{"ok": true, "sort": "latest", "count": 5, "posts": [{"handle": "…", "time": "…", "text": "…"}, …]}
+```
+
+`--latest` is X's "Latest" sort (by date), `--top` its relevance ranking, and
+`sort` reports what the page's own tab strip says is selected — no verb can
+prove a site's ordering. See `plugins/README.md` for the plugin contract.
 
 ## Capabilities, machine-readable
 

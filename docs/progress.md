@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 58 hermetic + 58 live checks passing.
+Repo `main`, worktree clean, 63 hermetic + 59 live checks passing.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
@@ -24,8 +24,8 @@ it and puts one console script on PATH.
 | `browser_control/lib/cdp.py` | 887 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
 | `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
 | `browser_control/lib/capabilities.py` | 217 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
-| `tests/test_unit.py` | 2714 | 58 hermetic checks, no browser needed |
-| `tests/live_test.py` | 2245 | 58 live checks on a throwaway root, skip ≠ pass |
+| `tests/test_unit.py` | 2714 | 63 hermetic checks, no browser needed |
+| `tests/live_test.py` | 2245 | 59 live checks on a throwaway root, skip ≠ pass |
 | `browser_control/lib/profile.py` | 491 | **the `profile` noun**: `info` (weight, age, liveness), `seed` (logins copied in, caches skipped, read back), `reset` (wipe, on purpose) |
 
 Five verbs, browser-only:
@@ -969,6 +969,45 @@ asserted two files landed in the target, but never LAUNCHED a browser on the
 seeded profile. It now does: after seeding a profile directory, it opens the
 instance, closes it, and requires the seeded `profile.name` to still be there in
 `Default/Preferences` — the file Chrome actually used — then wipes it.
+
+### 5.27 Extraction, plugins, and the first one (`x`) — done
+
+The core gained the generic half of "scrape a page" and a home for the
+site-specific half:
+
+* **`tab extract`** — `--each SELECTOR` names the repeated item and each
+  `--field NAME=SELECTOR[@ATTR]` names a value inside it (innerText by default,
+  an attribute with `@ATTR`, `@ATTR` alone for the match itself, `:scope` for
+  the match's own text). `--cap`, `--chars`, `--visible` and `--unique` bound
+  it; values are sliced IN THE PAGE and the whole answer is budgeted, so a
+  document cannot flood the reply. It is a **read**: CSS only, no code, so
+  `--deny code` can still extract. The page's rows are shape-filtered exactly
+  like `find`'s (`_extract_records`), never raised.
+* **`lib/plugins.py`** — plugins load from `BROWSER_CONTROL_PLUGIN_PATH`
+  (override) or `~/.local/share/browser-control/plugins`; each declares
+  `PLUGIN = {api, name, description, actions:{verb:{run, classes, usage}}}`.
+  Loading is fail-open for the CLI (broken/colliding/wrong-API plugins are
+  recorded and skipped), `selftest` reports `plugins`/`plugin_errors`, `--help`
+  appends usage, and the declared classes go into the gate's surface
+  (`capabilities.PLUGIN_ACTIONS`) while staying out of the built-in `ACTIONS`
+  table the hermetic check validates. A plugin action runs in-process and is
+  trusted local code; its classes are declarations, not a sandbox.
+* **`plugins/x_reader.py`** — the first plugin: read-only X search.
+  `x search QUERY [--latest|--top] [--cap N] [--chars N] [--tab SPEC]`
+  navigates the tab, waits for idle (suppressed if X never idles — the
+  extraction is the real read-back) and then for the first rendered post
+  (idle does not mean rendered on an SPA), calls `tab extract` with X's
+  selector map
+  (`article`, `tweetText`, `time@datetime`, the status link), maps rows to
+  `{id, handle, url, time, text}` (dropping link-less rows and duplicate ids),
+  and reports `sort` from the page's own selected tab. The map is the one place
+  that breaks when X's DOM changes.
+
+Tests: hermetic coverage for the schema parser, the record shaper, the
+`tab extract` argv, the plugin loader (valid/broken/colliding/wrong-API) and
+the X plugin's URL building and record mapping (stubbed, no network); the
+battery extracts from a real local fixture — four articles, one `hidden` — so
+projection, order, `--visible`, `--chars` and the cap are proven in a browser.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,

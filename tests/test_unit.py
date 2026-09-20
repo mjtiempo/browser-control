@@ -308,7 +308,8 @@ def t_expressions_and_shot_rules() -> None:
                     "__SELECTOR__": '"#x"', "__INDEX__": "0",
                     "__VISIBLE__": "true", "__CAP__": "1",
                     "__VALUE__": '"v"', "__X__": "1", "__Y__": "1",
-                    "__EXPR__": "true", "__IDLE_MS__": "100"}
+                    "__EXPR__": "true", "__IDLE_MS__": "100",
+                    "__SCHEMA__": '{"each":"a"}'}
     seen = 0
     for name in dir(dom):
         src = getattr(dom, name)
@@ -1582,6 +1583,7 @@ def t_capability_surface() -> None:
     # the classes a caller would guess, including the ones a MODE decides
     assert capabilities.ACTIONS["tab js"] == ("code", "write")
     assert capabilities.ACTIONS["tab text"] == ("read",)
+    assert capabilities.ACTIONS["tab extract"] == ("read",)
     assert capabilities.ACTIONS["tab screenshot"] == ("read", "file")
     assert capabilities.ACTIONS["tab upload"] == ("write", "file")
     assert capabilities.ACTIONS["profile info"] == ("read",)
@@ -2663,6 +2665,195 @@ def t_audit_modes_caps_redirect_and_symlink() -> None:
         assert Path(victim).read_text(encoding="utf-8") == "keep"
 
 
+def t_extract_schema_and_records() -> None:
+    """The extraction engine's spec parsing and record shaping are pure."""
+    schema = dom._extract_schema(                            # noqa: SLF001
+        "article",
+        ['text=[data-testid="tweetText"]', "time=time@datetime",
+         'url=a[href*="/status/"]@href', "label=:scope", "href=@href"],
+        5, 800, True)
+    assert schema["each"] == "article" and schema["cap"] == 5
+    assert schema["chars"] == 800 and schema["visible"] is True
+    assert schema["fields"]["text"] == {
+        "sel": '[data-testid="tweetText"]', "attr": ""}
+    assert schema["fields"]["time"] == {"sel": "time", "attr": "datetime"}
+    assert schema["fields"]["url"] == {
+        "sel": 'a[href*="/status/"]', "attr": "href"}
+    assert schema["fields"]["label"] == {"sel": ":scope", "attr": ""}
+    assert schema["fields"]["href"] == {"sel": "", "attr": "href"}
+    refusal(lambda: dom._extract_schema("", ["a=:scope"]), "bad-args")
+    refusal(lambda: dom._extract_schema("a", []), "bad-args")
+    refusal(lambda: dom._extract_schema("a", ["no-equals"]), "bad-args")
+    refusal(lambda: dom._extract_schema("a", ["=:scope"]), "bad-args")
+    refusal(lambda: dom._extract_schema("a", ["a="]), "bad-args")
+    refusal(lambda: dom._extract_schema("a", ["a=:scope"], cap=0),
+            "bad-args")
+    records = dom._extract_records(                          # noqa: SLF001
+        [{"a": "x", "b": 7}, "nope", {"a": None}, {"a": "y"}],
+        ["a", "b"])
+    assert records == [{"a": "x", "b": None}, {"a": None, "b": None},
+                       {"a": "y", "b": None}], records
+    assert dom._extract_records("not a list", ["a"]) == []
+
+
+def t_cli_extract_grammar() -> None:
+    """`tab extract` argv reaches dom.extract once, flags intact."""
+    calls: list[tuple] = []
+
+    def fake_extract(each: str = "", fields: list | None = None,
+                     cap: int = 0, chars: int = 0, visible: bool = False,
+                     unique: str = "", tab: str = "",
+                     browser: str = "") -> dict:
+        calls.append((each, list(fields or []), cap, chars, visible, unique,
+                      tab, browser))
+        return {"ok": True}
+
+    original = dom.extract
+    dom.extract = fake_extract                    # type: ignore[assignment]
+    try:
+        rc, _out, err = run_cli([
+            "tab", "extract", "--each", "article",
+            "--field", "text=[data-testid=tweetText]",
+            "--field", "time=time@datetime",
+            "--cap", "5", "--chars", "700", "--visible",
+            "--unique", "text", "--tab", "id:AB"])
+        assert rc == 0, (rc, err)
+        assert calls == [("article",
+                          ["text=[data-testid=tweetText]",
+                           "time=time@datetime"],
+                          5, 700, True, "text", "id:AB", "")], calls
+    finally:
+        dom.extract = original                    # type: ignore[assignment]
+    for argv in (["tab", "extract"],
+                 ["tab", "extract", "--each", "a"],
+                 ["tab", "extract", "--field", "x=:scope"],
+                 ["tab", "extract", "--each", "a", "--field", "x=:scope",
+                  "--unique", "nope"],
+                 ["tab", "extract", "--each", "a", "--field", "x=:scope",
+                  "--cap", "0"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
+def t_plugin_system() -> None:
+    """Plugins load, dispatch, gate and report; broken ones fail open."""
+    valid = (
+        "from browser_control.lib.errors import fail\n"
+        "def run(rest, browser):\n"
+        "    if not rest:\n"
+        "        fail('bad-args', 'hello: a NAME is required')\n"
+        "    return {'ok': True, 'hello': rest[0], 'browser': browser}\n"
+        "PLUGIN = {'api': 1, 'name': 'hello', 'description': 'a test plugin',\n"
+        "          'actions': {'hello': {'run': run, 'classes': ('read',),\n"
+        "                                'usage': 'hello NAME'}}}\n")
+    collide = (
+        "PLUGIN = {'api': 1, 'name': 'bad', 'actions': {\n"
+        "    'open': {'run': lambda rest, browser: {},\n"
+        "             'classes': ('read',)}}}\n")
+    wrong_api = (
+        "PLUGIN = {'api': 99, 'name': 'old', 'actions': {\n"
+        "    'old': {'run': lambda rest, browser: {}, 'classes': ('read',)}}}\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "hello.py").write_text(valid, encoding="utf-8")
+        Path(tmp, "broken.py").write_text("raise ValueError('boom')\n",
+                                          encoding="utf-8")
+        Path(tmp, "collide.py").write_text(collide, encoding="utf-8")
+        Path(tmp, "old.py").write_text(wrong_api, encoding="utf-8")
+        keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+        os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = tmp
+        try:
+            rc, out, err = run_cli(["hello", "world"])
+            assert rc == 0, (rc, err)
+            assert json.loads(out)["hello"] == "world", out
+            rc, _out, err = run_cli(["--deny", "read", "hello", "world"])
+            assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+            rc, _out, err = run_cli(["hello"])
+            assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+            rc, out, err = run_cli(["selftest"])
+            assert rc == 0, (rc, err)
+            data = json.loads(out)
+            assert [p["name"] for p in data["plugins"]] == ["hello"], \
+                data["plugins"]
+            errors = "\n".join(data["plugin_errors"])
+            assert "broken.py" in errors and "boom" in errors, errors
+            assert "collide.py" in errors and "already taken" in errors, errors
+            assert "old.py" in errors and "api 99" in errors, errors
+            assert "hello" in capabilities.PLUGIN_ACTIONS, \
+                capabilities.PLUGIN_ACTIONS
+        finally:
+            if keep is None:
+                os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+            else:
+                os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+        # the path is gone: a fresh invocation has no plugin and no ghost
+        rc, out, _err = run_cli(["selftest"])
+        assert json.loads(out)["plugins"] == [], out
+        rc, _out, err = run_cli(["hello", "world"])
+        assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
+
+
+def t_x_plugin_offline() -> None:
+    """The X plugin builds the Latest URL and maps rows to posts."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    navs: list[tuple] = []
+    real_nav, real_wait, real_extract = (browser.nav, dom.wait, dom.extract)
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        navs.append((url, tab))
+        return {"ok": True}
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 0.0,
+                  idle_ms: int = 0, tab: str = "", browser: str = "") -> dict:
+        return {"ok": True}
+
+    def fake_extract(each: str = "", fields: list | None = None,
+                     cap: int = 0, chars: int = 0, visible: bool = False,
+                     unique: str = "", tab: str = "",
+                     browser: str = "") -> dict:
+        if each == "article":
+            return {"ok": True, "truncated": False, "matches": [
+                {"text": "first", "time": "2026-09-20T07:37:24.000Z",
+                 "url": "/alice/status/101"},
+                {"text": "same id", "time": "2026-09-20T07:00:00.000Z",
+                 "url": "/bob/status/101"},
+                {"text": "no link", "time": "", "url": None}]}
+        return {"ok": True, "matches": [
+            {"label": "Latest", "selected": "true"},
+            {"label": "Top", "selected": "false"}]}
+
+    browser.nav = fake_nav                        # type: ignore[assignment]
+    dom.wait = fake_wait                          # type: ignore[assignment]
+    dom.extract = fake_extract                    # type: ignore[assignment]
+    try:
+        rc, out, err = run_cli(["x", "search", '"Pardon Snowden"',
+                                "--latest", "--cap", "5"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert data["sort"] == "latest", data
+        assert data["count"] == 1, data
+        assert data["posts"][0] == {
+            "id": "101", "handle": "alice",
+            "url": "https://x.com/alice/status/101",
+            "time": "2026-09-20T07:37:24.000Z", "text": "first"}, data
+        assert navs and "f=live" in navs[0][0], navs
+        assert "Pardon%20Snowden" in navs[0][0], navs
+        rc, _out, err = run_cli(["x", "search"])
+        assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+        rc, _out, err = run_cli(["x", "search", "q", "--latest", "--top"])
+        assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    finally:
+        browser.nav = real_nav                    # type: ignore[assignment]
+        dom.wait = real_wait                      # type: ignore[assignment]
+        dom.extract = real_extract                # type: ignore[assignment]
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
 def main() -> int:
     global SUITE_LOG
     # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
@@ -2674,6 +2865,11 @@ def main() -> int:
     os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
     os.environ["BROWSER_CONTROL_ROOT"] = tempfile.mkdtemp(
         prefix="browser-control-hermetic-")
+    # plugins are pinned to an EMPTY directory, so the suite never loads the
+    # user's installed plugins (the plugin tests point the variable at their
+    # own fixture directory and restore this one)
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = tempfile.mkdtemp(
+        prefix="browser-control-plugins-")
     for name in ("BROWSER_CONTROL_ALLOW", "BROWSER_CONTROL_DENY"):
         os.environ.pop(name, None)
     for name, fn in (
@@ -2711,6 +2907,10 @@ def main() -> int:
         ("media verdict and argv", t_media_verdict),
         ("media argv", t_cli_media_grammar),
         ("dom shape filters", t_dom_shape_filters),
+        ("extract schema and records", t_extract_schema_and_records),
+        ("tab extract grammar", t_cli_extract_grammar),
+        ("plugins load, dispatch and gate", t_plugin_system),
+        ("x plugin maps records offline", t_x_plugin_offline),
         ("the net-change test", t_same_page),
         ("one page verb, one tab", t_one_tab_addressing),
         ("attach/detach grammar", t_cli_attach_grammar),
