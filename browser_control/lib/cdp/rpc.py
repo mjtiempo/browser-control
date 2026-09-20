@@ -17,9 +17,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ERR_BLOCKED,
     ERR_CDP_ERROR,
     ERR_CDP_NOT_LOCAL,
-    ERR_EVAL_TIMEOUT,
     ERR_JS_ERROR,
-    ERR_NO_WEBSOCKETS,
     ERR_RESULT_TOO_LARGE,
     ControlError,
     fail,
@@ -88,40 +86,6 @@ async def _await_reply(ws: Any, rid: int, method: str, params: dict,
                 on_deadline()
             raise TimeoutError(f"no reply for id {rid} within {budget:g}s")
 
-
-async def _call(ws_url: str, method: str, params: dict,
-                timeout: float) -> dict:
-    try:
-        # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
-        async with websockets.connect(ws_url, max_size=2 ** 24,
-                                      open_timeout=10) as ws:
-            # one request, one reply: a mutation must not be replayed, so
-            # there is no retry loop here — the caller's read-back is the
-            # recovery
-            return await _await_reply(
-                ws, 1, method, params, timeout,
-                error_text=lambda err: (
-                    f"{method}: {foreign(err.get('message'))} "
-                    f"(code {foreign(err.get('code'), 40)})"),
-                on_timeout=lambda e: fail(ERR_CDP_ERROR, f"{method}: {e}"),
-                on_deadline=lambda: fail(
-                    ERR_CDP_ERROR,
-                    f"{method}: no reply for id 1 within {timeout:g}s"),
-                bad_frame=lambda e: fail(ERR_CDP_ERROR, f"{method}: {e}"))
-    except ControlError:
-        raise                       # the protocol answered; not a transport hiccup
-    except Exception as e:                                     # noqa: BLE001
-        raise ControlError(ERR_CDP_ERROR, f"{method}: {e}") from e
-
-
-def call(ws_url: str, method: str, params: dict | None = None,
-         timeout: float = 15.0) -> dict:
-    """One CDP method call, returning the protocol's own `result`."""
-    if websockets is None:
-        fail(ERR_NO_WEBSOCKETS,
-             "the `websockets` package is required to speak CDP "
-             "(pip install websockets)")
-    return asyncio.run(_call(ws_url, method, params or {}, timeout))
 
 def _value_of(result: dict) -> Any:
     """The value one Runtime.evaluate reply carries, or a refusal.
@@ -192,102 +156,6 @@ async def _page_enable(ws: Any, rid: int) -> None:
         error_text=lambda err: (f"Page.enable: {err.get('message')} "
                                 f"(code {err.get('code')})"),
         on_timeout=blocked, on_deadline=blocked)
-
-
-async def _sample(ws, rid: int, expression: str, budget: float) -> Any:
-    """One evaluate on an ALREADY open connection, or TimeoutError."""
-    result = await _await_reply(
-        ws, rid, "Runtime.evaluate",
-        {"expression": expression, "returnByValue": True}, budget,
-        error_text=lambda err: (f"Runtime.evaluate: {err.get('message')} "
-                                f"(code {err.get('code')})"))
-    return _value_of(result)
-
-
-async def _evaluate(ws_url: str, expression: str, timeout: float) -> Any:
-    try:
-        # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
-        async with websockets.connect(ws_url, max_size=2 ** 24,
-                                      open_timeout=10) as ws:
-            await _page_enable(ws, 1)      # dialogs must be real, not wedges
-            # one send: an expression may WRITE (a nav assignment, a form
-            # submit), so there is no retry — the caller's read-back is the
-            # recovery
-            try:
-                return await _sample(ws, 2, expression, timeout)
-            except TimeoutError as e:
-                raise ControlError(ERR_EVAL_TIMEOUT,
-                                   f"Runtime.evaluate: {e}") from e
-    except ControlError:
-        raise
-    except Exception as e:                                     # noqa: BLE001
-        raise ControlError(ERR_CDP_ERROR, f"Runtime.evaluate: {e}") from e
-    raise ControlError(ERR_CDP_ERROR, "Runtime.evaluate: no answer")
-
-async def _evaluate_until(ws_url: str, expression: str, accept: Any,
-                          timeout: float, interval: float) -> tuple[Any, int]:
-    """ONE connection, many samples, until `accept(value)` or the deadline.
-
-    A sample the page does not answer is what a poll loop is FOR, so it is
-    not an error here: the budget belongs to the loop, not to each sample.
-    Only the connection itself can fail, and that is a refusal.
-    """
-    value: Any = None
-    samples = 0
-    try:
-        # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
-        async with websockets.connect(ws_url, max_size=2 ** 24,
-                                      open_timeout=10) as ws:
-            # a dialog the samples outlive is ANNOUNCED once the domain is on
-            await _page_enable(ws, 1)
-            deadline = time.time() + timeout
-            while True:
-                samples += 1
-                try:
-                    value = await _sample(ws, samples + 1, expression,
-                                          max(0.5, deadline - time.time()))
-                    if accept(value):
-                        return value, samples
-                except TimeoutError:
-                    pass               # this sample went unanswered
-                if time.time() >= deadline:
-                    return value, samples
-                await asyncio.sleep(interval)
-    except ControlError:
-        raise
-    except Exception as e:                                     # noqa: BLE001
-        raise ControlError(ERR_CDP_ERROR, f"Runtime.evaluate: {e}") from e
-    raise ControlError(ERR_CDP_ERROR, "Runtime.evaluate: no answer")
-
-def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
-    """Evaluate an expression on ONE tab's own connection, returning its value.
-
-    `returnByValue`, so a page that answers JSON is decoded to the value it
-    produced. Three failures stay apart, because a caller branches on them:
-    the page THREW (`js-error`), the page did not answer within the budget
-    (`eval-timeout`), and the transport itself failed (`cdp-error`).
-    """
-    if websockets is None:
-        fail(ERR_NO_WEBSOCKETS,
-             "the `websockets` package is required to speak CDP "
-             "(pip install websockets)")
-    return asyncio.run(_evaluate(_checked_ws(ws_url, "tab"), expression,
-                                 timeout))
-
-def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
-                   interval: float = 0.4) -> tuple[Any, int]:
-    """Sample `expression` on ONE connection until `accept(value)` is true.
-
-    Returns (the last value, how many samples were taken). Built for the verbs
-    that poll: a websocket per sample turns a 30-sample wait into 30
-    connections.
-    """
-    if websockets is None:
-        fail(ERR_NO_WEBSOCKETS,
-             "the `websockets` package is required to speak CDP "
-             "(pip install websockets)")
-    return asyncio.run(_evaluate_until(_checked_ws(ws_url, "tab"), expression,
-                                       accept, timeout, interval))
 
 
 def _checked_ws(url: str, where: str = "endpoint") -> str:

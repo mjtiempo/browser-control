@@ -11,9 +11,11 @@ from browser_control.lib.cdp.endpoint import (  # pyright: ignore[reportMissingI
     _get_port,
     get_json,
 )
-from browser_control.lib.cdp.rpc import (  # pyright: ignore[reportMissingImports]
-    _checked_ws,
-    call,
+from browser_control.lib.cdp.rpc import (
+    _checked_ws,  # pyright: ignore[reportMissingImports]
+)
+from browser_control.lib.cdp.session import (
+    call,  # pyright: ignore[reportMissingImports]
 )
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_CDP_ERROR,

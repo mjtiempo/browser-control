@@ -13,6 +13,7 @@ from typing import Any, NoReturn
 
 from browser_control.lib.cdp import rpc  # pyright: ignore[reportMissingImports]
 from browser_control.lib.cdp.rpc import (  # pyright: ignore[reportMissingImports]
+    BLOCKED_HINT,
     DIALOG_EVENT,
     DIALOG_GRACE_S,
     PARKED_BUDGET_S,
@@ -252,3 +253,74 @@ class Session:
     def __exit__(self, exc_type: Any = None, exc: Any = None,
                  traceback: Any = None) -> None:
         self.close()
+
+
+# ---------------------------------------------------------------- the wrappers
+# One-shot calls are a `Session` that opens and closes around one exchange:
+# exactly one `websockets.connect` site exists in this package, and it is
+# `Session._connect`.
+def call(ws_url: str, method: str, params: dict | None = None,
+         timeout: float = 15.0) -> dict:
+    """One CDP method call, returning the protocol's own `result`."""
+    if rpc.websockets is None:
+        fail(ERR_NO_WEBSOCKETS,
+             "the `websockets` package is required to speak CDP "
+             "(pip install websockets)")
+    with Session(_checked_ws(ws_url), page_domain=False) as session:
+        return session.call(method, params or {}, timeout)
+
+
+def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
+    """Evaluate an expression on ONE tab's own connection, returning its value.
+
+    `returnByValue`, so a page that answers JSON is decoded to the value it
+    produced. Three failures stay apart, because a caller branches on them:
+    the page THREW (`js-error`), the page did not answer within the budget
+    (`eval-timeout`), and the transport itself failed (`cdp-error`).
+    """
+    if rpc.websockets is None:
+        fail(ERR_NO_WEBSOCKETS,
+             "the `websockets` package is required to speak CDP "
+             "(pip install websockets)")
+    with Session(_checked_ws(ws_url, "tab")) as session:
+        return session.evaluate(expression, timeout)
+
+
+def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
+                   interval: float = 0.4) -> tuple[Any, int]:
+    """Sample `expression` on ONE connection until `accept(value)` is true.
+
+    Returns (the last value, how many samples were taken). Built for the verbs
+    that poll: a websocket per sample turns a 30-sample wait into 30
+    connections. A sample the page does not answer is what a poll loop is FOR:
+    it is caught and the loop continues; only the connection itself failing,
+    or a tab that was ALREADY parked when the session opened, refuses.
+    """
+    if rpc.websockets is None:
+        fail(ERR_NO_WEBSOCKETS,
+             "the `websockets` package is required to speak CDP "
+             "(pip install websockets)")
+    deadline = time.time() + timeout
+    value: Any = None
+    samples = 0
+    with Session(_checked_ws(ws_url, "tab")) as session:
+        session._connect()                    # Page.enable happens here
+        if session.parked:
+            # the tab was parked before this session opened: polling cannot
+            # answer, and the old path refused `blocked` right here
+            raise ControlError(ERR_BLOCKED, BLOCKED_HINT)
+        while True:
+            samples += 1
+            try:
+                value = session.evaluate(expression,
+                                         max(0.5, deadline - time.time()))
+                if accept(value):
+                    return value, samples
+            except ControlError as e:
+                # a sample that did not answer (or a renderer parked mid-poll)
+                # is what the loop is for; anything else is a real failure
+                if e.code not in (ERR_EVAL_TIMEOUT, ERR_BLOCKED):
+                    raise
+            if time.time() >= deadline:
+                return value, samples
+            time.sleep(interval)

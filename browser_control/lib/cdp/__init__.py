@@ -31,18 +31,17 @@ from browser_control.lib.cdp.rpc import (  # noqa: F401
     EVAL_RESULT_CAP,
     PAGE_ENABLE_S,
     PARKED_BUDGET_S,
-    _call,
-    _evaluate,
-    _evaluate_until,
+    _await_reply,
     _page_enable,
-    _sample,
     _value_of,
+    websockets,
+)
+from browser_control.lib.cdp.session import (  # noqa: F401
+    Session,
     call,
     evaluate,
     evaluate_until,
-    websockets,
 )
-from browser_control.lib.cdp.session import Session  # noqa: F401
 from browser_control.lib.cdp.targets import (  # noqa: F401
     _checked_ws,
     _of_kind,
