@@ -583,7 +583,7 @@ blocking; if the architect overrides one, record the override here before the af
 ## Phase 4 — DOM tier package
 
 ### RF-23 — `lib/dom/` package behind a facade (pure move)
-- status: todo
+- status: done (commit f952a00)
 - priority: P1
 - category: package
 - findings: lane-3 F-3.1 + F-3.12
@@ -929,7 +929,7 @@ blocking; if the architect overrides one, record the override here before the af
  {"id":"RF-20","phase":3,"title":"BrowserRow + Endpoint dataclasses","status":"done (commit 7740e55)","deps":["RF-19"],"risk":"medium","priority":"P1","findings":["F-2.1"],"files":["browser_control/lib/browser/"],"target":["browser_control/lib/browser/machine.py"]},
  {"id":"RF-21","phase":3,"title":"one write/read authorisation predicate","status":"done (commit 7740e55)","deps":["RF-19","RF-20"],"risk":"low","priority":"P1","findings":["F-2.7"],"files":["browser_control/lib/browser/"],"target":["browser_control/lib/browser/machine.py"]},
  {"id":"RF-22","phase":3,"title":"EndpointGuard object with forget()","status":"done (commit 7740e55)","deps":["RF-19","RF-03"],"risk":"medium","priority":"P1","findings":["F-2.2","F-6.1"],"files":["browser_control/lib/browser/"],"target":["browser_control/lib/browser/owners.py"]},
- {"id":"RF-23","phase":4,"title":"lib/dom/ package behind facade","status":"todo","deps":["RF-10"],"risk":"medium","priority":"P1","findings":["F-3.1","F-3.12"],"files":["browser_control/lib/dom.py"],"target":["browser_control/lib/dom/"]},
+ {"id":"RF-23","phase":4,"title":"lib/dom/ package behind facade","status":"done (commit f952a00)","deps":["RF-10"],"risk":"medium","priority":"P1","findings":["F-3.1","F-3.12"],"files":["browser_control/lib/dom.py"],"target":["browser_control/lib/dom/"]},
  {"id":"RF-24","phase":4,"title":"dom/scripts.py + fill()","status":"done (commit 6e142f9)","deps":["RF-23"],"risk":"medium","priority":"P1","findings":["F-3.4","F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/scripts.py"]},
  {"id":"RF-25","phase":4,"title":"Verdict + PageState reply convention","status":"done (commit 789331f)","deps":["RF-23"],"risk":"medium","priority":"P1","findings":["F-3.5","F-3.8"],"files":["browser_control/lib/dom/"],"target":["browser_control/lib/dom/result.py"]},
  {"id":"RF-26","phase":4,"title":"one page-session factory + connection reuse","status":"done (commit 35489ff)","deps":["RF-18","RF-23"],"risk":"medium","priority":"P1","findings":["F-6.10"],"files":["browser_control/lib/dom/","browser_control/lib/browser/"],"target":["browser_control/lib/dom/tab.py"]},
