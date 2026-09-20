@@ -12,56 +12,29 @@ is recorded exactly like a success. Two rules make it safe to keep:
   redacts everything says nothing.
 
 `BROWSER_CONTROL_LOG` names the file, or `off` disables the log entirely.
-The file's DIRECTORY is created on the first write (mode 0700) and the file is
-opened 0600 — its lines carry the argv of a call — with an existing wider file
-narrowed. When the configured path cannot be written, OR a wider file cannot be
-narrowed to 0600, the line lands in a scratch directory built for the purpose
-(`scratch_dir`, unique and 0700 via `mkdtemp`): a record is lost only when
-neither the configured file nor scratch can be written, never silently
-(`selftest` reports the path the log would use).
+Where a line GOES — the 0600/0700 modes, the fchmod narrowing, the short-write
+check and the scratch fallback — is `lib/logfile.py::FileSink`; this module
+builds the record and hands it to a sink (injectable, so a test can watch what
+was written).
 """
 from __future__ import annotations
 
 import json
 import os
-import stat
-import tempfile
 import time
 from typing import Any
 
+from browser_control.lib.logfile import (
+    FileSink,  # pyright: ignore[reportMissingImports]
+)
 from browser_control.lib.paths import expand  # pyright: ignore[reportMissingImports]
 from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
 
 LOG_ENV = "BROWSER_CONTROL_LOG"
 DEFAULT_LOG = "~/.local/state/browser-control/actions.jsonl"
 SRC = "browser-control-cli"
-SCRATCH_PREFIX = "browser-control"
 ARG_CAP = 4096          # chars kept of ONE argv entry (a `tab js` is a program)
 ARGS_CAP = 16_384       # chars kept of the whole argument list
-_SCRATCH = ""
-
-
-def scratch_dir() -> str:
-    """A PRIVATE scratch directory for this process, created on first use.
-
-    `tempfile.mkdtemp`: the name is unique, the mode is 0700, and the directory
-    is ours. The timestamped name this used to build could be pre-created by
-    another local user — or be a symlink — and `exist_ok=True` accepted it, so
-    the fallback log could land in a directory they owned, or fail against all
-    eight names and drop the record (a review flagged it). Two runs in the same
-    second also shared one directory before, which the docstring claimed they
-    never would. "" when even /tmp cannot be written, which every caller has to
-    read as "no scratch".
-    """
-    global _SCRATCH
-    if _SCRATCH:
-        return _SCRATCH
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    try:
-        _SCRATCH = tempfile.mkdtemp(prefix=f"{SCRATCH_PREFIX}-{stamp}-")
-    except OSError:
-        return ""
-    return _SCRATCH
 
 
 def _brief(text: str) -> str:
@@ -93,11 +66,17 @@ def _bounded(parts: list[str]) -> list[str]:
 class ActionLog:
     """The log itself: one instance, one line per command invocation."""
 
-    def __init__(self) -> None:
+    def __init__(self, sink: FileSink | None = None) -> None:
         self._secret = ""
+        self._sink = sink if sink is not None else FileSink()
 
-    def begin(self, action: str = "") -> None:
-        """Start an invocation: no secret is known yet."""
+    def begin(self) -> None:
+        """Start an invocation: no secret is known yet.
+
+        Called at the TOP of `main`, before any early refusal: a call that
+        refuses before it reaches the verb must not be stamped with the
+        PREVIOUS call's `redacted` (fail-closed, but a lie about this call).
+        """
         self._secret = ""
 
     def mark_secret(self, text: str) -> None:
@@ -154,63 +133,21 @@ class ActionLog:
         # the configured file first; only when THAT fails is the scratch
         # directory built — a fallback is a second chance, not a first move
         # (building it eagerly made one empty directory per CLI call)
-        if self._append(path, line):
+        if self._sink.write(path, line):
             return
-        fallback = self._scratch_copy(path)
+        fallback = self._sink.fallback(path)
         if fallback:
-            self._append(fallback, line)
-
-    @staticmethod
-    def _append(path: str, line: str) -> bool:
-        """One line to one file, making its directory first. False on failure.
-
-        Opened 0600, and an existing wider file is narrowed with `fchmod`: the
-        lines carry the argv (`tab js <program>`, a file path), so a
-        world-readable action log is the second half of the promise that only a
-        PROVEN secret is redacted (a review flagged the mode).
-        """
-        try:
-            parent = os.path.dirname(path)
-            if parent:
-                os.makedirs(parent, mode=0o700, exist_ok=True)
-            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                             0o600)
-            try:
-                if stat.S_IMODE(os.fstat(handle).st_mode) & 0o077:
-                    try:
-                        os.fchmod(handle, 0o600)
-                    except OSError:
-                        # a file we cannot narrow may be readable by others, and
-                        # this line carries the argv: refuse THIS file and let
-                        # the caller fall back to the private scratch log rather
-                        # than write it where it cannot be protected (a review
-                        # flagged that the chmod could lose the record)
-                        return False
-                payload = line.encode("utf-8")
-                offset = 0
-                while offset < len(payload):
-                    # `os.write` may write fewer bytes than asked (a full
-                    # filesystem, RLIMIT_FSIZE); the return value was dropped,
-                    # so a short write silently truncated the line while
-                    # `_append` still said it succeeded — no scratch fallback,
-                    # no record (a review flagged it).
-                    written = os.write(handle, payload[offset:])
-                    if written <= 0:
-                        return False
-                    offset += written
-            finally:
-                os.close(handle)
-            return True
-        except OSError:
-            return False
-
-    def _scratch_copy(self, path: str) -> str:
-        """Where the record goes when the configured file cannot be written."""
-        scratch = scratch_dir()
-        if not scratch or os.path.dirname(os.path.abspath(path)) == scratch:
-            return ""
-        return os.path.join(scratch, "actions.jsonl")
-
+            self._sink.write(fallback, line)
 
 # One instance: the command marks a secret, the command writes the line.
-LOG = ActionLog()
+SINK = FileSink()
+LOG = ActionLog(SINK)
+
+
+def scratch_dir() -> str:
+    """The process's private scratch directory, from the default sink.
+
+    Kept as a module function because the suites and `selftest` ask for it by
+    name; the policy lives in `FileSink.scratch_dir`.
+    """
+    return SINK.scratch_dir()

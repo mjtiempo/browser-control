@@ -1192,9 +1192,9 @@ def t_audit_redaction() -> None:
         path = os.path.join(tmp, "actions.jsonl")
         os.environ["BROWSER_CONTROL_LOG"] = path
         try:
-            audit.LOG.begin("tab")
+            audit.LOG.begin()
             audit.LOG.write(action="tab", ok=True, args=["insert", "hunter2"])
-            audit.LOG.begin("tab")
+            audit.LOG.begin()
             audit.LOG.mark_secret("hunter2")
             assert audit.LOG.redacted is True
             audit.LOG.write(action="tab", ok=False,
@@ -1230,7 +1230,7 @@ def t_audit_redaction() -> None:
         finally:
             # back to the SUITE's log, never to the user's default
             os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
-            audit.LOG.begin("")
+            audit.LOG.begin()
 
 
 def t_cli_input_grammar() -> None:
@@ -2273,17 +2273,44 @@ def t_audit_redaction_beats_truncation() -> None:
         os.environ["BROWSER_CONTROL_LOG"] = path
         try:
             secret = "S" * 5000
-            audit.LOG.begin("tab")
+            audit.LOG.begin()
             audit.LOG.mark_secret(secret)
             audit.LOG.write(action="tab", ok=True, args=["insert", secret])
         finally:
             os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
-            audit.LOG.begin("")
+            audit.LOG.begin()
         with open(path, encoding="utf-8") as handle:
             line = handle.read().strip()
         assert "S" * 64 not in line, "a prefix of the secret reached the log"
         assert json.loads(line)["redacted"] is True, line
         assert "<redacted: 5000 chars>" in line, line
+
+
+def t_audit_secret_does_not_leak_into_the_next_call() -> None:
+    """A refusal after a secret-bearing call is not stamped `redacted`.
+
+    `begin()` runs at the TOP of `main` now: a call that refuses before the
+    verb (no argv at all) used to write its line with the previous call's
+    `_secret` still set, so a refusal that carried no secret was marked
+    `redacted: true` (fail-closed, but a lie about that call).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            audit.LOG.begin()
+            audit.LOG.mark_secret("hunter2")
+            rc, _out, _err = run_cli([])          # refuses before the verb
+            assert rc == 2, rc
+            run_cli(["selftest"])                 # a later call writes too
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+            audit.LOG.begin()
+        with open(path, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        refusals = [row for row in rows if row.get("code") == "bad-args"]
+        assert refusals, rows
+        assert "redacted" not in refusals[0], refusals[0]
 
 
 def t_audit_short_write_is_not_success() -> None:
@@ -2298,12 +2325,12 @@ def t_audit_short_write_is_not_success() -> None:
 
         try:
             os.write = half                      # type: ignore[assignment]
-            audit.LOG.begin("tab")
+            audit.LOG.begin()
             audit.LOG.write(action="tab", args=["x"])
         finally:
             os.write = real_write                # type: ignore[assignment]
             os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
-            audit.LOG.begin("")
+            audit.LOG.begin()
         with open(path, encoding="utf-8") as handle:
             rows = [json.loads(line) for line in handle]
         assert len(rows) == 1 and rows[0]["action"] == "tab", rows
@@ -2611,11 +2638,11 @@ def t_audit_modes_caps_redirect_and_symlink() -> None:
         path = os.path.join(tmp, "deep", "actions.jsonl")
         os.environ["BROWSER_CONTROL_LOG"] = path
         try:
-            audit.LOG.begin("open")
+            audit.LOG.begin()
             audit.LOG.write(action="open", args=["x"])
         finally:
             os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
-            audit.LOG.begin("")
+            audit.LOG.begin()
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
         assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) == 0o700
         assert stat.S_IMODE(os.stat(audit.scratch_dir()).st_mode) == 0o700
@@ -2623,11 +2650,11 @@ def t_audit_modes_caps_redirect_and_symlink() -> None:
         path = os.path.join(tmp, "actions.jsonl")
         os.environ["BROWSER_CONTROL_LOG"] = path
         try:
-            audit.LOG.begin("tab")
+            audit.LOG.begin()
             audit.LOG.write(action="tab", args=["x" * 9000, "y"])
         finally:
             os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
-            audit.LOG.begin("")
+            audit.LOG.begin()
         row = json.loads(Path(path).read_text(encoding="utf-8").strip())
         assert len(row["args"][0]) < 4200, row
         assert "<truncated: 9000 chars>" in row["args"][0], row
@@ -2957,6 +2984,8 @@ def main() -> int:
         ("cli lists browsers and their info", t_cli_lists),
         ("cmdline flag values are read", t_cmdline_value),
         ("audit redacts beyond the cap", t_audit_redaction_beats_truncation),
+        ("a stale secret cannot stamp the next refusal",
+         t_audit_secret_does_not_leak_into_the_next_call),
         ("a short write is not a line", t_audit_short_write_is_not_success),
         ("the CDP read never uses a proxy", t_http_read_never_uses_a_proxy),
         ("malformed endpoints and page text refuse typed",

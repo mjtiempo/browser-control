@@ -1190,6 +1190,10 @@ def main(argv: list[str] | None = None) -> int:
         for spec in PLUGINS.actions.values():
             print(f"  {spec['usage']}")
         return 0
+    # reset the per-invocation secret HERE, before any early refusal: a call
+    # that refuses before the verb must not be stamped with the PREVIOUS
+    # call's `redacted` (a review flagged the stale stamp)
+    audit.LOG.begin()
     verb = ""
     rest: list[str] = []
     ok = False
@@ -1241,7 +1245,6 @@ def main(argv: list[str] | None = None) -> int:
         # which refuses it, instead of reading as "the call named no policy"
         _POLICY.update(policy_lib.Policy.from_sources(flags["allow"],
                                                      flags["deny"]))
-        audit.LOG.begin(verb)          # no secret is known yet
         handler = HANDLERS.get(verb)
         if handler is None:
             plugin = PLUGINS.actions.get(verb)
