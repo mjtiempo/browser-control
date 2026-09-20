@@ -75,9 +75,10 @@ def scroll(by: int | None = None, edge: str | None = None,
         fail(ERR_BAD_ARGS, f"tab scroll: --edge is top|bottom, got {edge!r}")
     if at is not None:
         _at_point(at)                      # syntax now; the RANGE needs the
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)   # real viewport
+    page = _pkg.Tab.open(tab, browser, for_write=True)   # real viewport
+    row, tab_row = page.row, page.tab_row
     target_id = str(tab_row["id"])
-    with _pkg._session(row, tab_row) as session:
+    with page.session() as session:
         data = _pkg._matches_in(session, "", "", 1)      # page facts, no matching
         viewport = _pkg._viewport(data, target_id)
         x, y = _point(at, viewport)

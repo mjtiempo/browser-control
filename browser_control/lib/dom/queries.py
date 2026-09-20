@@ -161,8 +161,9 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
     expr = str(expression or "").strip()
     if not expr:
         fail(ERR_BAD_ARGS, "tab js: an EXPRESSION is required")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         value = session.evaluate(expr)
     return {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
             "verified": False, "note": "evaluated, not interpreted",
@@ -335,8 +336,9 @@ def extract(each: str = "", fields: list[str] | None = None,
         fail(ERR_BAD_ARGS,
              f"tab extract: --unique {wanted!r} is not one of the fields "
              f"({', '.join(names)})")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=False)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=False)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = session.evaluate(
             fill(EXTRACT_EXPR, schema=json.dumps(schema)))
     data = data if isinstance(data, dict) else {}
@@ -372,8 +374,9 @@ def find(text: str | None = None, selector: str | None = None,
     """
     needle, css = _query_args(text, selector, "tab find")
     limit = max(1, as_int(cap, FIND_CAP))
-    row, tab_row = _pkg._resolve(tab, browser, for_write=False)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=False)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = _pkg._matches_in(session, needle, css, limit)
         # the census rides the session already open for the cheap case (a page
         # with no frames needs no second connection), and goes to the PAGE when
@@ -414,8 +417,9 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
     """
     css = str(selector or "").strip()
     limit = max(1, min(TEXT_CAP, as_int(chars, TEXT_CAP)))
-    row, tab_row = _pkg._resolve(tab, browser, for_write=False)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=False)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = session.evaluate(
             fill(TEXT_EXPR, selector=json.dumps(css), cap=str(limit)))
         frames_here = _pkg._frame_summary(row, tab_row, session)

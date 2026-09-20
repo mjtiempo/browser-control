@@ -45,8 +45,9 @@ def screenshot(path: str, full: bool = False, force: bool = False,
     file that would not match is not written at all.
     """
     target = images.output_path(path)
-    row, tab_row = _pkg._resolve(tab, browser, for_write=False)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=False)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         metrics = session.evaluate(SHOT_METRICS)
         if not isinstance(metrics, dict):
             fail(ERR_CDP_ERROR, "the page did not report its geometry")

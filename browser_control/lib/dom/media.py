@@ -124,8 +124,9 @@ def media(mode: str, index: int | None = None, tab: str = "",
         fail(ERR_BAD_ARGS, f"tab media: MODE is state|play|pause, got {mode!r}")
     if index is not None and name == "state":
         fail(ERR_BAD_ARGS, "tab media state: --index is for play/pause")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=(name != "state"))
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=(name != "state"))
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         before = session.evaluate(MEDIA_STATE_EXPR)
         before = before if isinstance(before, dict) else {}
         if not before.get("found"):

@@ -142,6 +142,7 @@ from browser_control.lib.dom.scroll import (  # noqa: F401
     scroll,
 )
 from browser_control.lib.dom.tab import (  # noqa: F401
+    Tab,
     _document_ws,
     _reply,
     _resolve,

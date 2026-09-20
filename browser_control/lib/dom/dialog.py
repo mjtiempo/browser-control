@@ -68,12 +68,13 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
         fail(ERR_BAD_ARGS,
              f"tab dialog: MODE is state, accept or dismiss, got {mode!r}")
     if name == "state":
-        row, tab_row = _pkg._resolve(tab, browser, for_write=False)
+        page = _pkg.Tab.open(tab, browser, for_write=False)
+        row, tab_row = page.row, page.tab_row
         opened: object = None
         verified = False
         note = ""
         try:
-            with _pkg._session(row, tab_row) as session:
+            with page.session() as session:
                 try:
                     session.evaluate(DIALOG_AWAKE, timeout=DIALOG_PROBE_S)
                     opened, verified = False, True

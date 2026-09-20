@@ -95,8 +95,9 @@ def press(key: str, tab: str = "", browser: str = "") -> dict:
         fail(ERR_BAD_ARGS, f"tab press: unknown key {key!r} "
                          f"(have: {', '.join(sorted(KEYS))})")
     key_name = KEYS[name][0]
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         # a key WITH text goes as `keyDown` (the browser composes it); one
         # without goes as `rawKeyDown` — the same split the table implies
         down = "keyDown" if KEYS[name][3] else "rawKeyDown"
@@ -160,8 +161,9 @@ def insert(text: str, tab: str = "", browser: str = "") -> dict:
     value = str(text or "")
     if not value:
         fail(ERR_BAD_ARGS, "tab insert: TEXT is required")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         before = _preflight(session, value, "tab insert")
         session.call("Input.insertText", {"text": value})
         after = _text_target(session)
@@ -180,8 +182,9 @@ def type_text(text: str, tab: str = "", browser: str = "") -> dict:
     value = str(text or "")
     if not value:
         fail(ERR_BAD_ARGS, "tab type: TEXT is required")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         before = _preflight(session, value, "tab type")
         for char in value:
             if char == "\n":

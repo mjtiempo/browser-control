@@ -78,13 +78,48 @@ def _under_point(session: cdp.Session, x: int, y: int) -> object:
     """
     return session.evaluate(fill(POINT_PROBE, x=str(x), y=str(y)))
 
-def _at_point_click(session: cdp.Session, x: int, y: int) -> dict:
-    """A move, a press and a release at a viewport point, and what is there."""
+def click_point(session: cdp.Session, x: int, y: int) -> None:
+    """A move, a press and a release at a viewport point, with REAL input.
+
+    The ONE dispatch every pointer verb uses: the caller has already PROVEN the
+    point (`aim` below), or is deliberately pressing a raw coordinate (`--at`).
+    """
     for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
                           ("mouseReleased", 0)):
         session.call("Input.dispatchMouseEvent",
                      {"type": kind, "x": x, "y": y, "button": "left",
                       "buttons": buttons, "clickCount": 1})
+
+
+def aim(element: dict, needle: str, css: str) -> list:
+    """The viewport point a pointer verb may press, or a refusal.
+
+    The three guards every element verb shares: in the viewport, hit-tested to the
+    element, and a usable point (the page owns every value that crossed
+    `Runtime.evaluate`, so "[7]" is not a point).
+    """
+    if not element.get("in_viewport"):
+        fail(ERR_NO_VIEWPORT_TARGET,
+             f"{_pkg._describe(element)} is at page {element.get('box')}, "
+             "outside the viewport — scroll it into view first: "
+             f"`tab scroll {needle or '--selector ' + css!r}`")
+    if not element.get("hit"):
+        fail(ERR_OCCLUDED,
+             f"{_pkg._describe(element)} is at viewport "
+             f"{element.get('point')} but that point reaches "
+             f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
+             "instead — something is on top of it")
+    point = as_ints(element.get("hit_at") or element.get("point"), 2)
+    if len(point) < 2:
+        fail(ERR_NO_VIEWPORT_TARGET,
+             f"{_pkg._describe(element)} reports no usable point "
+             f"({point!r}) — the page owns this value")
+    return point
+
+
+def _at_point_click(session: cdp.Session, x: int, y: int) -> dict:
+    """A move, a press and a release at a viewport point, and what is there."""
+    click_point(session, x, y)
     return {"under": _pkg._under_point(session, x, y)}
 
 def _click_at(row: dict, tab_row: dict, at: str) -> dict:
@@ -97,7 +132,7 @@ def _click_at(row: dict, tab_row: dict, at: str) -> dict:
     `under`.
     """
     _pkg._at_point(at, "tab click")
-    with _pkg._session(row, tab_row) as session:
+    with _pkg.Tab(row, tab_row).session() as session:
         data = _pkg._matches_in(session, "", "", 1)     # page facts, no matching
         x, y = _pkg._point(at, _pkg._viewport(data, str(tab_row["id"])),
                     "tab click")
@@ -122,7 +157,7 @@ def _click_at(row: dict, tab_row: dict, at: str) -> dict:
 def _hover_at(row: dict, tab_row: dict, at: str) -> dict:
     """`tab hover --at X,Y`: a move to a point, verified by `:hover` on it."""
     _pkg._at_point(at, "tab hover")
-    with _pkg._session(row, tab_row) as session:
+    with _pkg.Tab(row, tab_row).session() as session:
         data = _pkg._matches_in(session, "", "", 1)
         x, y = _pkg._point(at, _pkg._viewport(data, str(tab_row["id"])),
                     "tab hover")
@@ -171,41 +206,14 @@ def click(text: str | None = None, selector: str | None = None,
         _pkg._at_point(at, "tab click")     # the POINT first: no browser needed
         row, tab_row = _pkg._resolve(tab, browser, for_write=True)
         return _click_at(row, tab_row, at)
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = _pkg._matches_in(session, needle, css, FIND_CAP)
         element = _pkg._pick(data, needle, css, index, row=row,
                            tab_row=tab_row)
-        if not element.get("in_viewport"):
-            fail(ERR_NO_VIEWPORT_TARGET,
-                 f"{_pkg._describe(element)} is at page {element.get('box')}, "
-                 "outside the viewport — scroll it into view first: "
-                 f"`tab scroll {needle or '--selector ' + css!r}`")
-        if not element.get("hit"):
-            fail(ERR_OCCLUDED,
-                 f"{_pkg._describe(element)} is at viewport {element.get('point')} "
-                 f"but that point reaches "
-                 f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
-                 "instead — something is on top of it")
-        # press at the point the HIT-TEST proved, not at the element's raw
-        # centre: the probe CLAMPS into the viewport, so an element whose centre
-        # is below the fold was tested inside it and pressed outside, and the
-        # reply still said `clicked: true` (a review measured the mismatch)
-        point = as_ints(element.get("hit_at") or element.get("point"), 2)
-        if len(point) < 2:
-            # a page may answer anything for a value that crosses
-            # Runtime.evaluate, and "[7]" is not a point: refuse rather
-            # than raise ValueError out of the verb (both review lanes
-            # found the unpack behind the `_ints` guard)
-            fail(ERR_NO_VIEWPORT_TARGET,
-                 f"{_pkg._describe(element)} reports no usable point "
-                 f"({point!r}) — the page owns this value")
-        x, y = point
-        for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
-                              ("mouseReleased", 0)):
-            session.call("Input.dispatchMouseEvent",
-                         {"type": kind, "x": x, "y": y, "button": "left",
-                          "buttons": buttons, "clickCount": 1})
+        x, y = aim(element, needle, css)
+        click_point(session, x, y)
         after = session.evaluate(STATE_EXPR)
         # what the point reaches AFTERWARDS: a click legitimately changes the
         # document, so this is information rather than a verdict — but a reply
@@ -249,32 +257,13 @@ def hover(text: str | None = None, selector: str | None = None,
         row, tab_row = _pkg._resolve(tab, browser, for_write=True)
         return _hover_at(row, tab_row, at)
     needle, css = _pkg._query_args(text, selector, "tab hover")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = _pkg._matches_in(session, needle, css, FIND_CAP)
         element = _pkg._pick(data, needle, css, index, row=row,
                            tab_row=tab_row)
-        if not element.get("in_viewport"):
-            fail(ERR_NO_VIEWPORT_TARGET,
-                 f"{_pkg._describe(element)} is at page {element.get('box')}, "
-                 "outside the viewport — scroll it into view first: "
-                 f"`tab scroll {needle or '--selector ' + css!r}`")
-        if not element.get("hit"):
-            fail(ERR_OCCLUDED,
-                 f"{_pkg._describe(element)} is at viewport {element.get('point')} "
-                 f"but that point reaches "
-                 f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
-                 "instead — something is on top of it")
-        point = as_ints(element.get("hit_at") or element.get("point"), 2)
-        if len(point) < 2:
-            # a page may answer anything for a value that crosses
-            # Runtime.evaluate, and "[7]" is not a point: refuse rather
-            # than raise ValueError out of the verb (both review lanes
-            # found the unpack behind the `_ints` guard)
-            fail(ERR_NO_VIEWPORT_TARGET,
-                 f"{_pkg._describe(element)} reports no usable point "
-                 f"({point!r}) — the page owns this value")
-        x, y = point
+        x, y = aim(element, needle, css)
         session.call("Input.dispatchMouseEvent",
                      {"type": "mouseMoved", "x": x, "y": y,
                       "button": "none", "buttons": 0})
@@ -328,9 +317,10 @@ def check(text: str | None = None, selector: str | None = None,
     and the read-back still stands behind it.
     """
     needle, css = _pkg._query_args(text, selector, "tab check")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
     want = not uncheck
-    with _pkg._session(row, tab_row) as session:
+    with page.session() as session:
         data = _pkg._matches_in(session, needle, css, FIND_CAP)
         element = _pkg._pick(data, needle, css, index, row=row,
                            tab_row=tab_row)
@@ -343,32 +333,8 @@ def check(text: str | None = None, selector: str | None = None,
                              "because a click would toggle it"),
                     "tab": f"id:{tab_row['id']}",
                     "browser": browser_lib.brief(row)}
-        if not element.get("in_viewport"):
-            fail(ERR_NO_VIEWPORT_TARGET,
-                 f"{_pkg._describe(element)} is at page {element.get('box')}, "
-                 "outside the viewport — scroll it into view first: "
-                 f"`tab scroll {needle or '--selector ' + css!r}`")
-        if not element.get("hit"):
-            fail(ERR_OCCLUDED,
-                 f"{_pkg._describe(element)} is at viewport {element.get('point')} "
-                 f"but that point reaches "
-                 f"{foreign(element.get('hit_element'), 50) or 'nothing'} "
-                 "instead — something is on top of it")
-        point = as_ints(element.get("hit_at") or element.get("point"), 2)
-        if len(point) < 2:
-            # a page may answer anything for a value that crosses
-            # Runtime.evaluate, and "[7]" is not a point: refuse rather
-            # than raise ValueError out of the verb (both review lanes
-            # found the unpack behind the `_ints` guard)
-            fail(ERR_NO_VIEWPORT_TARGET,
-                 f"{_pkg._describe(element)} reports no usable point "
-                 f"({point!r}) — the page owns this value")
-        x, y = point
-        for kind, buttons in (("mouseMoved", 0), ("mousePressed", 1),
-                              ("mouseReleased", 0)):
-            session.call("Input.dispatchMouseEvent",
-                         {"type": kind, "x": x, "y": y, "button": "left",
-                          "buttons": buttons, "clickCount": 1})
+        x, y = aim(element, needle, css)
+        click_point(session, x, y)
         _attempts, after = poll(
             lambda: _check_state(session, needle, css, index),
             timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,
@@ -412,8 +378,9 @@ def select(text: str | None = None, selector: str | None = None,
         fail(ERR_BAD_ARGS,
              "tab select: --value is required — the option's value, or its "
              "exact label")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = _pkg._matches_in(session, needle, css, FIND_CAP)
         element = _pkg._pick(data, needle, css, index, row=row,
                            tab_row=tab_row)
@@ -513,8 +480,9 @@ def focus(text: str | None = None, selector: str | None = None,
     read-back is the page's own active element.
     """
     needle, css = _pkg._query_args(text, selector, "tab focus")
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = _pkg._matches_in(session, needle, css, FIND_CAP)
         element = _pkg._pick(data, needle, css, index, row=row,
                            tab_row=tab_row)
@@ -564,8 +532,9 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
         fail(ERR_NO_FILE, f"tab upload: no such file: {file_path}")
     size = os.path.getsize(file_path)
     css = str(selector or "").strip() or UPLOAD_DEFAULT_SELECTOR
-    row, tab_row = _pkg._resolve(tab, browser, for_write=True)
-    with _pkg._session(row, tab_row) as session:
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
         data = session.evaluate(
             _pkg._match_args(CANDIDATES_EXPR, "", css, cap=str(FIND_CAP)))
         element = _pkg._pick(data if isinstance(data, dict) else {},
