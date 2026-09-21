@@ -8,17 +8,17 @@ from __future__ import annotations
 
 import os
 
-from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser as _pkg
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.constants import (
     ACTIVE_SPEC,
 )
-from browser_control.lib.browser.machine import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.machine import (
     may_write,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     ERR_CLOSE_TAB_NOT_VERIFIED,
     ERR_NO_PAGE_TAB,
@@ -27,7 +27,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
-from browser_control.lib.text import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.text import (
     flat,
 )
 

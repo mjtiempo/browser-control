@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # The sibling modules are not resolvable before the path insert above; the
 # project-level pyright run resolves them, so only `E402` is suppressed here.
 from browser_control.cli import main as cli_main  # noqa: E402
+from browser_control.cli import registry  # noqa: E402
 from browser_control.lib import (  # noqa: E402
     audit,
     browser,
@@ -1601,21 +1602,21 @@ def t_capability_surface() -> None:
     verb added without a class fails here AND shows up in the reply.
     """
     assert capabilities.unclassified(
-        cli_main.HANDLERS,
-        {"tab": cli_main.TAB_SUBCOMMANDS,
-         "profile": cli_main.PROFILE_SUBCOMMANDS}) == [], \
-        capabilities.unclassified(cli_main.HANDLERS,
-                                  {"tab": cli_main.TAB_SUBCOMMANDS,
-                                   "profile": cli_main.PROFILE_SUBCOMMANDS})
+        registry.HANDLERS,
+        {"tab": registry.TAB_SUBCOMMANDS,
+         "profile": registry.PROFILE_SUBCOMMANDS}) == [], \
+        capabilities.unclassified(registry.HANDLERS,
+                                  {"tab": registry.TAB_SUBCOMMANDS,
+                                   "profile": registry.PROFILE_SUBCOMMANDS})
     for action, classes in capabilities.ACTIONS.items():
         assert classes, f"{action} has no class"
         for name in classes:
             assert name in capabilities.CLASSES, (action, name)
         top = action.split()[0]
-        assert top in cli_main.HANDLERS, action
+        assert top in registry.HANDLERS, action
         parts = action.split()
         if top == "tab" and len(parts) > 1:
-            assert parts[1] in cli_main.TAB_SUBCOMMANDS, action
+            assert parts[1] in registry.TAB_SUBCOMMANDS, action
     # the classes a caller would guess, including the ones a MODE decides
     assert capabilities.ACTIONS["tab js"] == ("code", "write")
     assert capabilities.ACTIONS["tab text"] == ("read",)
@@ -1976,18 +1977,18 @@ def t_gate_and_argv_hardening() -> None:
     rc, _out, err = run_cli(["profile", "bogus", "--allow", "read"])
     assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
     # 9. an unexpected failure is an ERR[code], never a traceback
-    keeper = cli_main.HANDLERS["list"]
+    keeper = registry.HANDLERS["list"]
 
     def explode(_rest: list[str], _browser: str) -> dict:
         raise RuntimeError("boom")
 
     try:
-        cli_main.HANDLERS["list"] = explode            # type: ignore[assignment]
+        registry.HANDLERS["list"] = explode            # type: ignore[assignment]
         rc, _out, err = run_cli(["list"])
         assert rc == 2 and "ERR[internal]: RuntimeError: boom" in err, (rc, err)
         assert "Traceback" not in err, err
     finally:
-        cli_main.HANDLERS["list"] = keeper
+        registry.HANDLERS["list"] = keeper
 
 
 def t_frames_bind_to_their_tab() -> None:
@@ -2003,7 +2004,7 @@ def t_frames_bind_to_their_tab() -> None:
                "name": "", "box": [0, 0, 300, 120], "visible": True,
                "same_process": False}]
     real = {name: getattr(cdp, name) for name in
-            ("evaluate", "frame_targets", "frame_rows", "target_ws", "port_of")}
+            ("evaluate", "frame_targets", "target_ws", "port_of")}
     real_frames_of = dom.frames_of
     cdp.evaluate = lambda ws, expr, timeout=15.0: census    # type: ignore[assignment]
     cdp.port_of = lambda profile: 1234                      # type: ignore[assignment]
@@ -2212,7 +2213,7 @@ def t_frames_and_points() -> None:
     # the verbs that CLAIM a frame have to be tab subcommands, and the ones that
     # drive the TAB must not claim one
     for name in sorted(dom.FRAME_VERBS):
-        assert name in cli_main.TAB_SUBCOMMANDS, name
+        assert name in registry.TAB_SUBCOMMANDS, name
     for name in ("nav", "list", "info", "close", "frames", "activate"):
         assert name not in dom.FRAME_VERBS, name
 
@@ -3144,12 +3145,15 @@ def t_error_codes_are_registered() -> None:
     literal first argument must be in `errors.CODES`, and every `ERR_` name
     used must resolve to a value the registry holds. The registry and the
     constants are two spellings of one vocabulary, so they must agree.
+    `plugins/` is scanned too: a plugin speaks the same vocabulary through
+    `plugin_api.errors`, so its typo fails here rather than a user's call.
     """
-    root = Path(__file__).resolve().parent.parent / "browser_control"
+    repo = Path(__file__).resolve().parent.parent
+    roots = [repo / "browser_control", repo / "plugins"]
     literal = re.compile(r'\b(?:fail|ControlError)\(\s*"([^"]+)"')
     dynamic = re.compile(r'\b(?:fail|ControlError)\(\s*f"')
     named = re.compile(r"\bERR_[A-Z0-9_]+\b")
-    for path in sorted(root.rglob("*.py")):
+    for path in sorted(p for root in roots for p in root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         for code in literal.findall(source):
             assert code in errors.CODES, \

@@ -11,15 +11,15 @@ from __future__ import annotations
 import os
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
-from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import as_int
+from browser_control.lib.errors import (
     ERR_NOT_MANAGED,
     ERR_PROFILE_LIVE,
     fail,
 )
-from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import (
     expand,
     is_managed,
     norm,

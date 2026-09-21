@@ -79,75 +79,13 @@ ERR_UPLOAD_NOT_VERIFIED = "upload-not-verified"
 ERR_WAIT_TIMEOUT = "wait-timeout"
 ERR_WRITE_FAILED = "write-failed"
 
-CODES: frozenset[str] = frozenset({
-    ERR_ACTIVATE_NOT_VERIFIED,
-    ERR_AMBIGUOUS_BROWSER,
-    ERR_AMBIGUOUS_ELEMENT,
-    ERR_AMBIGUOUS_OPTION,
-    ERR_ATTACH_FAILED,
-    ERR_BAD_ARGS,
-    ERR_BLOCKED,
-    ERR_BROKEN_PIPE,
-    ERR_BROWSER_NOT_STOPPED,
-    ERR_CDP_ERROR,
-    ERR_CDP_NOT_LOCAL,
-    ERR_CDP_UNREACHABLE,
-    ERR_CHECK_NOT_VERIFIED,
-    ERR_CLOSE_TAB_NOT_VERIFIED,
-    ERR_DIALOG_NOT_VERIFIED,
-    ERR_EVAL_TIMEOUT,
-    ERR_FILE_EXISTS,
-    ERR_FOCUS_NOT_VERIFIED,
-    ERR_FRAME_AMBIGUOUS,
-    ERR_FRAME_NOT_SEPARATE,
-    ERR_FRAME_UNATTRIBUTABLE,
-    ERR_HOVER_NOT_VERIFIED,
-    ERR_INSERT_NOT_VERIFIED,
-    ERR_INTERNAL,
-    ERR_JS_ERROR,
-    ERR_LAUNCH_FAILED,
-    ERR_MEDIA_BLOCKED,
-    ERR_MEDIA_NOT_VERIFIED,
-    ERR_NAV_FAILED,
-    ERR_NAV_NOT_VERIFIED,
-    ERR_NO_BROWSER,
-    ERR_NO_DIALOG,
-    ERR_NO_FILE,
-    ERR_NO_FOCUS,
-    ERR_NO_FRAME,
-    ERR_NO_MATCH,
-    ERR_NO_MEDIA,
-    ERR_NO_PAGE_TAB,
-    ERR_NO_VIEWPORT,
-    ERR_NO_VIEWPORT_TARGET,
-    ERR_NO_WEBSOCKETS,
-    ERR_NOT_A_SELECT,
-    ERR_NOT_ALLOWED,
-    ERR_NOT_ATTACHED,
-    ERR_NOT_CHECKABLE,
-    ERR_NOT_MANAGED,
-    ERR_OCCLUDED,
-    ERR_PROFILE_BUSY,
-    ERR_PROFILE_EXISTS,
-    ERR_PROFILE_LIVE,
-    ERR_PROFILE_UNUSABLE,
-    ERR_RELOAD_NOT_VERIFIED,
-    ERR_RESET_FAILED,
-    ERR_RESET_NOT_VERIFIED,
-    ERR_RESULT_TOO_LARGE,
-    ERR_SCREENSHOT_NOT_VERIFIED,
-    ERR_SCROLL_NOT_VERIFIED,
-    ERR_SEED_FAILED,
-    ERR_SEED_NOT_VERIFIED,
-    ERR_SELECT_NOT_VERIFIED,
-    ERR_TAB_AMBIGUOUS,
-    ERR_TABS_OPEN,
-    ERR_TYPE_NOT_VERIFIED,
-    ERR_UNKNOWN_COMMAND,
-    ERR_UPLOAD_NOT_VERIFIED,
-    ERR_WAIT_TIMEOUT,
-    ERR_WRITE_FAILED,
-})
+# The registry the hermetic check reads and every `fail` is checked against:
+# DERIVED from the constants above, so the vocabulary has ONE spelling. The
+# check compares this set with the same `ERR_*` names it scans the tree for, so
+# a code that is only ever built at runtime stays invisible here — on purpose.
+CODES: frozenset[str] = frozenset(
+    value for name, value in globals().items()
+    if name.startswith("ERR_") and isinstance(value, str))
 
 
 class ControlError(Exception):

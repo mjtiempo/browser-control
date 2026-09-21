@@ -1,9 +1,9 @@
 """browser-control-cli — argv in, service calls out, JSON printed.
 
-One adapter per verb in `HANDLERS`; `main` parses `--browser`, dispatches,
-prints the reply as one JSON object on stdout, and maps a refusal to
-`ERR[code]: message` on stderr with exit 2. Nothing else prints, and no
-caller-producible input can produce a traceback.
+Adapters for the verbs, registered in `registry.HANDLERS`; `main` parses
+`--browser`, dispatches, prints the reply as one JSON object on stdout, and
+maps a refusal to `ERR[code]: message` on stderr with exit 2. Nothing else
+prints, and no caller-producible input can produce a traceback.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import difflib
 import json
 import os
 import sys
-from collections.abc import Callable
 
 from browser_control.cli import registry
 from browser_control.cli.argv import (
@@ -20,7 +19,7 @@ from browser_control.cli.argv import (
     _pop,
     _urls,
 )
-from browser_control.cli.verbs.browser import (  # pyright: ignore[reportMissingImports]
+from browser_control.cli.verbs.browser import (
     cmd_attach,
     cmd_close,
     cmd_detach,
@@ -29,13 +28,13 @@ from browser_control.cli.verbs.browser import (  # pyright: ignore[reportMissing
     cmd_open,
     cmd_selftest,
 )
-from browser_control.cli.verbs.profile import (  # pyright: ignore[reportMissingImports]
+from browser_control.cli.verbs.profile import (
     cmd_profile_info,
     cmd_profile_logins,
     cmd_profile_reset,
     cmd_profile_seed,
 )
-from browser_control.cli.verbs.tab import (  # pyright: ignore[reportMissingImports]
+from browser_control.cli.verbs.tab import (
     cmd_tab_activate,
     cmd_tab_back,
     cmd_tab_check,
@@ -212,11 +211,10 @@ def cmd_tab(rest: list[str], browser: str) -> dict:
     site `list`" — a URL carries a scheme (`https://…`, `about:blank`), which
     is what the URL policy enforces anyway.
     """
-    handler = TAB_SUBCOMMANDS.get(str(rest[0]) if rest else "")
+    handler = registry.TAB_SUBCOMMANDS.get(str(rest[0]) if rest else "")
     if handler is not None:
         return handler(rest[1:], browser)
     return browser_lib.new_tab(_urls(rest, "tab"), browser=browser)
-Handler = Callable[[list[str], str], dict]
 def cmd_profile(rest: list[str], browser: str) -> dict:
     """`profile info|seed|reset` — the browser-level noun for profiles.
 
@@ -224,57 +222,61 @@ def cmd_profile(rest: list[str], browser: str) -> dict:
     CLI manages: seeing them, giving one a source profile's logins, and wiping
     one. The instance itself is named with the global `--profile DIR`.
     """
-    handler = PROFILE_SUBCOMMANDS.get(str(rest[0]) if rest else "")
+    handler = registry.PROFILE_SUBCOMMANDS.get(str(rest[0]) if rest else "")
     if handler is None:
         fail(ERR_BAD_ARGS,
              "profile: a subcommand is required (info, logins, seed, reset)")
     return handler(rest[1:], browser)
-TAB_SUBCOMMANDS: dict[str, Handler] = {
-    "list": cmd_tab_list,
-    "frames": cmd_tab_frames,
-    "info": cmd_tab_info,
-    "close": cmd_tab_close,
-    "nav": cmd_tab_nav,
-    "back": cmd_tab_back,
-    "forward": cmd_tab_forward,
-    "reload": cmd_tab_reload,
-    "activate": cmd_tab_activate,
-    "hover": cmd_tab_hover,
-    "check": cmd_tab_check,
-    "select": cmd_tab_select,
-    "dialog": cmd_tab_dialog,
-    "screenshot": cmd_tab_screenshot,
-    "js": cmd_tab_js,
-    "find": cmd_tab_find,
-    "text": cmd_tab_text,
-    "extract": cmd_tab_extract,
-    "wait": cmd_tab_wait,
-    "click": cmd_tab_click,
-    "scroll": cmd_tab_scroll,
-    "focus": cmd_tab_focus,
-    "press": cmd_tab_press,
-    "insert": cmd_tab_insert,
-    "type": cmd_tab_type,
-    "upload": cmd_tab_upload,
-    "media": cmd_tab_media,
-}
-PROFILE_SUBCOMMANDS: dict[str, Handler] = {
-    "info": cmd_profile_info,
-    "logins": cmd_profile_logins,
-    "seed": cmd_profile_seed,
-    "reset": cmd_profile_reset,
-}
-HANDLERS: dict[str, Handler] = {
-    "open": cmd_open,
-    "close": cmd_close,
-    "list": cmd_list,
-    "info": cmd_info,
-    "attach": cmd_attach,
-    "detach": cmd_detach,
-    "profile": cmd_profile,
-    "tab": cmd_tab,
-    "selftest": cmd_selftest,
-}
+# the tables' HOME is `cli.registry`, so a verb reads them without reaching
+# into this module's privates; the adapters are defined here, where the verb
+# imports are, and handed over once
+registry.register(
+    tab={
+        "list": cmd_tab_list,
+        "frames": cmd_tab_frames,
+        "info": cmd_tab_info,
+        "close": cmd_tab_close,
+        "nav": cmd_tab_nav,
+        "back": cmd_tab_back,
+        "forward": cmd_tab_forward,
+        "reload": cmd_tab_reload,
+        "activate": cmd_tab_activate,
+        "hover": cmd_tab_hover,
+        "check": cmd_tab_check,
+        "select": cmd_tab_select,
+        "dialog": cmd_tab_dialog,
+        "screenshot": cmd_tab_screenshot,
+        "js": cmd_tab_js,
+        "find": cmd_tab_find,
+        "text": cmd_tab_text,
+        "extract": cmd_tab_extract,
+        "wait": cmd_tab_wait,
+        "click": cmd_tab_click,
+        "scroll": cmd_tab_scroll,
+        "focus": cmd_tab_focus,
+        "press": cmd_tab_press,
+        "insert": cmd_tab_insert,
+        "type": cmd_tab_type,
+        "upload": cmd_tab_upload,
+        "media": cmd_tab_media,
+    },
+    profile={
+        "info": cmd_profile_info,
+        "logins": cmd_profile_logins,
+        "seed": cmd_profile_seed,
+        "reset": cmd_profile_reset,
+    },
+    handlers={
+        "open": cmd_open,
+        "close": cmd_close,
+        "list": cmd_list,
+        "info": cmd_info,
+        "attach": cmd_attach,
+        "detach": cmd_detach,
+        "profile": cmd_profile,
+        "tab": cmd_tab,
+        "selftest": cmd_selftest,
+    })
 def _bare_tab_word(word: str) -> None:
     """Refuse a `tab` word that is neither a subcommand nor a URL.
 
@@ -287,11 +289,12 @@ def _bare_tab_word(word: str) -> None:
     try:
         browser_lib.safe_url(word)
     except ControlError:
-        near = difflib.get_close_matches(str(word), sorted(TAB_SUBCOMMANDS),
+        near = difflib.get_close_matches(str(word),
+                                         sorted(registry.TAB_SUBCOMMANDS),
                                          n=1, cutoff=0.6)
         fail(ERR_BAD_ARGS,
              f"tab: {str(word)[:40]!r} is neither a subcommand (have: "
-             + ", ".join(sorted(TAB_SUBCOMMANDS))
+             + ", ".join(sorted(registry.TAB_SUBCOMMANDS))
              + ") nor a URL (http(s) or about:blank only)"
              + (f" — did you mean `tab {near[0]}`?" if near else ""))
 def action(verb: str, rest: list[str]) -> str:
@@ -303,16 +306,9 @@ def action(verb: str, rest: list[str]) -> str:
     as `js`).
     """
     return registry.action_of(verb, rest,
-                              tab_subcommands=TAB_SUBCOMMANDS,
-                              profile_subcommands=PROFILE_SUBCOMMANDS,
+                              tab_subcommands=registry.TAB_SUBCOMMANDS,
+                              profile_subcommands=registry.PROFILE_SUBCOMMANDS,
                               pop=_pop)
-_POLICY = policy_lib.Policy()
-PLUGINS = plugins_lib.PluginSet()
-def _verb_names() -> list[str]:
-    """Every top-level verb a caller can run: built-ins first, then plugins."""
-    return [*HANDLERS, *PLUGINS.actions]
-def _plugins_report() -> dict:
-    return PLUGINS.report()
 def _run_invocation(args: list[str]) -> int:
     """One call end to end: plugins, globals, the gate, dispatch, emit.
 
@@ -324,12 +320,12 @@ def _run_invocation(args: list[str]) -> int:
     # Plugins load once per invocation, BEFORE the help text and the gate:
     # `--help`/`selftest` report them, and the classes they declare have to be
     # in the surface before `allowed()` is asked anything.
-    PLUGINS.reset(plugins_lib.PluginSet.load(
-        reserved=set(HANDLERS) | {"help"}))
-    capabilities.set_plugins(PLUGINS.classes())
+    registry.PLUGINS.reset(plugins_lib.PluginSet.load(
+        reserved=set(registry.HANDLERS) | {"help"}))
+    capabilities.set_plugins(registry.PLUGINS.classes())
     if args and args[0] in ("-h", "--help", "help"):
         print(USAGE)
-        for usage in PLUGINS.usages():
+        for usage in registry.PLUGINS.usages():
             print(f"  {usage}")
         return 0
     # reset the per-invocation secret HERE, before any early refusal: a call
@@ -348,7 +344,8 @@ def _run_invocation(args: list[str]) -> int:
             # flagged it)
             print(USAGE, file=sys.stderr)
             print("ERR[bad-args]: a verb is required "
-                  f"(have: {', '.join(_verb_names())})", file=sys.stderr)
+                  f"(have: {', '.join(registry.verb_names())})",
+                  file=sys.stderr)
             code = ERR_BAD_ARGS
             return 2
         rest, flags = _flags(args)
@@ -360,7 +357,7 @@ def _run_invocation(args: list[str]) -> int:
             given = ", ".join(f"{key}={value!r}"
                               for key, value in flags.items() if value)
             print("ERR[bad-args]: a verb is required "
-                  f"(have: {', '.join(_verb_names())})"
+                  f"(have: {', '.join(registry.verb_names())})"
                   + (f" — {given} was given, but no verb to run"
                      if given else ""), file=sys.stderr)
             code = ERR_BAD_ARGS           # so the audit line carries the code
@@ -385,17 +382,18 @@ def _run_invocation(args: list[str]) -> int:
         dom.frame(flags["frame"] or "")
         # NOT `or None`: a flag given an empty value must reach the policy,
         # which refuses it, instead of reading as "the call named no policy"
-        _POLICY.update(policy_lib.Policy.from_sources(flags["allow"],
-                                                     flags["deny"]))
-        handler = HANDLERS.get(verb)
+        registry.POLICY.update(policy_lib.Policy.from_sources(flags["allow"],
+                                                             flags["deny"]))
+        handler = registry.HANDLERS.get(verb)
         if handler is None:
-            plugin = PLUGINS.actions.get(verb)
+            plugin = registry.PLUGINS.actions.get(verb)
             handler = plugin.run if plugin is not None else None
         if handler is None:
             raise ControlError(ERR_UNKNOWN_COMMAND,
-                               f"{verb} (have: {', '.join(_verb_names())})")
+                               f"{verb} (have: "
+                               + ", ".join(registry.verb_names()) + ")")
         head = str(rest[0]) if rest else ""
-        if verb == "tab" and head and head not in TAB_SUBCOMMANDS:
+        if verb == "tab" and head and head not in registry.TAB_SUBCOMMANDS:
             _bare_tab_word(head)
         if flags["frame"] is not None and not str(flags["frame"]).strip():
             fail(ERR_BAD_ARGS,
@@ -418,7 +416,7 @@ def _run_invocation(args: list[str]) -> int:
             # caller sees (`bad-args` for a subcommand nobody has).
             wanted = action(verb, rest)
             if wanted:
-                permitted, why = _POLICY.allowed(
+                permitted, why = registry.POLICY.allowed(
                     wanted, capabilities.classes_for(wanted))
                 if not permitted:
                     fail(ERR_NOT_ALLOWED, why)

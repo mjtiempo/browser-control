@@ -6,29 +6,29 @@ before it sends anything.
 """
 from __future__ import annotations
 
-from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser as _pkg
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.constants import (
     LAUNCH_WAIT_S,
 )
-from browser_control.lib.browser.machine import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.machine import (
     endpoint_of,
 )
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_int,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_CDP_NOT_LOCAL,
     ERR_CDP_UNREACHABLE,
     fail,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_SLOW,
     poll,
 )
-from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.proc import (
     BROWSER_EXES,
     find_pid,
     pid_on_marker,

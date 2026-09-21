@@ -11,7 +11,7 @@ import os
 import re
 from typing import Any
 
-from browser_control.lib.paths import expand  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import expand
 
 PLUGIN_ENV = "BROWSER_CONTROL_PLUGIN_PATH"
 DEFAULT_PLUGIN_DIR = "~/.local/share/browser-control/plugins"

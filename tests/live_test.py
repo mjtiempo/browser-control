@@ -179,7 +179,7 @@ FRAME_TOP = """<!doctype html><meta charset="utf-8"><title>frames</title>
 <a id="at-link" href="/nine-b" style="padding:14px">at link</a>
 <iframe srcdoc="<p>SAME_PROCESS_MARKER</p>" width="300" height="80"></iframe>
 <iframe src="http://localhost:__PORT__/frames-inner" width="320" height="80"></iframe>
-<iframe src="http://localhost:__PORT__/frames-inner-two" width="320" height="80"></iframe>"""
+<iframe src="http://localhost:__PORT__/frames-inner-two" width="320" height="80"></iframe>"""  # noqa: E501
 
 FRAME_INNER = """<!doctype html><meta charset="utf-8"><title>inner</title>
 <p>INNER_MARKER __MARKER__</p>
@@ -923,7 +923,7 @@ def c_dom_press_reaches_the_page() -> str:
     err = refuses("bad-args", "tab", "press", "nope")
     assert "unknown key" in err, err
     refuses("focus-not-verified", "tab", "focus", "Dom Fixture Heading")
-    return "Enter reached the form handler; an unknown key and an unfocusable heading refused"
+    return "Enter reached the form handler; an unknown key and an unfocusable heading refused"  # noqa: E501
 
 
 def c_dom_upload_attaches_a_file() -> str:
@@ -1992,7 +1992,7 @@ def c_profile_logins() -> str:
     target = os.path.join(ROOT, "instance-logins")
     try:
         conn = sqlite3.connect(os.path.join(source, "Cookies"))
-        conn.execute("create table cookies (host_key text, name text, expires_utc integer)")
+        conn.execute("create table cookies (host_key text, name text, expires_utc integer)")  # noqa: E501
         conn.execute("insert into cookies values ('.x.com', 'auth_token', ?)",
                      (int((time.time() + 86400 + 11_644_473_600) * 1_000_000),))
         conn.commit()

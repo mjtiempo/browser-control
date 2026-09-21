@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )
@@ -88,6 +88,15 @@ def _int(value: str, what: str) -> int:
     except (TypeError, ValueError):
         fail(ERR_BAD_ARGS, f"{what} needs a number, got {value!r}")
 
+def _opt_int(value: str | None, what: str) -> int | None:
+    """A flag's number, or None when the flag was not given at all.
+
+    The ``… if value is not None else None`` a dozen verbs spelled out: the
+    difference between an absent flag and a bad value is the whole point of
+    the check, so it stays one call.
+    """
+    return None if value is None else _int(value, what)
+
 def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
     """`--port N | --pid N | --profile DIR`, plus `--list`/`--all` where a
     verb allows them. Pure argv work: an unknown flag is refused, and the
@@ -121,30 +130,66 @@ def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
         fail(ERR_BAD_ARGS, f"{verb}: --all takes no other selector")
     return out
 
-def _pop(rest: list[str], flag: str, verb: str) -> tuple[list[str], str | None]:
-    """Remove `--flag VALUE` (or `--flag=VALUE`) from argv, once.
+def _twice(flag: str, inline: bool = False) -> str:
+    """The refusal a CLASS flag repeats with: naming a class twice used to
+    drop the earlier one in the unsafe direction. `inline` is the
+    `--flag=value` spelling the offending token used, quoted back because the
+    literal is the contract, not a paraphrase of it."""
+    spelled = f"{flag}=" if inline else f"{flag} "
+    return (f"{flag}: given twice — name every class once "
+            f"({spelled}read,write …)")
 
-    None means the flag was NOT given, which a verb must be able to tell apart
-    from an empty value.
+def _scan(rest: list[str], flags: tuple[str, ...], verb: str, *,
+          refuse_repeat: tuple[str, ...] = (),
+          ) -> tuple[list[str], dict[str, list[str]]]:
+    """Pull every `--flag VALUE` / `--flag=VALUE` for `flags` out of argv.
+
+    The ONE reader under `_pop` (one flag, the last value), `_pop_all` (one
+    flag, every value) and `_flags` (the global map): values come back in the
+    order they were given, one list per flag. A bare flag takes the NEXT token
+    whatever it is — even one that looks like a flag — which is what makes
+    `--tab --for` mean the tab NAMED `--for`, the reading the mode resolver
+    depends on. A flag named in `refuse_repeat` may be given once: the class
+    flags, where last-wins silently dropped the earlier class. `verb` prefixes
+    a missing-value refusal; the globals pass "" because `_flags` runs before
+    any verb is known.
     """
+    values: dict[str, list[str]] = {flag: [] for flag in flags}
     out: list[str] = []
-    value: str | None = None
     index = 0
     while index < len(rest):
         arg = str(rest[index])
-        if arg == flag:
+        if arg in values:
             if index + 1 >= len(rest):
-                fail(ERR_BAD_ARGS, f"{verb}: {flag} needs a value")
-            value = str(rest[index + 1])
+                fail(ERR_BAD_ARGS,
+                     f"{verb}: {arg} needs a value" if verb
+                     else f"{arg} needs a value")
+            if arg in refuse_repeat and values[arg]:
+                fail(ERR_BAD_ARGS, _twice(arg))
+            values[arg].append(str(rest[index + 1]))
             index += 2
             continue
-        if arg.startswith(flag + "="):
-            value = arg.split("=", 1)[1]
+        named = next((flag for flag in flags
+                      if arg.startswith(flag + "=")), "")
+        if named:
+            if named in refuse_repeat and values[named]:
+                fail(ERR_BAD_ARGS, _twice(named, inline=True))
+            values[named].append(arg.split("=", 1)[1])
             index += 1
             continue
         out.append(arg)
         index += 1
-    return out, value
+    return out, values
+
+def _pop(rest: list[str], flag: str, verb: str) -> tuple[list[str], str | None]:
+    """Remove `--flag VALUE` (or `--flag=VALUE`) from argv, once.
+
+    None means the flag was NOT given, which a verb must be able to tell apart
+    from an empty value. Given twice, the LAST value wins (the `--for` reading
+    the mode resolver relies on); `_pop_all` is the repeatable form.
+    """
+    rest, values = _scan(rest, (flag,), verb)
+    return rest, values[flag][-1] if values[flag] else None
 
 def _switch(rest: list[str], flag: str) -> tuple[list[str], bool]:
     """Pull a VALUE-LESS flag (`--uncheck`, `--full`, `--force`) out of argv."""
@@ -180,27 +225,11 @@ def _pop_all(rest: list[str], flag: str,
              verb: str) -> tuple[list[str], list[str]]:
     """Remove EVERY `--flag VALUE` (or `--flag=VALUE`), values in order.
 
-    A repeatable flag needs its own reader: `--except a --except b` is two
-    exceptions, and `_pop` would leave the second one in argv.
+    A repeatable flag needs its own return shape: `--except a --except b` is
+    two exceptions, and `_pop` would answer only the last one.
     """
-    out: list[str] = []
-    values: list[str] = []
-    index = 0
-    while index < len(rest):
-        arg = str(rest[index])
-        if arg == flag:
-            if index + 1 >= len(rest):
-                fail(ERR_BAD_ARGS, f"{verb}: {flag} needs a value")
-            values.append(str(rest[index + 1]))
-            index += 2
-            continue
-        if arg.startswith(flag + "="):
-            values.append(arg.split("=", 1)[1])
-            index += 1
-            continue
-        out.append(arg)
-        index += 1
-    return out, values
+    rest, values = _scan(rest, (flag,), verb)
+    return rest, values[flag]
 
 def _text_arg(rest: list[str], verb: str) -> str:
     """The single TEXT a writing verb takes — nothing else, and no flags."""
@@ -226,39 +255,14 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
     comes back as None rather than "", because `--allow` must be able to tell
     the two apart: an empty value is a refusal, and reading it as "absent" is
     how `--allow ""` used to mean "allow everything".
+
+    The pulling is the shared `_scan` — the same reader `_pop`/`_pop_all` use —
+    in ONE pass, because the value of a bare flag is the next token whatever it
+    looks like. `--allow`/`--deny` are the two the reader refuses to see twice
+    (`refuse_repeat`): the per-verb repeatable flags have the opposite contract,
+    last-wins, which for a capability class is the unsafe direction.
     """
-    found: dict[str, str | None] = dict.fromkeys(FLAG_KEY.values(), None)
-    rest: list[str] = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg in FLAG_KEY:
-            if index + 1 >= len(args):
-                fail(ERR_BAD_ARGS, f"{arg} needs a value")
-            if arg in ("--allow", "--deny") \
-                    and found[FLAG_KEY[arg]] is not None:
-                # last-wins DROPPED an earlier class in the unsafe direction:
-                # `--deny read --deny write` denied only `write`, allowing the
-                # read it was told to deny (a review flagged it). The repeatable
-                # per-verb flags have the opposite contract, so a repeat here is
-                # refused rather than silently merged.
-                fail(ERR_BAD_ARGS,
-                     f"{arg}: given twice — name every class once "
-                     f"({arg} read,write …)")
-            found[FLAG_KEY[arg]] = args[index + 1]
-            index += 2
-            continue
-        named = [key for key in FLAG_KEY
-                 if arg.startswith(key + "=")]
-        if named:
-            if named[0] in ("--allow", "--deny") \
-                    and found[FLAG_KEY[named[0]]] is not None:
-                fail(ERR_BAD_ARGS,
-                     f"{named[0]}: given twice — name every class once "
-                     f"({named[0]}=read,write …)")
-            found[FLAG_KEY[named[0]]] = arg.split("=", 1)[1]
-            index += 1
-            continue
-        rest.append(arg)
-        index += 1
-    return rest, found
+    rest, values = _scan(args, tuple(FLAG_KEY), "",
+                         refuse_repeat=("--allow", "--deny"))
+    return rest, {key: (values[flag][-1] if values[flag] else None)
+                  for flag, key in FLAG_KEY.items()}

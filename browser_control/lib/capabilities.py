@@ -4,7 +4,8 @@ The plan's *Kind* column made machine-readable. A policy gate, an agent's own
 guardrails or a reviewer should be able to ask "may this run?" without
 hardcoding a verb list in another codebase — and the answer should not drift
 the first time a verb is added, so this table is checked against the CLI's own
-handler tables (`cli.main.HANDLERS` and `TAB_SUBCOMMANDS`) by a hermetic test
+handler tables (`cli.registry.HANDLERS` and `TAB_SUBCOMMANDS`) by a hermetic
+test
 AND at runtime: `selftest` reports what is unclassified instead of quietly
 pretending the surface is complete.
 

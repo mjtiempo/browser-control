@@ -10,20 +10,20 @@ import binascii
 import math
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
 from browser_control.lib import (
-    images,  # pyright: ignore[reportMissingImports]
+    images,
 )
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_float,
     as_int,
 )
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (
     SHOT_METRICS,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_CDP_ERROR,
     ERR_SCREENSHOT_NOT_VERIFIED,
     fail,

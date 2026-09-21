@@ -1,13 +1,14 @@
 """verbs.tab — the `tab` subcommand handlers."""
 from __future__ import annotations
 
-from browser_control.cli.argv import (  # pyright: ignore[reportMissingImports]
+from browser_control.cli.argv import (
     _float,
     _int,
     _needle,
     _no_flags,
     _none,
     _one,
+    _opt_int,
     _pop,
     _pop_all,
     _switch,
@@ -16,10 +17,25 @@ from browser_control.cli.argv import (  # pyright: ignore[reportMissingImports]
 )
 from browser_control.lib import browser as browser_lib
 from browser_control.lib import dom
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )
+
+
+def _point_given(verb: str, at: str | None, needle: str | None,
+                 selector: str | None, index: str | None) -> bool:
+    """Was this a POINT call? `--at X,Y` REPLACES the spec instead of
+    joining it, so a point given WITH a TEXT/--selector is refused by name
+    rather than one of the two being silently preferred (`click` and `hover`
+    are the only point-taking verbs, and they answer it the same way)."""
+    if at is None:
+        return False
+    if needle is not None or selector is not None or index is not None:
+        fail(ERR_BAD_ARGS,
+             f"{verb}: --at is a POINT — give that or a TEXT/"
+             "--selector (with --index), not both")
+    return True
 
 
 def cmd_tab_list(rest: list[str], browser: str) -> dict:
@@ -90,17 +106,12 @@ def cmd_tab_hover(rest: list[str], browser: str) -> dict:
     rest, index = _pop(rest, "--index", "tab hover")
     rest, at = _pop(rest, "--at", "tab hover")
     needle = _needle(rest, "tab hover")
-    if at is not None:
-        if needle is not None or selector is not None or index is not None:
-            fail(ERR_BAD_ARGS,
-                 "tab hover: --at is a POINT — give that or a TEXT/"
-                 "--selector (with --index), not both")
+    if _point_given("tab hover", at, needle, selector, index):
         return dom.hover(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
         fail(ERR_BAD_ARGS, "tab hover: give TEXT, --selector CSS, or --at X,Y")
     return dom.hover(needle, selector=selector,
-                     index=_int(index, "tab hover --index")
-                     if index is not None else None,
+                     index=_opt_int(index, "tab hover --index"),
                      tab=spec, browser=browser)
 
 def cmd_tab_check(rest: list[str], browser: str) -> dict:
@@ -113,8 +124,7 @@ def cmd_tab_check(rest: list[str], browser: str) -> dict:
     if (needle is None) == (selector is None):
         fail(ERR_BAD_ARGS, "tab check: give TEXT or --selector CSS, not both")
     return dom.check(needle, selector=selector,
-                     index=_int(index, "tab check --index")
-                     if index is not None else None,
+                     index=_opt_int(index, "tab check --index"),
                      uncheck=uncheck, tab=spec, browser=browser)
 
 def cmd_tab_select(rest: list[str], browser: str) -> dict:
@@ -131,8 +141,7 @@ def cmd_tab_select(rest: list[str], browser: str) -> dict:
              "tab select: --value is required — the option's value, or its "
              "exact label")
     return dom.select(needle, selector=selector, value=value,
-                      index=_int(index, "tab select --index")
-                      if index is not None else None,
+                      index=_opt_int(index, "tab select --index"),
                       tab=spec, browser=browser)
 
 def cmd_tab_dialog(rest: list[str], browser: str) -> dict:
@@ -256,17 +265,12 @@ def cmd_tab_click(rest: list[str], browser: str) -> dict:
     rest, at = _pop(rest, "--at", "tab click")
     needle = _needle(rest, "tab click")
     # `--at X,Y` is a POINT: it replaces the spec instead of joining it
-    if at is not None:
-        if needle is not None or selector is not None or index is not None:
-            fail(ERR_BAD_ARGS,
-                 "tab click: --at is a POINT — give that or a TEXT/"
-                 "--selector (with --index), not both")
+    if _point_given("tab click", at, needle, selector, index):
         return dom.click(None, at=at, tab=spec, browser=browser)
     if (needle is None) == (selector is None):
         fail(ERR_BAD_ARGS, "tab click: give TEXT, --selector CSS, or --at X,Y")
     return dom.click(needle, selector=selector,
-                     index=_int(index, "tab click --index")
-                     if index is not None else None,
+                     index=_opt_int(index, "tab click --index"),
                      tab=spec, browser=browser)
 
 def cmd_tab_scroll(rest: list[str], browser: str) -> dict:
@@ -279,9 +283,9 @@ def cmd_tab_scroll(rest: list[str], browser: str) -> dict:
     rest, at = _pop(rest, "--at", "tab scroll")
     needle = _needle(rest, "tab scroll")
     return dom.scroll(
-        by=_int(by, "tab scroll --by") if by is not None else None,
+        by=_opt_int(by, "tab scroll --by"),
         edge=edge, text=needle, selector=selector,
-        index=_int(index, "tab scroll --index") if index is not None else None,
+        index=_opt_int(index, "tab scroll --index"),
         at=at, tab=spec, browser=browser)
 
 def cmd_tab_focus(rest: list[str], browser: str) -> dict:
@@ -293,8 +297,7 @@ def cmd_tab_focus(rest: list[str], browser: str) -> dict:
     if (needle is None) == (selector is None):
         fail(ERR_BAD_ARGS, "tab focus: give TEXT or --selector CSS, not both")
     return dom.focus(needle, selector=selector,
-                     index=_int(index, "tab focus --index")
-                     if index is not None else None,
+                     index=_opt_int(index, "tab focus --index"),
                      tab=spec, browser=browser)
 
 def cmd_tab_press(rest: list[str], browser: str) -> dict:
@@ -330,8 +333,7 @@ def cmd_tab_upload(rest: list[str], browser: str) -> dict:
     if len(rest) > 1:
         fail(ERR_BAD_ARGS, f"tab upload: one FILE at most, got {len(rest)}")
     return dom.upload(rest[0], selector=selector,
-                      index=_int(index, "tab upload --index")
-                      if index is not None else None,
+                      index=_opt_int(index, "tab upload --index"),
                       tab=spec, browser=browser)
 
 def cmd_tab_media(rest: list[str], browser: str) -> dict:
@@ -344,6 +346,5 @@ def cmd_tab_media(rest: list[str], browser: str) -> dict:
     if len(rest) > 1:
         fail(ERR_BAD_ARGS, f"tab media: one MODE at most, got {len(rest)}")
     return dom.media(rest[0],
-                     index=_int(index, "tab media --index")
-                     if index is not None else None,
+                     index=_opt_int(index, "tab media --index"),
                      tab=spec, browser=browser)

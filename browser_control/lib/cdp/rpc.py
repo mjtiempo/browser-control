@@ -13,7 +13,7 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any, NoReturn
 
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BLOCKED,
     ERR_CDP_ERROR,
     ERR_CDP_NOT_LOCAL,
@@ -22,7 +22,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
-from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
+from browser_control.lib.text import foreign
 
 # The one third-party dependency. Typed as Any so a missing package is a
 # runtime refusal (`no-websockets`), not an import-time traceback — and so the

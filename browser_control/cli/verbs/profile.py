@@ -1,14 +1,14 @@
 """verbs.profile — the `profile` subcommand handlers."""
 from __future__ import annotations
 
-from browser_control.cli.argv import (  # pyright: ignore[reportMissingImports]
+from browser_control.cli.argv import (
     _int,
     _none,
     _pop,
     _switch,
 )
 from browser_control.lib import profile as profile_lib
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )

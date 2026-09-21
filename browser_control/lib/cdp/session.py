@@ -11,8 +11,8 @@ import contextlib
 import time
 from typing import Any, NoReturn
 
-from browser_control.lib.cdp import rpc  # pyright: ignore[reportMissingImports]
-from browser_control.lib.cdp.rpc import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.cdp import rpc
+from browser_control.lib.cdp.rpc import (
     BLOCKED_HINT,
     DIALOG_EVENT,
     DIALOG_GRACE_S,
@@ -22,7 +22,7 @@ from browser_control.lib.cdp.rpc import (  # pyright: ignore[reportMissingImport
     _page_enable,
     _value_of,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BLOCKED,
     ERR_CDP_ERROR,
     ERR_EVAL_TIMEOUT,
@@ -31,7 +31,22 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
-from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
+from browser_control.lib.text import foreign
+
+
+def require_websockets() -> None:
+    """Refuse `no-websockets` when the transport is not importable.
+
+    A RUNTIME read of the live binding (`rpc.websockets`), never an import-time
+    one: the suites flip it to None to prove the refusal, and an install
+    without the package must come back as a refusal rather than a traceback.
+    Every entry point calls this, so the missing dependency reads the same
+    wherever it is first felt.
+    """
+    if rpc.websockets is None:
+        fail(ERR_NO_WEBSOCKETS,
+             "the `websockets` package is required to speak CDP "
+             "(pip install websockets)")
 
 
 class Session:
@@ -52,10 +67,7 @@ class Session:
         starts with. Exactly one verb needs that: `tab dialog` answering a
         dialog that is ALREADY up, because enabling the domain is what blocks
         on a parked tab while the handling command answers regardless."""
-        if rpc.websockets is None:
-            fail(ERR_NO_WEBSOCKETS,
-                 "the `websockets` package is required to speak CDP "
-                 "(pip install websockets)")
+        require_websockets()
         self._ws_url = _checked_ws(ws_url, "tab")
         self._timeout = timeout
         self._page_domain = page_domain
@@ -74,7 +86,7 @@ class Session:
             self._loop = asyncio.new_event_loop()
             try:
                 self._ws = self._loop.run_until_complete(
-                    # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws
+                    # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws  # noqa: E501
                     rpc.websockets.connect(self._ws_url, max_size=2 ** 24,
                                        open_timeout=10))
             except Exception as e:                             # noqa: BLE001
@@ -262,10 +274,7 @@ class Session:
 def call(ws_url: str, method: str, params: dict | None = None,
          timeout: float = 15.0) -> dict:
     """One CDP method call, returning the protocol's own `result`."""
-    if rpc.websockets is None:
-        fail(ERR_NO_WEBSOCKETS,
-             "the `websockets` package is required to speak CDP "
-             "(pip install websockets)")
+    require_websockets()
     with Session(_checked_ws(ws_url), page_domain=False) as session:
         return session.call(method, params or {}, timeout)
 
@@ -278,10 +287,7 @@ def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
     the page THREW (`js-error`), the page did not answer within the budget
     (`eval-timeout`), and the transport itself failed (`cdp-error`).
     """
-    if rpc.websockets is None:
-        fail(ERR_NO_WEBSOCKETS,
-             "the `websockets` package is required to speak CDP "
-             "(pip install websockets)")
+    require_websockets()
     with Session(_checked_ws(ws_url, "tab")) as session:
         return session.evaluate(expression, timeout)
 
@@ -296,15 +302,12 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
     it is caught and the loop continues; only the connection itself failing,
     or a tab that was ALREADY parked when the session opened, refuses.
     """
-    if rpc.websockets is None:
-        fail(ERR_NO_WEBSOCKETS,
-             "the `websockets` package is required to speak CDP "
-             "(pip install websockets)")
+    require_websockets()
     deadline = time.monotonic() + timeout
     value: Any = None
     samples = 0
     with Session(_checked_ws(ws_url, "tab")) as session:
-        session._connect()                    # Page.enable happens here
+        session._connect()                    # Page.enable happens here  # noqa: SLF001
         if session.parked:
             # the tab was parked before this session opened: polling cannot
             # answer, and the old path refused `blocked` right here

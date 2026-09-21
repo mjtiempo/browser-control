@@ -13,7 +13,7 @@ that runs two calls in one process threads its own `Scope` instead.
 """
 from __future__ import annotations
 
-from browser_control.lib.paths import norm  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import norm
 
 
 class Scope:

@@ -24,7 +24,13 @@ import re
 import urllib.parse
 
 from browser_control import plugin_api
-from browser_control.plugin_api import ControlError, fail
+from browser_control.plugin_api import (
+    ControlError,
+    errors,
+    fail,
+    pop,
+    switch,
+)
 
 DEFAULT_CAP = 10
 MAX_CAP = 50
@@ -54,39 +60,15 @@ def _search_url(query: str, latest: bool) -> str:
         sort="live" if latest else "top")
 
 
-def _take(args: list[str], flag: str) -> bool:
-    """Remove a boolean flag from argv anywhere; True when it was there."""
-    if flag in args:
-        args.remove(flag)
-        return True
-    return False
-
-
-def _value(args: list[str], flag: str) -> str | None:
-    """Remove `--flag VALUE` or `--flag=VALUE` and return the value."""
-    for index, arg in enumerate(args):
-        if arg == flag:
-            if index + 1 >= len(args):
-                fail("bad-args", f"x search: {flag} needs a value")
-            value = args[index + 1]
-            del args[index:index + 2]
-            return value
-        if arg.startswith(flag + "="):
-            value = arg.split("=", 1)[1]
-            del args[index]
-            return value
-    return None
-
-
 def _number(value: str | None, flag: str, default: int, top: int) -> int:
     if value is None:
         return default
     try:
         number = int(value)
     except (TypeError, ValueError):
-        fail("bad-args", f"x search: {flag} needs a number, got {value!r}")
+        fail(errors.ERR_BAD_ARGS, f"x search: {flag} needs a number, got {value!r}")
     if number < 1:
-        fail("bad-args", f"x search: {flag} must be at least 1, got {number}")
+        fail(errors.ERR_BAD_ARGS, f"x search: {flag} must be at least 1, got {number}")
     return min(number, top)
 
 
@@ -146,28 +128,30 @@ def run(rest: list[str], browser: str) -> dict:
     if not args or args[0] != "search":
         # the verb's own subcommand: `x` is the plugin's noun, `search` is the
         # action, so a future read (`x post URL`) can sit beside it
-        fail("bad-args",
+        fail(errors.ERR_BAD_ARGS,
              "x: the subcommand is required — `x search QUERY ...` "
              "(have: search)")
     args = args[1:]
     # default is `--latest`: this verb is for reading what was JUST said; the
     # site's own relevance sort is one explicit `--top` away.
-    latest = _take(args, "--latest")
-    top = _take(args, "--top")
-    cap = _value(args, "--cap")
-    chars = _value(args, "--chars")
-    tab = _value(args, "--tab") or ""
+    args, latest = switch(args, "--latest")
+    args, top = switch(args, "--top")
+    args, cap = pop(args, "--cap", "x search")
+    args, chars = pop(args, "--chars", "x search")
+    args, tab = pop(args, "--tab", "x search")
+    tab = tab or ""
     if latest and top:
-        fail("bad-args", "x search: --latest and --top are two sorts — pick one")
+        fail(errors.ERR_BAD_ARGS,
+             "x search: --latest and --top are two sorts — pick one")
     if not args:
-        fail("bad-args",
+        fail(errors.ERR_BAD_ARGS,
              "x search: a QUERY is required, e.g. "
              "x search '\"Pardon Snowden\"' --latest --cap 5")
     if len(args) > 1:
-        fail("bad-args", f"x search: one QUERY at most, got {len(args)}")
+        fail(errors.ERR_BAD_ARGS, f"x search: one QUERY at most, got {len(args)}")
     query = args[0].strip()
     if not query:
-        fail("bad-args", "x search: an empty QUERY is not a search")
+        fail(errors.ERR_BAD_ARGS, "x search: an empty QUERY is not a search")
 
     url = _search_url(query, latest=(not top))
     plugin_api.nav(url, tab=tab, browser=browser)

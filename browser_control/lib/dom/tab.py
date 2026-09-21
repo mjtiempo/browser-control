@@ -6,16 +6,16 @@ frame scope and the reply envelope cannot drift between verbs.
 from __future__ import annotations
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
 from browser_control.lib import (
-    scope as scope_state,  # pyright: ignore[reportMissingImports]
+    scope as scope_state,
 )
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_int,
 )
 

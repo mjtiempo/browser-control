@@ -7,24 +7,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser as _pkg
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.constants import (
     LAUNCH_WAIT_S,
     PORT_WAIT_S,
     TAB_WAIT_S,
 )
-from browser_control.lib.browser.owners import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.owners import (
     GUARD,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_CLOSE_TAB_NOT_VERIFIED,
     ControlError,
     fail,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_NORMAL,
     POLL_SLOW,
     poll,

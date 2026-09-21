@@ -8,14 +8,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_ints,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_NO_VIEWPORT,
     fail,
 )
-from browser_control.lib.text import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.text import (
     foreign,
 )
 

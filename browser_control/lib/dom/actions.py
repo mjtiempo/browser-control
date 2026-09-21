@@ -5,31 +5,32 @@ state — a page that ignores the event refuses rather than claiming success.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
+from browser_control.lib.coerce import (
     as_int,
     as_ints,
     as_list,
 )
-from browser_control.lib.dom.keys import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.keys import (
     key_event,
 )
-from browser_control.lib.dom.queries import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.queries import (
     FIND_CAP,
 )
 from browser_control.lib.dom.result import (
-    PageState,  # pyright: ignore[reportMissingImports]
+    PageState,
 )
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (
     CANDIDATES_EXPR,
     CHECK_READ,
     ELEMENT_EXPR,
@@ -43,7 +44,7 @@ from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingIm
     UPLOAD_DEFAULT_SELECTOR,
     fill,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_AMBIGUOUS_OPTION,
     ERR_BAD_ARGS,
     ERR_CHECK_NOT_VERIFIED,
@@ -60,15 +61,36 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_FAST,
     poll,
 )
-from browser_control.lib.text import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.text import (
     foreign,
 )
 
 CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
+
+
+@contextlib.contextmanager
+def _target(needle: str, css: str, index: int | None,  # noqa: ANN202
+            tab: str, browser: str):
+    """The prelude every element verb runs: the write-authorized tab, its
+    session, the matched spec and the picked element.
+
+    One place, because the ORDER is the contract — the tab is resolved for
+    writes before a session opens, and the pick is what refuses `no-match` and
+    `ambiguous-element` with the tab's own row — and five verbs spelled it out
+    identically. Yields `(session, data, element, row, tab_row)`.
+    """
+    page = _pkg.Tab.open(tab, browser, for_write=True)
+    row, tab_row = page.row, page.tab_row
+    with page.session() as session:
+        data = _pkg._matches_in(session, needle, css, FIND_CAP)
+        element = _pkg._pick(data, needle, css, index, row=row,
+                             tab_row=tab_row)
+        yield session, data, element, row, tab_row
+
 
 def _under_point(session: cdp.Session, x: int, y: int) -> object:
     """What the element-at-point probe reaches there, as a short name.
@@ -207,12 +229,8 @@ def click(text: str | None = None, selector: str | None = None,
         _pkg._at_point(at, "tab click")     # the POINT first: no browser needed
         row, tab_row = _pkg._resolve(tab, browser, for_write=True)
         return _click_at(row, tab_row, at)
-    page = _pkg.Tab.open(tab, browser, for_write=True)
-    row, tab_row = page.row, page.tab_row
-    with page.session() as session:
-        data = _pkg._matches_in(session, needle, css, FIND_CAP)
-        element = _pkg._pick(data, needle, css, index, row=row,
-                           tab_row=tab_row)
+    with _target(needle, css, index, tab, browser) as (session, data, element,
+                                                       row, tab_row):
         x, y = aim(element, needle, css)
         click_point(session, x, y)
         after = session.evaluate(STATE_EXPR)
@@ -258,12 +276,8 @@ def hover(text: str | None = None, selector: str | None = None,
         row, tab_row = _pkg._resolve(tab, browser, for_write=True)
         return _hover_at(row, tab_row, at)
     needle, css = _pkg._query_args(text, selector, "tab hover")
-    page = _pkg.Tab.open(tab, browser, for_write=True)
-    row, tab_row = page.row, page.tab_row
-    with page.session() as session:
-        data = _pkg._matches_in(session, needle, css, FIND_CAP)
-        element = _pkg._pick(data, needle, css, index, row=row,
-                           tab_row=tab_row)
+    with _target(needle, css, index, tab, browser) as (session, data, element,
+                                                       row, tab_row):
         x, y = aim(element, needle, css)
         session.call("Input.dispatchMouseEvent",
                      {"type": "mouseMoved", "x": x, "y": y,
@@ -319,13 +333,9 @@ def check(text: str | None = None, selector: str | None = None,
     and the read-back still stands behind it.
     """
     needle, css = _pkg._query_args(text, selector, "tab check")
-    page = _pkg.Tab.open(tab, browser, for_write=True)
-    row, tab_row = page.row, page.tab_row
     want = not uncheck
-    with page.session() as session:
-        data = _pkg._matches_in(session, needle, css, FIND_CAP)
-        element = _pkg._pick(data, needle, css, index, row=row,
-                           tab_row=tab_row)
+    with _target(needle, css, index, tab, browser) as (session, data, element,
+                                                       row, tab_row):
         before = _check_state(session, needle, css, index)
         _checkable(before, element)
         if bool(before.get("checked")) == want:
@@ -380,12 +390,8 @@ def select(text: str | None = None, selector: str | None = None,
         fail(ERR_BAD_ARGS,
              "tab select: --value is required — the option's value, or its "
              "exact label")
-    page = _pkg.Tab.open(tab, browser, for_write=True)
-    row, tab_row = page.row, page.tab_row
-    with page.session() as session:
-        data = _pkg._matches_in(session, needle, css, FIND_CAP)
-        element = _pkg._pick(data, needle, css, index, row=row,
-                           tab_row=tab_row)
+    with _target(needle, css, index, tab, browser) as (session, data, element,
+                                                       row, tab_row):
         probe = _select_probe(session, needle, css, index, wanted)
         if not probe.get("is_select"):
             kind = str(probe.get("tag") or element.get("tag") or "?")
@@ -482,12 +488,8 @@ def focus(text: str | None = None, selector: str | None = None,
     read-back is the page's own active element.
     """
     needle, css = _pkg._query_args(text, selector, "tab focus")
-    page = _pkg.Tab.open(tab, browser, for_write=True)
-    row, tab_row = page.row, page.tab_row
-    with page.session() as session:
-        data = _pkg._matches_in(session, needle, css, FIND_CAP)
-        element = _pkg._pick(data, needle, css, index, row=row,
-                           tab_row=tab_row)
+    with _target(needle, css, index, tab, browser) as (session, data, element,
+                                                       row, tab_row):
         node_id = _pkg._node_of(session,
                            _pkg._match_args(ELEMENT_EXPR, needle, css, index))
         if not node_id:

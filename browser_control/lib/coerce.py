@@ -27,11 +27,13 @@ def as_float(value: object, default: float = 0.0) -> float:
         return default
 
 
-def as_ints(value: object, count: int = 0) -> list[int]:
+def as_ints(value: object, count: int | None = None) -> list[int]:
     """A numeric list from the page, or [] — never a TypeError out of a verb.
 
     A value that is not a list at all is []: iterating a dict would have
-    produced its KEYS as numbers, which is worse than nothing.
+    produced its KEYS as numbers, which is worse than nothing. `count` caps the
+    list; None — the default — keeps every element, so "no limit" reads as a
+    limit nobody set rather than a limit of zero.
     """
     if not isinstance(value, (list, tuple)):
         return []

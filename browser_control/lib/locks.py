@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_PROFILE_BUSY,
     fail,
 )
@@ -120,7 +120,7 @@ def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
 
 
 @contextlib.contextmanager
-def profile_lock(path: str, verb: str, wait: float = LOCK_WAIT_S):
+def profile_lock(path: str, verb: str, wait: float = LOCK_WAIT_S):  # noqa: ANN201
     """Hold `path` while a check-then-act runs, or refuse `profile-busy`.
 
     Yields `LockState`: `held: False` is the filesystem-cannot-lock case,
@@ -157,7 +157,7 @@ def profile_lock(path: str, verb: str, wait: float = LOCK_WAIT_S):
 
 
 @contextlib.contextmanager
-def instance_locks(root_path: str, profile_path: str, verb: str,
+def instance_locks(root_path: str, profile_path: str, verb: str,  # noqa: ANN201
                    *, skip_profile_lock: bool = False):
     """The root lock, then the profile lock — the one ordering that is safe.
 

@@ -1,0 +1,39 @@
+# The hermetic gates: static checks and the unit suite.
+#
+# `tests/live_test.py` is deliberately NOT here — it drives a real
+# Chromium-family browser on a real display (and a real managed profile),
+# which a CI runner does not have. Run it by hand on a machine that does.
+---
+name: ci
+
+# quoted: YAML 1.1 reads a bare `on` as the boolean true, and a workflow file
+# is parsed as YAML before GitHub ever sees the key
+"on":
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # the project too: pyrightconfig makes an unresolved import an ERROR, and
+      # the one third-party import (`websockets`) has to be installed to resolve
+      - run: pip install . pyright ruff==0.14.9
+      - run: ruff check .
+      - run: pyright
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # the suite's fake CDP peer imports `websockets.sync.server`, so the
+      # declared runtime dependency has to be present for it to run
+      - run: pip install .
+      - run: python3 tests/test_unit.py

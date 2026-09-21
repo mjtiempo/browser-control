@@ -6,30 +6,30 @@ polling until the document or the scroller under the point moved.
 from __future__ import annotations
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
+from browser_control.lib.coerce import (
     as_int,
 )
-from browser_control.lib.dom.queries import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.queries import (
     FIND_CAP,
 )
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (
     ELEMENT_EXPR,
     SCROLL_PROBE,
     fill,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     ERR_NO_MATCH,
     ERR_SCROLL_NOT_VERIFIED,
     fail,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_FAST,
     poll,
 )

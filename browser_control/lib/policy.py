@@ -19,7 +19,7 @@ import os
 from collections.abc import Mapping
 
 from browser_control.lib.capabilities import CLASSES
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )

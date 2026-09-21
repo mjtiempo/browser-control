@@ -1,12 +1,20 @@
-"""registry — the ONE action resolver for the verb surface.
+"""registry — the ONE action resolver for the verb surface, and its tables.
 
 A mode-carrying subcommand answers differently by mode, and the gate and the
 handler must read that mode the SAME way: `action_of` is that one reader (with
 `resolved_mode` underneath it), which is the seam that once shipped the
 `--for JS` hole (the gate read the raw token while the verb ran caller code).
 
-The tables themselves stay on `cli.main` (`HANDLERS`, `TAB_SUBCOMMANDS`,
-`PROFILE_SUBCOMMANDS`), which is what `capabilities.unclassified` validates.
+The tables live HERE — `HANDLERS`, `TAB_SUBCOMMANDS`, `PROFILE_SUBCOMMANDS`,
+the gate's `POLICY` and the plugin set `PLUGINS` — because `selftest` reports
+them and `capabilities.unclassified` validates them, and a verb reaching into
+`cli.main` for them was a cycle kept honest only by a deferred import. They are
+filled by `cli.main` through `register()` at import: the adapters need the verb
+modules, and importing those from the tables' home would put the cycle back.
+This module imports no verb module, so the graph stays a DAG (main -> verbs ->
+registry, main -> registry). The tables are empty until `cli.main` is imported;
+their only reader that could observe that — `cmd_selftest` — is reachable
+solely through main's dispatch (or a test that imports main).
 """
 from __future__ import annotations
 
@@ -14,17 +22,57 @@ from collections.abc import Callable
 from typing import Any
 
 from browser_control.lib import (
-    capabilities,  # pyright: ignore[reportMissingImports]
-    dom,  # pyright: ignore[reportMissingImports]
+    capabilities,
+    dom,
+    plugins as plugins_lib,
+    policy as policy_lib,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )
 
 Handler = Callable[[list[str], str], dict]
 
-__all__ = ["Handler", "action_of", "modes_of", "resolved_mode"]
+__all__ = ["Handler", "HANDLERS", "PLUGINS", "POLICY", "PROFILE_SUBCOMMANDS",
+           "TAB_SUBCOMMANDS", "action_of", "modes_of", "plugins_report",
+           "register", "resolved_mode", "verb_names"]
+
+#: Every top-level verb a caller can run, built-ins first; filled by `cli.main`.
+HANDLERS: dict[str, Handler] = {}
+#: The `tab` subcommands, by the word that names them.
+TAB_SUBCOMMANDS: dict[str, Handler] = {}
+#: The `profile` subcommands, by the word that names them.
+PROFILE_SUBCOMMANDS: dict[str, Handler] = {}
+
+#: The gate's policy for the invocation in flight (`cli.main` sets it).
+POLICY = policy_lib.Policy()
+#: The plugin set loaded for the invocation in flight (`cli.main` sets it).
+PLUGINS = plugins_lib.PluginSet()
+
+
+def register(*, handlers: dict[str, Handler], tab: dict[str, Handler],
+             profile: dict[str, Handler]) -> None:
+    """Fill the tables. Called ONCE, by `cli.main` at import.
+
+    Registration, not definition: the adapters live in `cli.main` and the verb
+    modules, and importing those from the tables' home would put the cycle
+    back. `update`, so the caller hands its literals over without this module
+    and the caller sharing one object.
+    """
+    HANDLERS.update(handlers)
+    TAB_SUBCOMMANDS.update(tab)
+    PROFILE_SUBCOMMANDS.update(profile)
+
+
+def verb_names() -> list[str]:
+    """Every top-level verb a caller can run: built-ins first, then plugins."""
+    return [*HANDLERS, *PLUGINS.actions]
+
+
+def plugins_report() -> dict:
+    """What the loaded plugin set has to say (`selftest` prints it)."""
+    return PLUGINS.report()
 
 
 def modes_of(head: str) -> tuple[str, ...]:

@@ -8,28 +8,28 @@ from __future__ import annotations
 import time
 
 from browser_control.lib import (
-    audit,  # pyright: ignore[reportMissingImports]
-    cdp,  # pyright: ignore[reportMissingImports]
+    audit,
+    cdp,
 )
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
+from browser_control.lib.coerce import (
     as_int,
 )
-from browser_control.lib.dom.keys import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.keys import (
     KEYS,
     key_event,
     typed_events,
 )
 from browser_control.lib.dom.result import (
-    Verdict,  # pyright: ignore[reportMissingImports]
+    Verdict,
 )
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (
     TEXT_TARGET_EXPR,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     ERR_INSERT_NOT_VERIFIED,
     ERR_NO_FOCUS,

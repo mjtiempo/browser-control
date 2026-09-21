@@ -19,8 +19,8 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import as_int
+from browser_control.lib.errors import (
     ERR_ATTACH_FAILED,
     fail,
 )
@@ -57,10 +57,6 @@ class AttachmentStore:
             return {}
         return {norm(row["profile"]): row for row in data
                 if isinstance(row, dict) and row.get("profile")}
-
-    def get(self, profile: str) -> dict | None:
-        """The record for one profile, or None."""
-        return self.records().get(norm(profile))
 
     def is_attached(self, profile: str) -> bool:
         """Is this profile attached for tab writes?"""

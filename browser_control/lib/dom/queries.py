@@ -10,28 +10,28 @@ import time
 from typing import Any
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
+from browser_control.lib.coerce import (
     as_int,
     as_ints,
 )
-from browser_control.lib.dom.pagedata import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.pagedata import (
     _ATTR_NAME,
     _FIELD_NAME,
 )
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (
     EXTRACT_EXPR,
     FIND_EXPR,
     TEXT_EXPR,
     WAIT_EXPRS,
     fill,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_AMBIGUOUS_ELEMENT,
     ERR_BAD_ARGS,
     ERR_CDP_ERROR,

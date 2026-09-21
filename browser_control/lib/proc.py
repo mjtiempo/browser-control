@@ -16,11 +16,11 @@ import contextlib
 import os
 import subprocess
 
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_LAUNCH_FAILED,
     ControlError,
 )
-from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import (
     norm,
     pid_file,
 )

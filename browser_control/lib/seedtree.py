@@ -13,7 +13,7 @@ import shutil
 import stat
 from dataclasses import dataclass, field
 
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_SEED_FAILED,
     fail,
 )
@@ -36,10 +36,10 @@ class TreeFacts:
     skipped: list = field(default_factory=list)
     entries: list = field(default_factory=list)
 
-    def __getitem__(self, key: str):
+    def __getitem__(self, key: str):  # noqa: ANN204
         return getattr(self, key)
 
-    def __setitem__(self, key: str, value) -> None:
+    def __setitem__(self, key: str, value) -> None:  # noqa: ANN001
         setattr(self, key, value)
 
 

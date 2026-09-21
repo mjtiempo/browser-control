@@ -35,3 +35,32 @@ packages = ["browser_control", "browser_control.lib",
 
 [tool.setuptools.dynamic]
 version = { attr = "browser_control.__version__" }
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# The families the tree's own `# noqa` markers already imply: pycodestyle
+# (E/W), Pyflakes (F), flake8-self (SLF), flake8-blind-except (BLE), bandit
+# (S), pep8-naming (N), flake8-annotations (ANN).
+select = ["E", "F", "W", "SLF", "BLE", "S", "N", "ANN"]
+ignore = [
+  # `Any` is the house type where a page-supplied value enters (coerce.py
+  # exists to narrow it): an `Any` parameter there is the contract, not a gap.
+  "ANN401",
+  # The one vetted spawn — proc.spawn runs a list argv with no shell and
+  # PATH-resolves the binary on purpose. S603/S607 flag exactly that shape.
+  "S603",
+  "S607",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The suites ARE assertions (S101), and they patch the facade's `_pkg._x`
+# aliases deliberately (SLF001); the live battery also spawns the CLI itself.
+"tests/**" = ["S101", "SLF001", "ANN", "S603", "S607"]
+# lib/browser and lib/dom call siblings through their facade package
+# (`_pkg._lock`, `_pkg._rows`) so a suite can monkeypatch one binding: that is
+# the documented alias seam, and SLF001 fires on every such call.
+"browser_control/lib/browser/**" = ["SLF001"]
+"browser_control/lib/dom/**" = ["SLF001"]
+

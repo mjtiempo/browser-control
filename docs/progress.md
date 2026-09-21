@@ -25,7 +25,7 @@ it and puts one console script on PATH.
 | `README.md` | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
 | `LICENSE` | MIT, `Copyright (c) 2026 Mark Tiempo` |
 | `browser-control-cli` | the command as a checkout script (no install needed) |
-| `browser_control/cli/` | the argv adapter: `main.py` (`HANDLERS`, the `tab`/`profile` subcommand tables, the policy gate, the action log), `argv.py`, `registry.py`, `verbs/{browser,tab,profile}.py` |
+| `browser_control/cli/` | the argv adapter: `main.py` (dispatch, the policy gate, the action log), `registry.py` (the `HANDLERS`/`tab`/`profile` tables, `POLICY`, `PLUGINS`), `argv.py`, `verbs/{browser,tab,profile}.py` |
 | `browser_control/lib/browser/` | managed profile, launch/stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard, the lifecycle locks, the read-back waiters |
 | `browser_control/lib/dom/` | **the DOM tier**: `js`, `wait`, `find`, `text`, `extract`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media`, frames |
 | `browser_control/lib/cdp/` | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
@@ -189,7 +189,10 @@ running". With the command missing every check skips and it exits 2.
 5. ~~**Not published**~~ — MIT + README + declared metadata DONE (§5.21);
    what remains is an INDEX to publish to, and a distribution name that does
    not collide with the public `browser-control` project (the CLI name stays).
-6. **No CI** — both suites run by hand; nothing runs them on a push.
+6. ~~**No CI**~~ — DONE (§5.28): `.github/workflows/ci.yml` runs ruff,
+   pyright and the hermetic suite on a push, with the project installed first
+   (the transport needs `websockets` at both check and run time); the live
+   battery stays out of CI by design — it needs a real browser.
 7. **No human output** — every verb prints JSON; there is no `--json` switch
    because there is no alternative format yet.
 8. ~~**`stop` refuses when the pid cannot be identified**~~ — DONE (§5.19):
@@ -1036,6 +1039,84 @@ the X plugin's URL building and record mapping (stubbed, no network); the
 battery extracts from a real local fixture — four articles, one `hidden` — so
 projection, order, `--visible`, `--chars` and the cap are proven in a browser.
 
+### 5.28 The quality campaign — suppressions, a cycle, a monolith, duplication — done
+
+§5.25's review lanes grew a fourth, quality lens (architecture, type checking,
+duplication, dead weight). What it found there overlaps the bug/security lanes
+and is in the `review fixes` commit before this one (the lock that did not
+survive its own wipe, wall-clock deadlines, symlink-following writes, 0755
+profile trees, the URL prefix match, the empty profile that normalised to the
+CWD). The hygiene it found on its own:
+
+* **169 stale `pyright: ignore[reportMissingImports]` suppressions, gone.**
+  `pyrightconfig.json` already carried `extraPaths: ["."]` and the tree was
+  clean WITHOUT them — they suppressed nothing that fires, while disabling the
+  one error class that config exists to catch (a renamed module, a moved
+  symbol). Removed repo-wide, nothing restored, pyright stays at 0. The one
+  real failure underneath was provisioning, not code: `import websockets` does
+  not resolve in an interpreter that has not installed the project, which is
+  what CI now does before checking anything.
+* **A ruff config, committed.** The tree's own 140-plus `# noqa` markers named
+  a rule set that existed nowhere in the repository (`.gitignore` listed
+  `.ruff_cache/` and nothing configured ruff): `select =
+  ["E","F","W","SLF","BLE","S","N","ANN"]`, `ANN401` ignored (`Any` is
+  the house type at the page-supplied boundary — `coerce.py` is what narrows
+  it), `S603`/`S607` ignored (the one vetted spawn: `proc.spawn`, list argv, no
+  shell), per-file-ignores for the suites (they *are* assertions) and for the
+  `lib/browser/`+`lib/dom/` facade seam (the deliberate `_pkg._x` indirection
+  fires `SLF001` 167 times), and 12 justified markers for the residue. `uvx
+  ruff@0.14.9 check .` went from 1118 findings to 0. Nothing was renamed or
+  re-annotated to satisfy it: signatures and messages stay frozen.
+* **CI.** `.github/workflows/ci.yml`: a `static` job (ruff + pyright) and a
+  `unit` job (the hermetic suite), both installing the project first; the live
+  battery is excluded with its reason written in the file. §4.6 is paid.
+* **Dead weight and the plugin vocabulary.** `frame_rows()` and
+  `AttachmentStore.get()` (zero callers, verified) are gone; `coerce.as_ints`'
+  `count=0` footgun ("0 means no limit", not "none") is `None`; `plugin_api`
+  now re-exports the whole `errors` module so a plugin writes
+  `fail(errors.ERR_BAD_ARGS, …)` instead of a raw string, `x_reader.py` was
+  refactored onto it, and the hermetic code-vocabulary scan now reads
+  `plugins/` too (proven both ways: an unregistered literal and an f-string
+  code each fail it).
+* **The `cli.main ↔ cli.verbs.browser` cycle, broken by moving the tables
+  home.** `HANDLERS`, `TAB_SUBCOMMANDS`, `PROFILE_SUBCOMMANDS`, the gate's
+  `POLICY` and the plugin set `PLUGINS` live in `cli/registry.py`, filled by
+  one `registry.register(…)` call from `cli.main` at import. `cmd_selftest`
+  reads them there, so the deferred `from browser_control.cli import main` —
+  a reach into another module's privates, honest only because it was deferred —
+  is gone, along with the two `noqa: SLF001` markers that apologised for it.
+  `registry` imports no verb module, so the graph is a DAG (main → verbs →
+  registry, main → registry) and importing `registry` alone pulls in zero verb
+  modules (measured). The tables are empty until `cli.main` is imported and
+  their only reader that could observe that is reachable solely through main's
+  dispatch — the registry docstring records that rather than leaving it to be
+  rediscovered.
+* **The `profile` monolith split behind its facade.** `lib/profile/__init__.py`
+  was 674 lines: four verbs, the SQLite login-store readers and the tree
+  walkers, while `browser/`, `dom/` and `cdp/` were each split by
+  responsibility. It is now `stores.py` (the store census, hosts and counts,
+  never values), `trees.py` (the shared walkers), `seed.py`, `reset.py` and a
+  facade `__init__` that keeps the small `info` verb and re-exports the rest.
+  A pure internal split — the public surface, every refusal text and the
+  lock-invariant comments are unchanged.
+* **Duplication consolidated, one spelling per concept.** `argv.py`'s three
+  `--flag VALUE|--flag=VALUE` readers are one `_scan` helper (refusal texts
+  byte-identical); the `websockets is None` guard spelled five times is one
+  runtime `require_websockets()` (runtime, because the suites flip the binding
+  to prove the refusal); `_opt_int` replaced eight hand-written `_int(…) if …
+  is not None else None` calls in `verbs/tab.py`; `dom/actions.py`'s
+  ten-fold element prelude is one `_target` context manager (open for writes →
+  session → match → pick, in the one order the contract needs), carried by the
+  five verbs that shared it; `errors.CODES` is derived from the module's own
+  `ERR_*` namespace instead of hand-repeating 72 names (a frozenset now;
+  membership consumers and the hermetic check are unaffected). The facade
+  aliases were inventoried one by one — every remaining alias has a caller, so
+  the patch seam stays.
+
+Not done, deliberately: an upper bound on `websockets` (no matrix to justify
+one) and memoizing `machine.browsers()`'s per-invocation `/proc` census (a
+staleness trade for a cost no measurement has shown to matter).
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -1118,8 +1199,8 @@ that can, and that is the plugin tier's business (5.9).
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser (58 checks)
-python3 tests/live_test.py            # the battery, needs a browser (58 checks)
+python3 tests/test_unit.py            # hermetic, no browser (71 checks)
+python3 tests/live_test.py            # the battery, needs a browser (60 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com
 browser-control-cli tab list

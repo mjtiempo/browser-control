@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )

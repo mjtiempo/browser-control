@@ -15,7 +15,7 @@ import threading
 import urllib.request
 from typing import Any
 
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_CDP_ERROR,
     ERR_CDP_NOT_LOCAL,
     ERR_CDP_UNREACHABLE,

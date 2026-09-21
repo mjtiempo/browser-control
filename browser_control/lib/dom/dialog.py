@@ -6,20 +6,20 @@ answers with `Page.handleJavaScriptDialog`.
 from __future__ import annotations
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
+from browser_control.lib.dom.scripts import (
     DIALOG_AWAKE,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     ERR_DIALOG_NOT_VERIFIED,
     ERR_NO_DIALOG,
     ControlError,
     fail,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_NORMAL,
     poll,
 )

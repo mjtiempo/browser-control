@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from browser_control.lib import capabilities  # pyright: ignore[reportMissingImports]
+from browser_control.lib import capabilities
 
 PLUGIN_API = 1
 _ACTION = re.compile(r"^[a-z][a-z0-9_-]*$")

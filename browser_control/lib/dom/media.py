@@ -8,36 +8,36 @@ from __future__ import annotations
 import json
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
+from browser_control.lib.coerce import (
     as_float,
     as_int,
 )
 from browser_control.lib.dom.result import (
-    Verdict,  # pyright: ignore[reportMissingImports]
+    Verdict,
 )
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (
     MEDIA_ACTION_EXPR,
     MEDIA_STATE_EXPR,
     fill,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     ERR_MEDIA_BLOCKED,
     ERR_MEDIA_NOT_VERIFIED,
     ERR_NO_MEDIA,
     fail,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_NORMAL,
     poll,
 )
-from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
+from browser_control.lib.text import foreign
 
 MEDIA_TIMEOUT_S = 5.0       # how long a play/pause is given to take effect
 

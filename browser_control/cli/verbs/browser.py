@@ -1,4 +1,4 @@
-"""verbs.browser — the top-level verb handlers: open, close, list, info, attach, detach, selftest."""
+"""verbs.browser — the top-level verb handlers: open, close, list, info, attach, detach, selftest."""  # noqa: E501
 from __future__ import annotations
 
 import platform
@@ -6,7 +6,8 @@ import shutil
 import sys
 
 from browser_control import __version__
-from browser_control.cli.argv import (  # pyright: ignore[reportMissingImports]
+from browser_control.cli import registry
+from browser_control.cli.argv import (
     _no_browser_flag,
     _none,
     _selector,
@@ -16,11 +17,11 @@ from browser_control.cli.argv import (  # pyright: ignore[reportMissingImports]
 from browser_control.lib import audit, capabilities
 from browser_control.lib import browser as browser_lib
 from browser_control.lib.cdp import (
-    rpc as cdp_rpc,  # pyright: ignore[reportMissingImports]
+    rpc as cdp_rpc,
+    session as cdp_session,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
-    ERR_NO_WEBSOCKETS,
     fail,
 )
 
@@ -101,13 +102,10 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
     reported, not failed — the command is installed either way.
     """
     _none(rest, "selftest")
-    if cdp_rpc.websockets is None:
-        fail(ERR_NO_WEBSOCKETS,
-             "the `websockets` package is required to speak CDP "
-             "(pip install websockets)")
-    # the tables, the policy and the help live on the CLI module: a deferred
-    # import keeps one source of truth without an import cycle
-    from browser_control.cli import main as cli_main
+    cdp_session.require_websockets()
+    # the tables, the policy and the plugin set live on `cli.registry`, which
+    # this module imports at module level: no deferred import, no reach into
+    # `cli.main`'s privates
     found = []
     for name in browser_lib.BROWSER_BINS:
         path = shutil.which(name)
@@ -120,7 +118,7 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
              "websockets": getattr(cdp_rpc.websockets, "__version__", "unknown"),
              "profile_root": browser_lib.root(),
              "action_log": audit.LOG.path() or "off",
-             "verbs": sorted(cli_main.HANDLERS),
+             "verbs": sorted(registry.HANDLERS),
              "capabilities": {
                  "classes": list(capabilities.CLASSES),
                  "by_class": capabilities.by_class(),
@@ -128,11 +126,11 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
                  # verb added without a class shows up in this reply instead of
                  # being quietly missing from a table nobody re-reads
                  "unclassified": capabilities.unclassified(
-                     cli_main.HANDLERS, {"tab": cli_main.TAB_SUBCOMMANDS,
-                                "profile": cli_main.PROFILE_SUBCOMMANDS})},
-             "policy": cli_main._POLICY.describe(),
+                     registry.HANDLERS, {"tab": registry.TAB_SUBCOMMANDS,
+                                "profile": registry.PROFILE_SUBCOMMANDS})},
+             "policy": registry.POLICY.describe(),
              "browsers": found}
-    reply.update(cli_main._plugins_report())
+    reply.update(registry.plugins_report())
     if browser:
         reply["requested"] = {"name": browser,
                               "path": shutil.which(browser) or ""}

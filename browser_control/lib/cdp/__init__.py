@@ -42,6 +42,7 @@ from browser_control.lib.cdp.session import (  # noqa: F401
     call,
     evaluate,
     evaluate_until,
+    require_websockets,
 )
 from browser_control.lib.cdp.targets import (  # noqa: F401
     _checked_ws,
@@ -49,7 +50,6 @@ from browser_control.lib.cdp.targets import (  # noqa: F401
     _pages,
     browser_call,
     browser_ws,
-    frame_rows,
     frame_targets,
     page_rows,
     page_rows_at,

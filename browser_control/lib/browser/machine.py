@@ -9,26 +9,26 @@ import os
 from dataclasses import dataclass
 
 from browser_control.lib import (
-    attachments as attachments_lib,  # pyright: ignore[reportMissingImports]
+    attachments as attachments_lib,
 )
-from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser as _pkg
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
     )
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_int,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_AMBIGUOUS_BROWSER,
     ERR_CDP_ERROR,
     ControlError,
     fail,
 )
-from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import (
     is_managed,
     norm,
 )
-from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.proc import (
     cmdline_value,
     exe_path,
     main_processes,

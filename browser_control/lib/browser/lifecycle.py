@@ -14,32 +14,32 @@ import time
 from pathlib import Path
 
 from browser_control.lib import (
-    attachments as attachments_lib,  # pyright: ignore[reportMissingImports]
+    attachments as attachments_lib,
 )
-from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser as _pkg
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
 from browser_control.lib import (
-    scope as scope_state,  # pyright: ignore[reportMissingImports]
+    scope as scope_state,
 )
-from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.constants import (
     BROWSER_BINS,
     DEFAULT_PROFILES,
     LAUNCH_WAIT_S,
     PORT_WAIT_S,
     STOP_WAIT_S,
 )
-from browser_control.lib.browser.machine import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.machine import (
     endpoint_of,
 )
 from browser_control.lib.browser.selector import (
-    Selector,  # pyright: ignore[reportMissingImports]
+    Selector,
 )
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_int,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_AMBIGUOUS_BROWSER,
     ERR_BAD_ARGS,
     ERR_BROWSER_NOT_STOPPED,
@@ -55,7 +55,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
-from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import (
     expand,
     is_managed,
     lock_path,
@@ -64,11 +64,11 @@ from browser_control.lib.paths import (  # pyright: ignore[reportMissingImports]
     profile_dir,
     root,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_NORMAL,
     poll,
 )
-from browser_control.lib.proc import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.proc import (
     pid_alive,
     pid_of,
     pid_on_profile,

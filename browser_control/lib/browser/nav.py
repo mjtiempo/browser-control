@@ -10,11 +10,11 @@ import contextlib
 import time
 from typing import Any
 
-from browser_control.lib import browser as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import browser as _pkg
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib.browser.constants import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.constants import (
     ACTIVATE_TIMEOUT_S,
     HISTORY_TIMEOUT_S,
     NAV_MOVE_S,
@@ -22,15 +22,15 @@ from browser_control.lib.browser.constants import (  # pyright: ignore[reportMis
     READY_EXPR,
     RELOAD_TIMEOUT_S,
 )
-from browser_control.lib.browser.readback import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.browser.readback import (
     page_eval,
     page_session,
     page_ws,
 )
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_int,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_ACTIVATE_NOT_VERIFIED,
     ERR_BAD_ARGS,
     ERR_CDP_UNREACHABLE,
@@ -40,7 +40,7 @@ from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports
     ControlError,
     fail,
 )
-from browser_control.lib.poll import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.poll import (
     POLL_FAST,
     POLL_LOAD,
     POLL_SLOW,

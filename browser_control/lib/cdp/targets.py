@@ -7,17 +7,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from browser_control.lib.cdp.endpoint import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.cdp.endpoint import (
     _get_port,
     get_json,
 )
 from browser_control.lib.cdp.rpc import (
-    _checked_ws,  # pyright: ignore[reportMissingImports]
+    _checked_ws,
 )
 from browser_control.lib.cdp.session import (
-    call,  # pyright: ignore[reportMissingImports]
+    call,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_CDP_ERROR,
     ERR_NO_FRAME,
     ERR_NO_PAGE_TAB,
@@ -33,17 +33,6 @@ def page_rows(profile: str) -> list[dict]:
 def page_rows_at(port: int) -> list[dict]:
     """The page targets of the browser answering on this loopback port."""
     return _pages(_get_port(port, "/json"))
-
-def frame_rows(port: int) -> list[dict]:
-    """The IFRAME targets of the browser on this port, id-sorted.
-
-    A CROSS-ORIGIN frame is a target of its own: its own websocket, its own
-    coordinate space, its own execution. That is what makes every page verb
-    work inside it unchanged (measured: a real click dispatched on that session
-    fires the frame's own handler). A same-process frame has no such target, and
-    the DOM layer says so rather than pretending (`tab frames`).
-    """
-    return _of_kind(_get_port(port, "/json"), "iframe")
 
 def frame_targets(port: int) -> list[dict]:
     """The IFRAME targets of this browser, EACH WITH THE TAB THAT OWNS IT.

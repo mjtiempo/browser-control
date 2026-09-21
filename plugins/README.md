@@ -40,13 +40,19 @@ PLUGIN = {
 stripped (`--browser`, `--profile`, `--frame`, `--allow`, `--deny`) and the
 value of `--browser`. The verb is what comes after the top-level word — for
 `mysite search foo`, `rest` is `["search", "foo"]`. Refuse with
-`browser_control.lib.errors.fail("bad-args", …)`, or raise `ControlError`;
-`main` maps it to `ERR[code]` and exit 2 like any built-in refusal.
+`fail(errors.ERR_BAD_ARGS, …)`, or raise `ControlError`;
+`main` maps it to `ERR[code]` and exit 2 like any built-in refusal. Name a
+code with the constant, never a bare string: the vocabulary is closed, and the
+hermetic check scans `plugins/` for an unregistered one.
 
 The supported surface is `browser_control.plugin_api` (`fail`,
-`ControlError`, `nav`, `wait`, `extract`, `PLUGIN_API`) — import that, not
-`browser_control.lib` at large. `browser` for `nav`, `dom` for `wait` and the
-reads, and especially `dom.extract` — the generic extraction
+`ControlError`, `errors`, `pop`, `switch`, `nav`, `wait`, `extract`,
+`PLUGIN_API`) — import that, not `browser_control.lib` at large. `pop` and
+`switch` are the CLI's OWN argv readers: `rest, cap = pop(rest, "--cap",
+"mysite search")` and `rest, given = switch(rest, "--latest")` parse a plugin's
+arguments the way the built-ins are parsed, missing-value refusal included.
+`browser` for `nav`, `dom` for
+`wait` and the reads, and especially `dom.extract` — the generic extraction
 engine (`--each` + `--field NAME=SELECTOR[@ATTR]`, CSS only, no code) that a
 reader plugin is normally a thin wrapper around. The capability classes a
 plugin declares must come from the closed vocabulary (`read`, `write`, `code`,

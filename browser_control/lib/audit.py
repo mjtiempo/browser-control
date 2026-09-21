@@ -25,10 +25,10 @@ import time
 from typing import Any
 
 from browser_control.lib.logfile import (
-    FileSink,  # pyright: ignore[reportMissingImports]
+    FileSink,
 )
-from browser_control.lib.paths import expand  # pyright: ignore[reportMissingImports]
-from browser_control.lib.text import foreign  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import expand
+from browser_control.lib.text import foreign
 
 LOG_ENV = "BROWSER_CONTROL_LOG"
 DEFAULT_LOG = "~/.local/state/browser-control/actions.jsonl"

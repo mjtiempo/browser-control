@@ -40,7 +40,7 @@ from __future__ import annotations
 import os
 
 from browser_control.lib.plugins import (
-    discovery,  # pyright: ignore[reportMissingImports]
+    discovery,
 )
 
 from .spec import (

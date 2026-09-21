@@ -6,23 +6,23 @@ resolution records WHICH one a session actually attached to.
 from __future__ import annotations
 
 from browser_control.lib import (
-    browser as browser_lib,  # pyright: ignore[reportMissingImports]
+    browser as browser_lib,
 )
 from browser_control.lib import (
-    cdp,  # pyright: ignore[reportMissingImports]
+    cdp,
 )
-from browser_control.lib import dom as _pkg  # pyright: ignore[reportMissingImports]
+from browser_control.lib import dom as _pkg
 from browser_control.lib import (
-    scope as scope_state,  # pyright: ignore[reportMissingImports]
+    scope as scope_state,
 )
-from browser_control.lib.coerce import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import (
     as_int,
     as_ints,
 )
-from browser_control.lib.dom.scripts import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.dom.scripts import (
     FRAME_CENSUS,
 )
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.errors import (
     ERR_FRAME_AMBIGUOUS,
     ERR_FRAME_NOT_SEPARATE,
     ERR_FRAME_UNATTRIBUTABLE,

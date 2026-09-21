@@ -10,12 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from browser_control.lib.coerce import as_int  # pyright: ignore[reportMissingImports]
-from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
+from browser_control.lib.coerce import as_int
+from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )
-from browser_control.lib.paths import norm  # pyright: ignore[reportMissingImports]
+from browser_control.lib.paths import norm
 
 __all__ = ["Selector"]
 
