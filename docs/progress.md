@@ -1,34 +1,40 @@
 # browser-control — progress
 
-Status: **slice 1 delivered, packaged, and covered by a committed battery.**
-Repo `main`, worktree clean, 63 hermetic + 59 live checks passing.
+Status: **the CLI surface is delivered, packaged, and covered by a committed
+battery.** `python3 tests/test_unit.py` → 68 passed, 0 failed; the live battery
+(`tests/live_test.py`) runs against a real browser — run it before a release,
+and remember skip ≠ pass.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
 exists, what it does *not* do yet, and what comes next.
 
-## 1. Slice 1 — what exists
+> **Path note (post-refactor):** the sections below were written while the code
+> was still monolithic. The packages are now `lib/cdp/`, `lib/browser/`,
+> `lib/dom/`, `lib/profile/`, `lib/plugins/` and `cli/`; an older path maps to
+> its package (`lib/cdp.py` → `lib/cdp/`, `lib/browser.py` → `lib/browser/`,
+> `lib/dom.py` → `lib/dom/`).
+
+## 1. What exists
 
 The distributable package is `browser_control` (`browser_control/lib` is the
 logic, `browser_control/cli` is the argv adapter); `pyproject.toml` installs
 it and puts one console script on PATH.
 
-| File | Lines | Owns |
-| --- | --- | --- |
-| `pyproject.toml` | 31 | distribution `browser-control`, console script, `websockets`, MIT (SPDX) + `license-files` |
-| `README.md` | 155 | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
-| `LICENSE` | 21 | MIT, `Copyright (c) 2026 Mark Tiempo` |
-| `browser-control-cli` | 13 | the command as a checkout script (no install needed) |
-| `browser_control/cli/main.py` | 1260 | `HANDLERS` table, `tab` subcommands, `--browser`/`--tab`, attach argv, the action log |
-| `browser_control/lib/dom.py` | 2598 | **the DOM tier**: one element prelude, `js`, `wait`, `find`, `text`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media` |
-| `browser_control/lib/audit.py` | 224 | the JSONL action log: fail-open, directory created on the first write, scratch fallback in `/tmp/browser-control-<stamp>-<rand>`, and a proven secret written as a length |
-| `browser_control/lib/browser.py` | 2454 | managed profile, launch, stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard and the lifecycle locks |
-| `browser_control/lib/cdp.py` | 887 | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
-| `browser_control/lib/errors.py` | 21 | `ControlError(code, message)` + `fail()` |
-| `browser_control/lib/capabilities.py` | 217 | **the declared surface**: what each verb can do (`read`/`write`/`code`/`file`/`egress`), reported by `selftest` and checked against the handler tables |
-| `tests/test_unit.py` | 2714 | 63 hermetic checks, no browser needed |
-| `tests/live_test.py` | 2245 | 59 live checks on a throwaway root, skip ≠ pass |
-| `browser_control/lib/profile.py` | 491 | **the `profile` noun**: `info` (weight, age, liveness), `seed` (logins copied in, caches skipped, read back), `reset` (wipe, on purpose) |
-
-Five verbs, browser-only:
+| Path | Owns |
+| --- | --- |
+| `pyproject.toml` | distribution `browser-control`, console script, `websockets`, MIT (SPDX) + `license-files` |
+| `README.md` | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
+| `LICENSE` | MIT, `Copyright (c) 2026 Mark Tiempo` |
+| `browser-control-cli` | the command as a checkout script (no install needed) |
+| `browser_control/cli/` | the argv adapter: `main.py` (`HANDLERS`, the `tab`/`profile` subcommand tables, the policy gate, the action log), `argv.py`, `registry.py`, `verbs/{browser,tab,profile}.py` |
+| `browser_control/lib/browser/` | managed profile, launch/stop, discovery, attach records, tabs, `nav`/`activate`, the `/proc` endpoint guard, the lifecycle locks, the read-back waiters |
+| `browser_control/lib/dom/` | **the DOM tier**: `js`, `wait`, `find`, `text`, `extract`, `click`, `hover`, `scroll`, `focus`, `press`, `insert`, `type`, `upload`, `check`, `select`, `dialog`, `screenshot`, `media`, frames |
+| `browser_control/lib/cdp/` | endpoint, capped JSON GET, `evaluate`/`evaluate_until`, `target_ws`, `Session` (Page domain, events, parked tabs) |
+| `browser_control/lib/profile/` | **the `profile` noun**: `info` (weight, age, liveness), `logins` (store census, never values), `seed` (logins copied in, caches skipped, read back), `reset` (wipe, on purpose) |
+| `browser_control/lib/plugins/` + `browser_control/plugin_api.py` | the plugin loader, the typed spec, and the named seam a plugin imports |
+| `browser_control/lib/` (cross-cutting) | `errors.py` (the refusal type + code registry), `capabilities.py` (the declared surface), `policy.py` (the gate), `audit.py` (the JSONL log), `paths.py`, `proc.py`, `locks.py`, `poll.py`, `scope.py`, `instance.py`, `seedtree.py`, `images.py`, `attachments.py`, `coerce.py`, `text.py`, `logfile.py` |
+| `tests/test_unit.py` | the hermetic battery — no browser needed |
+| `tests/live_test.py` | the live battery on a throwaway root — skip ≠ pass |
+| `plugins/x_reader.py` | the shipped read-only X search plugin |
 
 The surface is a noun and its verb: `tab` owns everything about a page tab,
 the other verbs own the browser.
@@ -61,7 +67,19 @@ the other verbs own the browser.
 | `tab type TEXT` | real per-character key events (`keyDown`, `char`, `keyUp`) on one connection | same oracle and codes as `insert` (`type-not-verified`) |
 | `tab upload FILE [--selector CSS] [--index N]` | `DOM.setFileInputFiles` (an objectId, so shadow roots work) | `input.files` read back: one file, same name **and size**; `no-file`/`upload-not-verified` |
 | `tab media state\|play\|pause [--index N]` | drives the `<video>`/`<audio>` element (no CDP playback method exists — see 5.7) | `play` needs the **clock to move** (a source-less element reports `paused: false` and never plays a frame), `pause` needs `paused: true`; `no-media` when there is none, `media-blocked` with the page's own reason when the promise rejects |
+| `tab frames [--tab SPEC]` | this page's iframes, and which can be driven (a cross-origin frame is a target of its own; `--frame` reaches it) | the DOM's own iframe census, correlated with the `/json` iframe targets; `no-frame` names what exists · `frame-ambiguous` names the indices · a same-process frame refuses `frame-not-separate` |
+| `tab activate [SPEC]` | brings a tab forward (it raises its window) | the page reports itself **visible**; `activate-not-verified` says why not |
+| `tab hover TEXT \| --selector CSS [--index N] \| --at X,Y` | puts the pointer on an element (`:hover`) | the element-at-point probe; `hover-not-verified` when the page does not report the hover |
+| `tab check TEXT \| --selector CSS [--index N] [--uncheck]` | checks/unchecks a box or radio with **real input** | `checked` flipped, bounded poll; `check-not-verified`, `not-checkable` |
+| `tab select TEXT \| --selector CSS --value V [--index N]` | chooses one `<option>` with real arrow keys | the selected value/index read back; `select-not-verified`, `not-a-select`, `ambiguous-option` |
+| `tab dialog [state\|accept\|dismiss] [--text V]` | reads, accepts or dismisses a JavaScript dialog | `accept`/`dismiss` verify by the renderer returning; `state` may answer `open: null` (a suppressed dialog cannot be seen — §4.9); `no-dialog`, `dialog-not-verified` |
+| `tab screenshot PATH \| --path PATH [--full] [--force] [--tab SPEC]` | writes a PNG of the page | the file's **own PNG header** and size, not the page's geometry; `screenshot-not-verified`, `file-exists` (without `--force`) |
+| `tab extract --each CSS --field NAME=SPEC [--cap N] [--chars N] [--visible] [--unique FIELD]` | a page's repeated items as records; CSS only, no code (a `read`) | the page's own DOM text/attributes, sliced **in the page**; same oracle as `find`/`text`, no claim beyond "this is what the page showed" |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
+| `profile info [--profile DIR]` | the managed profiles: weight, age, whether a browser is on one, whether it is attached | one filesystem read |
+| `profile logins [--site HOST] [--cap N]` | the hosts a profile's cookie store names (with expiry) and how many saved logins — **counts and names only, never values** | the profile's own `Cookies`/`Login Data` read from a COPY; a store that cannot be read is `readable: false` with the reason, its rows unknown, not zero |
+| `profile seed --from DIR [--force] [--dry]` | copies a source profile's logins into a managed one (no caches, no lock files); `--dry` counts first | what landed is read back from the login stores, not from file sizes |
+| `profile reset [--force]` | wipes a managed profile, logins included | the profile is emptied and recreated; `reset-not-verified`/`reset-failed` name a wipe that did not land |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
 under this invocation's root) or to an attached one** (`attach` grants TAB
@@ -81,10 +99,11 @@ and a live managed browser wins. Two live managed browsers refuse
 
 ## 2. Evidence
 
-**Hermetic** — `python3 tests/test_unit.py` → **10 passed, 0 failed**: URL
+**Hermetic** — `python3 tests/test_unit.py` → **68 passed, 0 failed**: URL
 policy, tab-spec resolution (incl. `tab-ambiguous`), launch flags, profile
 keyed by the resolved binary, port-file edge cases, `/json` reading against a
-fake endpoint, CLI dispatch, CLI argv strictness, pid liveness.
+fake endpoint, CLI dispatch and grammar, the capability surface, audit
+redaction, endpoint ownership, lock semantics, pid liveness.
 
 **Live** (throwaway root `/tmp/bc-live-verify`, user's own browsers untouched):
 
@@ -106,11 +125,12 @@ command from `/tmp` — nothing of the repo on the path — drove a real Chrome
 through open → new-tab → tabs → close-tab → close, with `tabs` afterwards
 refusing `cdp-unreachable`.
 
-**Static** — all five Python files clean under an active LSP probe (0
-diagnostics).
+**Static** — the package was clean under an active LSP probe (0
+diagnostics) at the last full run.
 
-**Live battery** — `python3 tests/live_test.py` → **39 passed, 0 failed, 0
-skipped** (exit 0) on a throwaway root: it starts a real Chrome and reads
+**Live battery** — `python3 tests/live_test.py` on a throwaway root (the suite
+has grown past the 39 checks first recorded here; run it for the current
+count): it starts a real Chrome and reads
 independent state back — a raw socket connect, a direct `/json` GET, `/proc`
 for the pid — for open, `list`, `tab list`/`tab info`, `tab` (single and
 several URLs), open with several URLs, `tab close` by id and by substring,
@@ -129,22 +149,24 @@ refusals, `info`, adoption of the running browser, the verified close, the
 idempotent close, a browser with no debugging port (listed, never driven), a
 **foreign drivable** browser (read → refused → attached → written →
 detached, with `close` still refusing to stop it) and "nothing left
-running". With the command missing it reports 39 skips and exits 2.
+running". With the command missing every check skips and it exits 2.
 
-**Not proven yet**: no concurrent-`open` test (there is no lock), no
-multi-browser test (two live instances refuse), no CI.
+**Not proven yet**: no CI — both suites are run by hand. The earlier
+"no lock" and "one browser at a time" gaps are closed (§5.18, §5.20).
 
 ## 3. Deviations from the plan
 
-| Plan said | Slice 1 | Why / when to revisit |
+| Plan said | Now | Why |
 | --- | --- | --- |
-| `lib/cdp/` package | one `lib/cdp.py` | split when nav/dom land and the file grows |
-| `lib/profile.py`, `lib/tabs.py` | folded into `lib/browser.py` (1281 lines) for the tabs, and the DOM tier split out as `lib/dom.py` when it arrived | the boundary is now where it should be: transport in `cdp.py`, resolution/lifecycle/nav in `browser.py`, page READING in `dom.py` |
-| profile **seeding** from the user's own profile | not implemented — the managed profile starts empty | deliberate: no copying a multi-GB profile until the slice needs logins (see next) |
-| port → inode → pid ownership guard | only the websocket-host check; `close` identifies its pid by cmdline + exe | the endpoint is `--remote-debugging-port=0` on our own profile, so there is no fixed port to forward yet |
-| `ensure` (windowless start) | `open` always makes a page | the 4-verb scope does not need a windowless state |
-| plugin tier, nav, dom, input, forms, media, search | not started | next (see §5) |
-| console script `bctl` | console script `browser-control-cli`; the short name is still an open decision (§6) | packaging landed; the plan's `bctl` alias was not added |
+| `lib/cdp/` package; `lib/dom.py`, `lib/tabs.py`, `lib/profile.py` | packages `lib/cdp/`, `lib/browser/`, `lib/dom/`, `lib/profile/`, `lib/plugins/` | the refactor landed: transport, lifecycle, the DOM tier, profiles and plugins each own a package |
+| profile **seeding** from the user's own profile | DONE (§5.22): `profile seed --from DIR` | explicit source, caches/lock files skipped, read back, `--dry` first |
+| port → inode → pid ownership guard | DONE (§5.16) | every drive of an unverified endpoint refuses `cdp-not-local` |
+| `ensure` (windowless start) | not built; `open` always makes a page | windowless was built, measured and rejected (§5.11); `open` is idempotent, which is what `ensure` was for |
+| plugin tier, nav, dom, input, forms, media | DONE (§5.13, §5.24, §5.27) | `input`/`forms`/`media` live in `lib/dom/`; plugins load from a path, not entry points |
+| `cdp METHOD` raw escape hatch | dropped by decision | `tab js` is the declared escape hatch; a raw protocol verb would widen the authorization surface |
+| `search QUERY` (headless) | deferred by decision (§5.8) | a caller-supplied engine or the plugin tier serves the read |
+| console script `bctl` | `browser-control-cli` only | answered (§6.4) |
+| profile snapshots (`profile save`/`load`) | not built | the plan said "if they ever earn it"; they have not |
 
 ## 4. Known gaps and debt
 
@@ -197,14 +219,11 @@ off.)
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1, 5.2, 5.4, 5.5, 5.6, 5.7,
-5.12 through 5.24 have landed** (§1, §2); **5.3 (seeding), the ad functions, 5.8
-(search) and 5.9 (plugins) are deferred by decision**, and **5.11 was built,
-measured and rejected**. What is left in the CORE is **5.10: the launch/sync
-lock, the `/proc` ownership guard, and a capability surface in `selftest`** —
-all three deferred at the operator's request, not forgotten. Every later verb
-is expected to add its check to `tests/live_test.py`; the CLI grammar is
-settled (§1).
+Ordered by "unblocks the most with the least". **5.1–5.7 and 5.10 through 5.27
+have landed** (§1, §2); **5.8 (search) and the ad functions are deferred by
+decision**, and **5.11 was built, measured and rejected**. Nothing is left in
+the core: 5.10's hardening items landed in §5.16–§5.18. Every later verb adds
+its check to `tests/live_test.py`; the CLI grammar is settled (§1).
 
 ### 5.1 `selftest` verb — done
 Landed as `browser-control-cli selftest`: interpreter, `python_version`,
@@ -867,7 +886,7 @@ made this plumbing rather than new verbs:
 | `tab frames [--tab SPEC]` | every frame of the page: index, url, name, box, `same_process`, `visible`, and the CDP `target` it can be driven through |
 | `--frame VALUE` (global, like `--profile`) | a URL substring or an index from `tab frames`; `dom._session` attaches to that frame's target, so `text`/`find`/`click`/`js`/… run inside it |
 | the frame census in reads | `tab text` and `tab find` carry `frames: {total, separate, same_process, visible}`, so a read that omits frame content SAYS so |
-| `tab click|hover --at X,Y` | real input at a POINT, for what no selector can reach (a canvas): `verified: false`, with `under` reporting what the point actually reaches |
+| `tab click\|hover --at X,Y` | real input at a POINT, for what no selector can reach (a canvas): `verified: false`, with `under` reporting what the point actually reaches |
 | `frame-ambiguous` / `no-frame` / `frame-not-separate` | several frames match → the indices are named; none → what exists is named; a frame sharing the page's PROCESS has no target to drive, and the refusal says what to do instead (`tab js` reads it; `--at` hits it) |
 
 How common frames are, measured on this machine (6 pages): 0 on static content
@@ -1052,8 +1071,10 @@ that can, and that is the plugin tier's business (5.9).
 4. ~~**Command name**~~ — answered: keep `browser-control-cli` as the only
    name (no `bctl` alias).
 5. ~~**Output**~~ — answered: JSON only.
-6. ~~**Plugin discovery**~~ — answered: entry points. The plugin tier itself
-   (5.9) is deferred.
+6. ~~**Plugin discovery**~~ — answered: path-based discovery
+   (`BROWSER_CONTROL_PLUGIN_PATH`, or the default
+   `~/.local/share/browser-control/plugins/`), and the tier itself landed
+   (§5.27).
 7. ~~**`js` reply cap**~~ — answered: REFUSE past the cap
    (`result-too-large`); do not truncate.
 8. ~~**How to answer a JavaScript dialog**~~ — answered by measurement: with
@@ -1066,12 +1087,12 @@ that can, and that is the plugin tier's business (5.9).
    itself visible **among the browsers this CLI drives** (managed or attached).
    The user's own browser has visible tabs too, and including them made the
    spec useless (§5.13).
-8. ~~**`find` scope**~~ — answered: top document + open shadow roots
+10. ~~**`find` scope**~~ — answered: top document + open shadow roots
    (iframes out of scope, stated and tested).
-9. **Policy gate** for code-executing verbs (`tab js`, `tab wait --for js`,
-   `tab text` on a logged-in page) — still open, and it belongs to the agent
-   frontend rather than to this CLI.
-10. ~~**Native first**~~ — answered as a standing principle: **whatever CDP can
+11. ~~**Policy gate**~~ for code-executing verbs (`tab js`, `tab wait --for
+    js`) — answered: the gate landed as `--allow`/`--deny` (§5.23); the agent
+    frontend decides the policy, the CLI enforces it.
+12. ~~**Native first**~~ — answered as a standing principle: **whatever CDP can
     do natively, do that** rather than reaching for page JavaScript. Hence
     `Input.dispatchMouseEvent` for clicks and wheels (trusted input, measured
     against `element.click()`'s `isTrusted: false`),
@@ -1080,11 +1101,9 @@ that can, and that is the plugin tier's business (5.9).
     `DOM.setFileInputFiles` for uploads. `js` stays the last resort, and where
     the protocol offers NOTHING (playback), the verb says so and verifies the
     effect instead.
-11. ~~**The ad functions**~~ — deferred by decision: `tab ad-state` and `tab
+13. ~~**The ad functions**~~ — deferred by decision: `tab ad-state` and `tab
     skip-ad` are not being built. The ad knowledge is site-specific, so it
     belongs to the plugin tier (5.9) rather than to the core.
-
-Nothing here blocks 5.6.
 
 ## 7. How to run
 

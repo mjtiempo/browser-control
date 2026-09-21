@@ -1,7 +1,8 @@
 # browser-control — plan
 
-Status: slice 1 delivered — this file is the design, `docs/progress.md` is the
-state of the work (what exists, what it does not do yet, and what comes next).
+Status: the CLI surface is delivered — this file is the design,
+`docs/progress.md` is the state of the work (what exists, what it does not do
+yet, and what comes next).
 Derived from the `omctrl` browser-control review (see "Defects designed out").
 
 A Python library that drives this machine's Chromium over CDP on a **managed
@@ -23,11 +24,15 @@ profile, one endpoint, resolved the same way everywhere.
 
 ## 2. `lib/` modules
 
+Note: the module boundaries below are the design; the code now lives in
+packages — `lib/cdp/`, `lib/browser/`, `lib/dom/` (which absorbed `input.py`,
+`forms.py` and `media.py`), `lib/profile/` and `lib/plugins/`.
+
 ### `cdp/` — transport
 
 - Endpoint: explicit profile → `DevToolsActivePort` → named fallback; env
   override still ownership-checked. `get_json` (capped), `evaluate`
-  (returnByValue), `call`, `raw`, `batch(one connection)`.
+  (returnByValue), `call`, `Session` (one connection per verb sequence).
 - Payload bounds, host-checked websockets (loopback only), deadlines checked
   *inside* the receive loop, result caps.
 - Retry split: reads retry with backoff; **mutations never replay**; one
@@ -86,7 +91,7 @@ profile, one endpoint, resolved the same way everywhere.
 ### `dom.py`
 
 - `js EXPR` (escape hatch, L0), `wait --for load|idle|element|js` (bounded),
-  `text`/`html`/`attr`.
+  `text`, `extract` (records; attributes via `NAME=SELECTOR@attr`).
 - `find TEXT | --selector CSS [--cap N]` →
   `{tag, role, name, text, href, vbox, vx, vy}` in **page coordinates only**
   (no screen math, no monitor checks, no click).
@@ -112,7 +117,7 @@ profile, one endpoint, resolved the same way everywhere.
   (structural detection; skip gate matched on button shape/class, not the
   English word; page-coordinate click only).
 
-### `search.py` — headless search
+### `search.py` — headless search (DEFERRED by decision)
 
 - DDG / Google / SearXNG; throwaway vs persistent cookie profile, own port,
   per-profile lock + pacing, real UA override.
@@ -148,11 +153,13 @@ Browser-level:
 
 `open URL…` · `close [--force]` · `list` · `info` · `attach [--port N|--pid N|--profile
 DIR]` · `attach --list` · `detach [--port N|--pid N|--profile DIR|--all]` ·
-`selftest` · `profile info` · `profile seed --from DIR [--force] [--dry]` ·
-`profile reset [--force]` · `help` · `cdp METHOD [PARAMS_JSON] [--target ID|--browser]` (the
-raw escape hatch) · `search QUERY [--engine E] [--limit N]` (headless, in a
-browser of its own) — and later `ensure [URL] [--relaunch] [--no-seed]` ·
-`restart` · profile snapshots (`profile save`/`profile load`, if they ever earn it).
+`selftest` · `profile info` · `profile logins [--site HOST] [--cap N]` ·
+`profile seed --from DIR [--force] [--dry]` · `profile reset [--force]` ·
+`help` · `search QUERY [--engine E] [--limit N]` (headless, in a browser of
+its own — DEFERRED by decision) — and later `ensure [URL] [--relaunch]
+[--no-seed]` · `restart` · profile snapshots (`profile save`/`profile load`,
+if they ever earn it). The raw `cdp METHOD` escape hatch was dropped by
+decision: `tab js` is the declared escape hatch.
 
 Page-level, under `tab`:
 
@@ -161,7 +168,9 @@ Page-level, under `tab`:
 `--all [--except SPEC…] | --dry` ·
 `tab activate SPEC` · `tab nav URL [--tab SPEC]` · `tab back` · `tab forward` ·
 `tab reload` · `tab js EXPR` · `tab wait --for …` ·
-`tab find TEXT|--selector CSS` · `tab text` · `tab click TEXT|--selector CSS` ·
+`tab find TEXT|--selector CSS` · `tab text` ·
+`tab extract --each CSS --field NAME=SPEC [--cap N]` ·
+`tab click TEXT|--selector CSS` ·
 `tab hover TEXT|--selector CSS` ·
 `tab scroll --by N|--edge top\|bottom|TEXT` ·
 `tab focus TEXT|--selector CSS` ·
@@ -218,15 +227,11 @@ Shape: one `cmd_*` per verb in a `HANDLERS` table (`tab`'s subcommands in
 `ERR[code]: message` on stderr, exit 2. An unknown flag, an extra positional,
 or a bare word that is not a URL → `bad-args` (never dropped).
 
-Delivered so far: `open`, `close`, `list`, `info`, `attach`, `attach --list`,
-`detach`, `tab [URL…]`, `tab list`, `tab info`, `tab close`, `tab nav`,
-`tab back`, `tab forward`, `tab reload`, `tab activate`, `tab frames`, `tab js`,
-`tab wait`, `tab find`, `tab text`, `tab click`, `tab hover`, `tab check`,
-`tab scroll`, `tab select`, `tab focus`, `tab press`, `tab insert`,
-`tab type`, `tab upload`, `tab screenshot`, `tab dialog`, `tab media`,
-`profile info`, `profile seed`, `profile reset`, `selftest` — the rest of the
-list is the target surface; [`progress.md`](progress.md) is the state of the
-work.
+Delivered: everything above except the DEFERRED entries (`tab ad-state`/`tab
+skip-ad`, the ad functions; `search`), the LATER ones (`ensure`, `restart`,
+profile snapshots), and the dropped `cdp`.
+[`progress.md`](progress.md) §1 is the per-verb state of the work, and
+`selftest` reports the live verb table.
 
 ## 4. Verification appetite
 
@@ -265,7 +270,7 @@ unclear oracle into a claim of absence.**
    `{ok: true, verified: false}`; the honest alternative is `unverifiable` +
    a note, never a claim of absence. A declared escape hatch (`tab js`,
    `tab press`, the `--at` point input) is the exception and says so with
-   `verified: false` plus a note — rule 11 below, made explicit here because
+   `verified: false` plus a note — rule 12 below, made explicit here because
    the battery asserts exactly that pair (a review flagged the flat "never").
 7. **Unclear oracle ≠ absent effect.** Refuse only when the missing effect can
    be named; otherwise report `unverifiable` with the reason.
@@ -289,12 +294,12 @@ unclear oracle into a claim of absence.**
     the policy, `not-allowed` naming the rule; it fails closed on an
     unclassified action, resolves the mode where one decides a class, and never
     gates `selftest` — the verb that reports the policy.
-12. **The surface is DECLARED.** Every verb carries capability classes
+12. **Escape hatches are declared unverified.** `js` returns the protocol's
+    own answer; the caller owns judgment.
+13. **The surface is DECLARED.** Every verb carries capability classes
     (`read`/`write`/`code`/`file`/`egress`) per resolved action in
     `lib/capabilities.py`; `selftest` reports them and a hermetic check keeps
     them complete. It declares, it does not enforce.
-11. **Escape hatches are declared unverified.** `js` and `cdp` return the
-   protocol's own answer; the caller owns judgment.
 
 ### Per-verb appetite
 
