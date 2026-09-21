@@ -2,9 +2,12 @@
 
 A check-then-act two processes can enter at once is two browsers on one
 profile — the corruption Chrome's own "profile appears to be in use" warning
-exists to prevent. The verbs serialize it themselves: `flock` on a file in the
-profile (or in the root, for the attach records), which the kernel releases
-when the holder dies, so there is no stale lock to clean up.
+exists to prevent. The verbs serialize it themselves: `flock` on a file that
+lives BESIDE the profiles (`<root>/.locks/`), which the kernel releases
+when the holder dies, so there is no stale lock to clean up. Beside, not
+inside: `profile reset` wipes the profile while holding its lock, and a lock
+file inside the wiped tree was deleted mid-hold and re-created by the next
+`open` as a fresh inode — mutual exclusion was believed, not held.
 
 Contention is waited on and then refused `profile-busy` (naming the pid and
 verb the holder wrote); a filesystem that cannot lock at all comes back as a
@@ -81,7 +84,7 @@ def _contention(error: OSError) -> bool:
 
 def _expired(deadline: float) -> bool:
     """Has the wait run out? A call, so a refusal handler reads as one."""
-    return time.time() >= deadline
+    return time.monotonic() >= deadline
 
 
 def _holder_text(handle: Any) -> str:
@@ -97,7 +100,7 @@ def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
     as a warning, which the caller REPORTS rather than failing the verb — a
     guard that silently does nothing would be worse than none.
     """
-    deadline = time.time() + wait
+    deadline = time.monotonic() + wait
     while True:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -129,11 +132,19 @@ def profile_lock(path: str, verb: str, wait: float = LOCK_WAIT_S):
     nothing to clean up and nothing to trust.
     """
     with contextlib.ExitStack() as stack:
+        fd = -1
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            handle = stack.enter_context(
-                open(path, "a+", encoding="utf-8"))
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            # O_NOFOLLOW: a symlink planted at the lock path is an error the
+            # caller reports, not a file we truncate through (`_hold` cuts
+            # the file down to the holder line — the screenshot temp file's
+            # CWE-377 guard, applied to a path an attacker can pre-create)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            handle = stack.enter_context(os.fdopen(fd, "r+", encoding="utf-8"))
         except OSError as e:
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
             yield LockState(held=False,
                             warning=f"could not open a lock at {path}: {e}")
             return
@@ -155,7 +166,7 @@ def instance_locks(root_path: str, profile_path: str, verb: str,
     line, because only the verb knows what "live" means for it).
 
     `skip_profile_lock` is for `--dry`: taking the profile lock would create
-    the profile directory and its lock file, and a dry run must not write
+    the lock DIRECTORY (and the profile lock), and a dry run must not write
     anything. Yields `(root_state, profile_state)`.
     """
     with profile_lock(root_path, verb) as root_state:

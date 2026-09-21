@@ -102,7 +102,7 @@ def _wait_document(profile: str, target_id: str,
     def probe() -> bool:
         with contextlib.suppress(ControlError):
             return _eval(profile, target_id, READY_EXPR,
-                         timeout=max(0.5, end - time.time())) == "complete+body"
+                         timeout=max(0.5, end - time.monotonic())) == "complete+body"
         return False
 
     return bool(poll(probe, timeout=timeout, interval=POLL_LOAD)[1])

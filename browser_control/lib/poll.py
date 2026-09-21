@@ -27,8 +27,13 @@ POLL_LOAD = 0.3         # a document load
 
 
 def deadline(timeout: float) -> float:
-    """The instant a budget ends."""
-    return time.time() + timeout
+    """The instant a budget ends.
+
+    Monotonic: a budget is a duration, and an NTP step or a VM resume must
+    not move it (a wall-clock step pushed a `tab wait` past its timeout, or
+    expired it on the first sample — a review flagged the deadline source).
+    """
+    return time.monotonic() + timeout
 
 
 def poll(probe: Callable[[], Any], *, timeout: float, interval: float,
@@ -54,6 +59,6 @@ def poll(probe: Callable[[], Any], *, timeout: float, interval: float,
             last = on_error(e)
         if accept(last):
             return attempts, last
-        if time.time() >= end:
+        if time.monotonic() >= end:
             return attempts, last
         time.sleep(interval)

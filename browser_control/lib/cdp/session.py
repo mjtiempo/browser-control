@@ -120,7 +120,7 @@ class Session:
         it before would compare against a deadline we have not reached yet,
         and the refusal would claim the full budget was spent.
         """
-        return bool(parked_at) and time.time() >= parked_at
+        return bool(parked_at) and time.monotonic() >= parked_at
 
     def _blocked_hint(self) -> str:
         """What to add to a refusal when the renderer stopped answering."""
@@ -155,14 +155,14 @@ class Session:
                                 "params": msg.get("params") or {}})
             del self.events[:-20]
             if not parked_at and msg["method"] == DIALOG_EVENT:
-                parked_at = time.time() + DIALOG_GRACE_S
+                parked_at = time.monotonic() + DIALOG_GRACE_S
 
         def wait_hook(wait: float) -> float:
             if parked_at:
                 # a dialog this session SAW open parks the renderer: the reply
                 # cannot come until somebody answers it, so waiting the whole
                 # budget buys nothing but a slower refusal
-                return min(wait, max(0.1, parked_at - time.time()))
+                return min(wait, max(0.1, parked_at - time.monotonic()))
             return wait
 
         def timed_out(e: BaseException | None = None) -> NoReturn:
@@ -300,7 +300,7 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
         fail(ERR_NO_WEBSOCKETS,
              "the `websockets` package is required to speak CDP "
              "(pip install websockets)")
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     value: Any = None
     samples = 0
     with Session(_checked_ws(ws_url, "tab")) as session:
@@ -313,7 +313,7 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
             samples += 1
             try:
                 value = session.evaluate(expression,
-                                         max(0.5, deadline - time.time()))
+                                         max(0.5, deadline - time.monotonic()))
                 if accept(value):
                     return value, samples
             except ControlError as e:
@@ -321,6 +321,6 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
                 # is what the loop is for; anything else is a real failure
                 if e.code not in (ERR_EVAL_TIMEOUT, ERR_BLOCKED):
                     raise
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 return value, samples
             time.sleep(interval)

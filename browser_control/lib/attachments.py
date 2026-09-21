@@ -13,6 +13,7 @@ the root lock (`profile reset`, inside `instance_locks`) uses the explicit
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from collections.abc import Callable
@@ -118,17 +119,34 @@ class AttachmentStore:
 
     def _write(self, records: dict[str, dict]) -> None:
         """Replace the attach file. One scratch file and a rename, so a crash
-        cannot leave a half-written list of authorizations."""
+        cannot leave a half-written list of authorizations.
+
+        The scratch file is opened EXCLUSIVE and never through a link: the
+        predictable `.new` name was a pre-creatable symlink, and `open(...,
+        "w")` truncated whatever it pointed at (CWE-377, the same guard the
+        screenshot temp file carries).
+        """
         path = self.path()
         temp = f"{path}.new"
         try:
-            os.makedirs(self.base, exist_ok=True)
-            with open(temp, "w") as handle:
+            os.makedirs(self.base, mode=0o700, exist_ok=True)
+            handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                             | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            fail(ERR_ATTACH_FAILED,
+                 f"cannot write {path}: a leftover scratch file is in the way "
+                 f"({temp}) — remove it and try again")
+        except OSError as e:
+            fail(ERR_ATTACH_FAILED, f"cannot write {path}: {e}")
+        try:
+            with os.fdopen(handle, "w") as out:
                 json.dump(sorted(records.values(),
                                  key=lambda r: str(r.get("profile"))),
-                          handle, indent=1)
+                          out, indent=1)
             os.replace(temp, path)
         except OSError as e:
+            with contextlib.suppress(OSError):
+                os.remove(temp)
             fail(ERR_ATTACH_FAILED, f"cannot write {path}: {e}")
 
 

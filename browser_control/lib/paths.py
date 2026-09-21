@@ -13,10 +13,11 @@ DEFAULT_ROOT = "~/.local/share/browser-control/cdp-profiles"
 ROOT_ENV = "BROWSER_CONTROL_ROOT"
 PID_FILE = ".pid"
 LOCK_FILE = ".browser-control.lock"
+LOCK_DIR = ".locks"
 
-__all__ = ["DEFAULT_ROOT", "LOCK_FILE", "PID_FILE", "ROOT_ENV", "expand",
-           "is_managed", "lock_path", "norm", "pid_file", "profile_dir",
-           "root"]
+__all__ = ["DEFAULT_ROOT", "LOCK_DIR", "LOCK_FILE", "PID_FILE", "ROOT_ENV",
+           "expand", "is_managed", "lock_path", "norm", "pid_file",
+           "profile_dir", "root"]
 
 
 def expand(path: object) -> str:
@@ -25,8 +26,15 @@ def expand(path: object) -> str:
 
 
 def norm(path: object) -> str:
-    """One identity for a profile path: absolute, `~` expanded."""
-    return expand(path)
+    """One identity for a profile path: absolute, `~` expanded.
+
+    An empty path stays empty. `abspath("")` is the CWD, and a census row for
+    a browser started with no `--user-data-dir` carries an empty profile: with
+    the CWD identity that row matched `--profile $(pwd)` (a review measured the
+    mis-attribution, an attach record keyed to the working directory).
+    """
+    text = str(path or "").strip()
+    return expand(text) if text else ""
 
 
 def root() -> str:
@@ -45,8 +53,31 @@ def pid_file(profile: str) -> str:
 
 
 def lock_path(profile: str) -> str:
-    """The file the profile's `flock` lives in, inside its profile."""
-    return os.path.join(profile, LOCK_FILE)
+    """Where the `flock` for `profile` lives: `<root>/.locks/<name>.lock`.
+
+    OUTSIDE the profile, because `profile reset` wipes the profile directory
+    WHILE holding this lock: a lock file inside the tree was deleted mid-hold,
+    and the next `open` recreated the path as a new inode and took it at once —
+    a browser started into the directory being wiped (a review measured it).
+    A file the wipe cannot reach closes that hole; lock files are never
+    deleted (an unlinked lock lets a fresh inode be created and double-taken).
+
+    The name is the profile's path under the root with separators folded, so
+    two profiles that share a basename (`<root>/chrome` and `<root>/a/chrome`)
+    never share a lock. The root keeps its own lock as `_root`, so no profile
+    name can collide with it.
+    """
+    target = expand(profile)
+    base = root()
+    rel = os.path.relpath(target, base)
+    if rel == os.curdir:
+        name = "_root"
+    elif rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        # a caller-named path outside the root: key it by the whole path
+        name = target.strip(os.sep) or "_root"
+    else:
+        name = rel
+    return os.path.join(base, LOCK_DIR, name.replace(os.sep, "__") + ".lock")
 
 
 def is_managed(profile: str) -> bool:

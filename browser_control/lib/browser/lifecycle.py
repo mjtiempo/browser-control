@@ -128,14 +128,20 @@ def instance_dir(binary_path: str) -> str:
     return scoped
 
 def profiles() -> list[str]:
-    """Every managed profile directory, sorted."""
+    """Every managed profile directory, sorted.
+
+    Dot-directories are not profiles: this CLI's own bookkeeping lives in
+    `<root>/.locks/`, and a lock directory listed as a profile would be both
+    wrong and a directory the census then tries to read.
+    """
     base = root()
     try:
         names = sorted(os.listdir(base))
     except OSError:
         return []
     return [os.path.join(base, name) for name in names
-            if os.path.isdir(os.path.join(base, name))]
+            if not name.startswith(".")
+            and os.path.isdir(os.path.join(base, name))]
 
 def ensure_up(profile: str) -> None:
     """Refuse now when the verb needs a browser and none is drivable."""
@@ -371,7 +377,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     path = binary(browser)
     profile = instance_dir(path)
     try:
-        os.makedirs(profile, exist_ok=True)
+        os.makedirs(profile, mode=0o700, exist_ok=True)
     except OSError as e:
         raise ControlError(ERR_PROFILE_UNUSABLE,
                            f"cannot create {profile}: {e}") from e

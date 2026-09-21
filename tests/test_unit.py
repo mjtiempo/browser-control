@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import stat
@@ -45,7 +46,9 @@ from browser_control.lib import policy as policy_lib
 from browser_control.lib import (
     profile as profile_lib,
 )
+from browser_control.lib import paths as paths_lib  # noqa: E402
 from browser_control.lib import scope as scope_lib
+from browser_control.lib.browser import readback as readback_lib  # noqa: E402
 from browser_control.lib.cdp import rpc as cdp_rpc  # noqa: E402
 from browser_control.lib.errors import ControlError  # noqa: E402
 
@@ -1673,6 +1676,85 @@ def t_lock_serializes_a_check_then_act() -> None:
             assert broken.held is False and broken.warning, broken
 
 
+def t_lock_lives_outside_the_wiped_profile() -> None:
+    """`profile reset` wipes the profile WHILE holding its lock, so the lock
+    cannot live inside the tree it deletes.
+
+    An in-profile lock file was deleted by the `rmtree` mid-hold, and the next
+    `open` re-created the path as a NEW inode and took it at once — two
+    processes on one profile (a review measured it). The lock is a sibling of
+    the profiles here, so the wipe cannot unlink what another caller is
+    waiting on: still the same file, still contended, after the delete.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        profile = os.path.join(root, "chrome")
+        os.makedirs(profile)
+        Path(profile, "Cookies").write_text("login", encoding="utf-8")
+        lock_file = paths_lib.lock_path(profile)
+        assert not lock_file.startswith(profile + os.sep), lock_file
+        assert os.path.dirname(lock_file) == os.path.join(root, ".locks"), \
+            lock_file
+        # a profile is not the root: the root's own lock stays a distinct file,
+        # so no profile name can collide with it
+        assert paths_lib.lock_path(root) != lock_file, paths_lib.lock_path(root)
+        with browser._lock(lock_file, "open", wait=0.0) as held:  # noqa: SLF001
+            assert held.held, held
+            shutil.rmtree(profile)                  # what `profile reset` does
+            assert os.path.exists(lock_file), lock_file
+            try:
+                with browser._lock(lock_file, "tab", wait=0.3):  # noqa: SLF001
+                    raise AssertionError("the lock was taken after the wipe")
+            except ControlError as e:
+                assert e.code == "profile-busy", e
+    finally:
+        _restore_root(keep_root)
+
+
+def t_empty_profile_is_not_the_cwd() -> None:
+    """A census row for a browser with no `--user-data-dir` carries "", and
+    an empty profile must not normalise to the CWD.
+
+    `abspath("")` is the working directory, so such a row matched an
+    `--profile $(pwd)` selector and keyed a tab-write authorization to
+    whatever directory the caller ran in (a review measured it).
+    """
+    assert paths_lib.norm("") == ""
+    assert paths_lib.norm(None) == ""
+    assert paths_lib.norm("   ") == ""
+    assert paths_lib.norm("relative/dir") == os.path.join(os.getcwd(),
+                                                           "relative/dir")
+    assert paths_lib.norm("~/p") == os.path.join(os.path.expanduser("~"), "p")
+
+
+def t_opened_tab_match_stops_at_a_path_boundary() -> None:
+    """The "opened" read-back names a tab by URL, and a bare prefix named the
+    wrong one: a restored `example.com/page2` answered for the requested
+    `example.com/page` (a review measured the mis-attribution).
+
+    The tolerance that has to survive is the browser's own trailing slash, and
+    a `?query` the page appended.
+    """
+    rows = [{"id": "A", "url": "https://example.com/page2"}]
+    real = browser._rows
+    browser._rows = lambda _profile: rows            # type: ignore[assignment]
+    try:
+        assert readback_lib._wait_url("unused", "https://example.com/page",
+                                      timeout=0.2) is None      # noqa: SLF001
+        rows[:] = [{"id": "B", "url": "https://example.com/page/"}]
+        got = readback_lib._wait_url("unused", "https://example.com/page",
+                                     timeout=0.2)                # noqa: SLF001
+        assert got and got["id"] == "B", got
+        rows[:] = [{"id": "C", "url": "https://example.com/page?a=1"}]
+        got = readback_lib._wait_url("unused", "https://example.com/page",
+                                     timeout=0.2)                # noqa: SLF001
+        assert got and got["id"] == "C", got
+    finally:
+        browser._rows = real                         # type: ignore[assignment]
+
+
 def t_policy_gate() -> None:
     """The gate: fail closed, name the rule, and never block its own answer.
 
@@ -3127,6 +3209,11 @@ def main() -> int:
          t_a_working_log_makes_no_scratch_dirs),
         ("the port is checked against the kernel", t_endpoint_ownership),
         ("the lock serializes a check-then-act", t_lock_serializes_a_check_then_act),
+        ("the lock survives the profile wipe",
+         t_lock_lives_outside_the_wiped_profile),
+        ("an empty profile is not the cwd", t_empty_profile_is_not_the_cwd),
+        ("the opened-tab match stops at a path boundary",
+         t_opened_tab_match_stops_at_a_path_boundary),
         ("the policy gate fails closed", t_policy_gate),
         ("gate and argv hardening", t_gate_and_argv_hardening),
         ("transport against a fake peer", t_transport_against_a_fake_peer),

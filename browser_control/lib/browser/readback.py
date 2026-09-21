@@ -81,13 +81,16 @@ def _wait_url(profile: str, url: str,
 
     Matched by the requested URL, tolerant of the trailing slash the browser
     adds: a startup page has no id we were told, so the URL is what names it.
+    The match stops at a path boundary — a bare prefix let a restored tab at
+    `example.com/page2` answer for `example.com/page` (a review measured the
+    mis-attribution).
     """
     want = url.rstrip("/")
 
     def probe() -> dict | None:
         for row in _pkg._rows(profile):
             got = str(row["url"]).rstrip("/")
-            if got == want or got.startswith(want):
+            if got == want or got.startswith((want + "/", want + "?")):
                 return row
         return None
 

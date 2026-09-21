@@ -130,7 +130,7 @@ def copy_verified(source: str, target: str, dry: bool, *,
     while stack:
         here, there = stack.pop()
         try:
-            os.makedirs(there, exist_ok=True)
+            os.makedirs(there, mode=0o700, exist_ok=True)
         except OSError as e:
             fail(ERR_SEED_FAILED, f"cannot create {there}: {e}")
         try:

@@ -648,9 +648,17 @@ to trust. Held across the WHOLE decision:
 
 | verb | lock | held across |
 | --- | --- | --- |
-| `open` | `<profile>/.browser-control.lock` | read the port → check the endpoint → spawn → wait for it → record the pid |
+| `open` | `<root>/.locks/<profile>.lock` | read the port → check the endpoint → spawn → wait for it → record the pid |
 | `close` | same | the pid decision, `SIGTERM`, and the death + endpoint waits |
-| `attach` / `detach` | `<root>/.browser-control.lock` | the read-modify-write of `attached.json` |
+| `attach` / `detach` | `<root>/.locks/_root.lock` | the read-modify-write of `attached.json` |
+
+Lock files live BESIDE the profiles, not inside them (`paths.lock_path`). The
+in-profile lock was deleted by `profile reset`'s `rmtree` while `reset` was
+HOLDING it, and the next `open` re-created the path as a fresh inode and took
+it at once — the mutual exclusion the table above describes was believed, not
+held, for the one verb that wipes a profile. A lock a wipe cannot reach closes
+that; a lock file is never deleted (an unlinked lock can be re-created and
+double-taken).
 
 A caller that cannot take it waits (up to 20 s, a cold launch's budget), then
 refuses `profile-busy` naming the pid, verb and start time the holder wrote

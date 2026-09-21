@@ -15,7 +15,6 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
-from pathlib import Path
 
 from browser_control.lib.errors import (  # pyright: ignore[reportMissingImports]
     ERR_LAUNCH_FAILED,
@@ -199,9 +198,28 @@ def pid_of(profile: str) -> int:
 
 def record_pid(profile: str, pid: int) -> None:
     """Write the pid this profile's browser runs as. A missing file degrades
-    `close`; it does not break `open`."""
+    `close`; it does not break `open`.
+
+    Written to a scratch file and renamed, and never through a link: a
+    symlink planted at the pid path would have made `write_text` truncate
+    whatever it pointed at (CWE-377, the pattern the screenshot writer
+    already carries). Best effort throughout — a browser that started without
+    its pid recorded is still a browser.
+    """
+    path = pid_file(profile)
+    temp = f"{path}.bc-{os.getpid()}.part"
+    try:
+        handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return
     with contextlib.suppress(OSError):
-        Path(pid_file(profile)).write_text(str(pid), encoding="utf-8")
+        try:
+            with os.fdopen(handle, "w") as out:
+                out.write(str(pid))
+            os.replace(temp, path)
+        except OSError:
+            os.remove(temp)
 
 
 def spawn(argv: list[str]) -> int:

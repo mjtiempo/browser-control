@@ -639,7 +639,10 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
         # the PROFILE's lock is the one `open` holds across its whole
         # check-then-act: without it, a reset could `rmtree` the directory a
         # browser was just being started on, and the liveness verdict above was
-        # stale by construction (a review measured it)
+        # stale by construction (a review measured it). The lock FILE lives in
+        # `<root>/.locks/` (paths.lock_path), outside the tree wiped below —
+        # inside it, the rmtree deleted the very file this block holds, and the
+        # next `open` re-created the path as a fresh inode and took it at once.
         Instance(target).refuse_live("resetting")   # re-checked UNDER the lock
         # …and the CONTENT guard belongs under it too: checked outside, a
         # profile could gain its first file between the check and the wipe, and

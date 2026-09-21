@@ -57,9 +57,9 @@ async def _await_reply(ws: Any, rid: int, method: str, params: dict,
     TimeoutError propagate, which is what the polling sample wants.
     """
     await ws.send(json.dumps({"id": rid, "method": method, "params": params}))
-    deadline = time.time() + budget
+    deadline = time.monotonic() + budget
     while True:
-        wait = max(0.1, deadline - time.time())
+        wait = max(0.1, deadline - time.monotonic())
         if wait_hook is not None:
             wait = wait_hook(wait)
         try:
@@ -81,7 +81,7 @@ async def _await_reply(ws: Any, rid: int, method: str, params: dict,
             return msg.get("result") or {}
         if on_frame is not None:
             on_frame(msg)
-        if time.time() >= deadline:
+        if time.monotonic() >= deadline:
             if on_deadline is not None:
                 on_deadline()
             raise TimeoutError(f"no reply for id {rid} within {budget:g}s")
