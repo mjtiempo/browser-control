@@ -135,12 +135,14 @@ packages — `lib/cdp/`, `lib/browser/`, `lib/dom/` (which absorbed `input.py`,
 
 ### Cross-cutting
 
-`errors.py` (`ControlError`), `util.py`, `audit.py` (JSONL, per-action
+`errors.py` (`ControlError`), `audit.py` (JSONL, per-action
 redaction, fail-open), `capabilities.py` (the declared surface + the policy
 gate), `profile.py` (seed/reset), `__init__.py` exposing `BrowserService`.
-(`config.py` was never built: the environment variables and the flags were
-enough, and a config file nobody asked for would have been one more thing to
-get wrong — this row says so instead of promising it.)
+(`config.py` and `util.py` were never built: the environment variables and the
+flags were enough, and a config file nobody asked for would have been one more
+thing to get wrong; the helpers `util.py` would have held live where they are
+used instead — `coerce.py`, `text.py`, `cli/argv.py`. This row says so instead
+of promising them.)
 
 ## 3. `cli/` verbs (v1)
 
@@ -310,13 +312,13 @@ unclear oracle into a claim of absence.**
 | `tab info` | read | the spec resolves to exactly one tab | L2 | `no-page-tab`, `tab-ambiguous` |
 | `tab find` | read | rect + visibility + a real hit-test | L2 | `no-match`, `no-viewport` |
 | `tab text` | read | the page's rendered text, truncated IN the page | L2 | `no-match` |
-| `tab js` | read/write | none (returns the value) | L0 | `js-error`, `eval-timeout`, `result-too-large` |
+| `tab js` | read/write | none (returns the page's OWN value — a string that parses as JSON stays that string) | L0 | `js-error`, `eval-timeout`, `result-too-large` |
 | `tab wait --for …` | read | the predicate itself, polled | L3 | `wait-timeout` |
 | `tab nav` · `tab back`/`forward` | mutation | `Page.navigate` (browser-side, so a PARKED renderer still navigates), then the MOVE (a new document or a changed address), then `readyState` + not an error page | L3 | `nav-failed` (an error page, a refused navigation, or a download), `nav-not-verified` |
 | `tab reload` | mutation | `performance.timeOrigin` changed: a NEW document | L3 | `reload-not-verified` |
 | `tab [URL…]` | mutation | the tab row exists, the id re-read from the list | L3 | `no-page-tab` (never orphan the tab) |
 | `profile info` | read | each managed profile's own numbers from a walk of it | L2 | `not-managed` (outside the root) |
-| `profile seed --from DIR` | mutation (+ `file`) | every source file the skips allow, re-found in the target by size | L3 | `bad-args` (no `--from`, or the same tree), `profile-live`, `profile-exists` (without `--force`), `seed-not-verified`, `seed-failed` |
+| `profile seed --from DIR` | mutation (+ `file`) | every source file the skips allow, re-found in the target by size; with `--force` the target is WIPED first (reset's wipe) and that wipe is verified gone before anything lands | L3 | `bad-args` (no `--from`, or the same tree), `profile-live`, `profile-exists` (without `--force`), `seed-not-verified`, `seed-failed`, `reset-failed` / `reset-not-verified` (the `--force` wipe) |
 | `profile reset` | mutation | the path is GONE afterwards | L2 | `profile-live`, `profile-exists` (without `--force`), `not-managed`, `reset-not-verified` |
 | `tab close SPEC… / --like / --title / --url / --all / --except / --dry` | mutation | every requested id ABSENT from the re-read list, over the UNION of the matches, all resolved before anything closes | L3 | `no-page-tab` (naming the value and suggesting `--like`, or the exception that kept nothing), `not-managed` (every match foreign), `close-tab-not-verified` (report survivors); foreign matches are REPORTED in `skipped`, never closed silently. A SPEC names a tab exactly (`id:` with no prefix refuses); `--like` is the declared sweep; `--dry` resolves and returns `would_close` without closing anything. Closing the LAST tab stops the browser with its last window |
 | `tab activate` | mutation | the page's own `document.visibilityState` before and after `Page.bringToFront` | L2 | `activate-not-verified` (the window may be hidden entirely) |

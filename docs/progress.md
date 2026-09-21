@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **the CLI surface is delivered, packaged, and covered by a committed
-battery.** `python3 tests/test_unit.py` → 68 passed, 0 failed; the live battery
+battery.** `python3 tests/test_unit.py` → 73 passed, 0 failed; the live battery
 (`tests/live_test.py`) runs against a real browser — run it before a release,
 and remember skip ≠ pass.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
@@ -55,7 +55,7 @@ the other verbs own the browser.
 | `tab nav URL [--tab SPEC]` | navigates one tab | the address **as observed** (`url_read`) + `moved` + `loaded`; `chrome-error://` → `nav-failed`; a tab that never left a page it was not on → `nav-not-verified`; a redirect is a success |
 | `tab back` / `tab forward` | moves the tab's history | the address actually changed (`nav-not-verified` when it did not) |
 | `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
-| `tab js EXPR` | evaluates an expression — the escape hatch, and it can write | **unverified** (`verified: false`), the value capped at 64 k (`result-too-large`), a page exception is `js-error`, a page that stops answering `eval-timeout` |
+| `tab js EXPR` | evaluates an expression — the escape hatch, and it can write; the reply is the page's OWN value, so a string that parses as JSON stays that string | **unverified** (`verified: false`), the value capped at 64 k (`result-too-large`), a page exception is `js-error`, a page that stops answering `eval-timeout` |
 | `tab wait --for load\|idle\|element\|js` | polls ONE predicate to a wall-clock deadline | `{ok, for, waited_s, samples}` or `wait-timeout` naming what and how long; one connection for the whole poll |
 | `tab find TEXT \| --selector CSS` | a human target → visible elements, in **page** coordinates | `no-match` (naming the candidate count) · `no-viewport` when the tab has no viewport · each match carries `point` and `viewport` (viewport coordinates), `in_viewport`, `hit` (a real hit-test), `hit_element`, `clipped` |
 | `tab text [--selector CSS]` | the rendered text | truncated **in the page**, so the reply is bounded and `length` still reports the full size |
@@ -78,7 +78,7 @@ the other verbs own the browser.
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 | `profile info [--profile DIR]` | the managed profiles: weight, age, whether a browser is on one, whether it is attached | one filesystem read |
 | `profile logins [--site HOST] [--cap N]` | the hosts a profile's cookie store names (with expiry) and how many saved logins — **counts and names only, never values** | the profile's own `Cookies`/`Login Data` read from a COPY; a store that cannot be read is `readable: false` with the reason, its rows unknown, not zero |
-| `profile seed --from DIR [--force] [--dry]` | copies a source profile's logins into a managed one (no caches, no lock files); `--dry` counts first | what landed is read back from the login stores, not from file sizes |
+| `profile seed --from DIR [--force] [--dry]` | copies a source profile's logins into a managed one (no caches, no lock files); an existing target refuses unless `--force`, and `--force` WIPES it first — what is left is the source, never a mix of two; `--dry` counts both | what landed is read back from the login stores, not from file sizes; the `--force` wipe is verified gone before the copy runs |
 | `profile reset [--force]` | wipes a managed profile, logins included | the profile is emptied and recreated; `reset-not-verified`/`reset-failed` name a wipe that did not land |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
@@ -99,7 +99,7 @@ and a live managed browser wins. Two live managed browsers refuse
 
 ## 2. Evidence
 
-**Hermetic** — `python3 tests/test_unit.py` → **68 passed, 0 failed**: URL
+**Hermetic** — `python3 tests/test_unit.py` → **73 passed, 0 failed**: URL
 policy, tab-spec resolution (incl. `tab-ambiguous`), launch flags, profile
 keyed by the resolved binary, port-file edge cases, `/json` reading against a
 fake endpoint, CLI dispatch and grammar, the capability surface, audit
@@ -138,7 +138,8 @@ an ambiguous spec (refused with **nothing** closed), a two-spec close in one
 call, `tab nav` (a redirect, a dead endpoint, `--tab` naming the one tab),
 `tab back`/`tab forward`, `tab reload`, `tab text` (with a 20-char cap),
 `tab find` (a hidden twin skipped, a shadow-root button found, the iframe's
-button not), `tab js` (value, decoded JSON, `js-error`, `result-too-large`),
+button not), `tab js` (a value, an object, a JSON-looking string kept a
+string, `js-error`, `result-too-large`),
 `tab wait` (a button that appears after 2 s, then a timeout), `tab click`
 (a trusted press, an occluded target, an off-screen target), `tab scroll`
 (a document wheel, a nested-scroller wheel, both edges), `tab focus`/`insert`/
@@ -151,8 +152,11 @@ idempotent close, a browser with no debugging port (listed, never driven), a
 detached, with `close` still refusing to stop it) and "nothing left
 running". With the command missing every check skips and it exits 2.
 
-**Not proven yet**: no CI — both suites are run by hand. The earlier
-"no lock" and "one browser at a time" gaps are closed (§5.18, §5.20).
+**Not proven yet**: the live battery still runs by hand — it needs a real
+browser, so CI keeps it out by design (§5.28: `.github/workflows/ci.yml` runs
+ruff, pyright and the hermetic suite on every push, with the project installed
+first). The earlier "no lock" and "one browser at a time" gaps are closed
+(§5.18, §5.20).
 
 ## 3. Deviations from the plan
 
@@ -222,7 +226,7 @@ off.)
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1–5.7 and 5.10 through 5.27
+Ordered by "unblocks the most with the least". **5.1–5.7 and 5.10 through 5.29
 have landed** (§1, §2); **5.8 (search) and the ad functions are deferred by
 decision**, and **5.11 was built, measured and rejected**. Nothing is left in
 the core: 5.10's hardening items landed in §5.16–§5.18. Every later verb adds
@@ -1241,7 +1245,7 @@ that can, and that is the plugin tier's business (5.9).
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser (71 checks)
+python3 tests/test_unit.py            # hermetic, no browser (73 checks)
 python3 tests/live_test.py            # the battery, needs a browser (60 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com

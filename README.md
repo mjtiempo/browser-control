@@ -117,7 +117,9 @@ Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
   process holding the listening socket is verified first, and anything else
   refuses `cdp-not-local` with nothing sent to it.
 - **`tab js` and `tab wait --for js` run code you supply** — the declared escape
-  hatch, and a write.
+  hatch, and a write. The reply is the page's OWN value: a string that parses
+  as JSON is still that string (this CLI's own probes decode, because they
+  stringify on purpose; the escape hatch does not).
 - **`tab screenshot` writes a file you name; `tab upload` reads one.**
 - Everything is serialized: one profile lock for `open`/`close`, one for the
   attach records, so two calls cannot race a profile (`profile-busy` names the
@@ -152,6 +154,11 @@ password. `--site HOST` narrows by host suffix — so `x.com` answers `.x.com`
 and `www.x.com`, and `notx.com` is neither — and `--cap N` bounds the hosts
 listed. `profile seed` reports the same facts for what it just copied, so
 "what landed" is answered by the login stores rather than by file sizes alone.
+
+An existing target refuses `profile-exists` unless `--force`, and `--force`
+**wipes it first**: what is left is the source's content, never a mix of two
+profiles. A `--dry` run reports both what would land and what `--force` would
+destroy, and writes nothing.
 
 It is evidence, not a verdict: a session-only cookie has no expiry on disk, a
 cookie can be revoked server-side, and `snapshot: true` says a browser is
