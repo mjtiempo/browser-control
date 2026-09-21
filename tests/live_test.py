@@ -25,6 +25,7 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1970,6 +1971,49 @@ def c_profile_verbs() -> str:
     return "seen live, seeded (2 files, lock and cache skipped), wiped"
 
 
+def c_profile_logins() -> str:
+    """`profile logins`: the live flag, and a real SQLite store read back.
+
+    Two facts only a live run has: a browser this battery started makes the
+    verb answer `snapshot: true` with THAT pid and port, and a seeded store
+    that really is a SQLite database answers with its rows through the
+    installed command — not through the library in-process.
+    """
+    listed = ok_json("profile", "info")
+    ours = next((row for row in listed["profiles"]
+                 if row.get("live", {}).get("pid") == STATE["pid"]), None)
+    assert ours is not None, listed
+    live = ok_json("profile", "logins", "--profile", str(ours["path"]))
+    assert live["exists"] is True and live["snapshot"] is True, live
+    assert live["live"]["pid"] == STATE["pid"], live
+    assert live["live"]["port"] == int(STATE["port"]), live
+
+    source = fixture_profile()
+    target = os.path.join(ROOT, "instance-logins")
+    try:
+        conn = sqlite3.connect(os.path.join(source, "Cookies"))
+        conn.execute("create table cookies (host_key text, name text, expires_utc integer)")
+        conn.execute("insert into cookies values ('.x.com', 'auth_token', ?)",
+                     (int((time.time() + 86400 + 11_644_473_600) * 1_000_000),))
+        conn.commit()
+        conn.close()
+        seeded = ok_json("profile", "seed", "--from", source,
+                         "--profile", target)
+        assert seeded["logins"]["stores"]["cookies"]["rows"] == 1, seeded
+        assert seeded["logins"]["sites"][0]["host"] == ".x.com", seeded
+        reply = ok_json("profile", "logins", "--profile", target,
+                        "--site", "x.com")
+        assert reply["snapshot"] is False, reply
+        assert reply["stores"]["cookies"]["readable"] is True, reply
+        assert reply["sites"][0]["cookies"] == ["auth_token"], reply
+        assert reply["sites"][0]["expired"] is False, reply
+        assert reply["sites"][0]["expires"], reply
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
+        shutil.rmtree(target, ignore_errors=True)
+    return "live pid named; a real SQLite store read back"
+
+
 def c_list_shows_a_browser_outside_cdp() -> str:
     """A browser with no debugging port is LISTED, and never driven.
 
@@ -2207,6 +2251,7 @@ CHECKS = (
      c_list_reports_the_listener),
     ("a port a stranger holds is refused", c_cdp_not_local),
     ("profile info/seed/reset", c_profile_verbs),
+    ("profile logins reads a live profile", c_profile_logins),
     ("the policy gate blocks 'not-allowed'", c_policy_gate),
     ("frames are seen, named and driven", c_frames),
     ("close ignores a recycled pid", c_close_ignores_a_recycled_pid),

@@ -31,6 +31,7 @@ from browser_control.cli.verbs.browser import (  # pyright: ignore[reportMissing
 )
 from browser_control.cli.verbs.profile import (  # pyright: ignore[reportMissingImports]
     cmd_profile_info,
+    cmd_profile_logins,
     cmd_profile_reset,
     cmd_profile_seed,
 )
@@ -94,6 +95,11 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   profile info [--profile DIR]
                      the profiles this CLI manages: weight, age, whether a
                      browser is on one, whether it is attached
+  profile logins [--profile DIR] [--site HOST] [--cap N]
+                     what logins are IN a managed profile: the hosts its
+                     Cookies store names (with expiry) and how many saved
+                     logins — read from a COPY of the profile's own stores;
+                     evidence, not a session check
   profile seed --from DIR [--force] [--dry]
                      copy a source profile's LOGINS into a managed one (no
                      caches, no lock files, read back; --dry counts first);
@@ -221,7 +227,7 @@ def cmd_profile(rest: list[str], browser: str) -> dict:
     handler = PROFILE_SUBCOMMANDS.get(str(rest[0]) if rest else "")
     if handler is None:
         fail(ERR_BAD_ARGS,
-             "profile: a subcommand is required (info, seed, reset)")
+             "profile: a subcommand is required (info, logins, seed, reset)")
     return handler(rest[1:], browser)
 TAB_SUBCOMMANDS: dict[str, Handler] = {
     "list": cmd_tab_list,
@@ -254,6 +260,7 @@ TAB_SUBCOMMANDS: dict[str, Handler] = {
 }
 PROFILE_SUBCOMMANDS: dict[str, Handler] = {
     "info": cmd_profile_info,
+    "logins": cmd_profile_logins,
     "seed": cmd_profile_seed,
     "reset": cmd_profile_reset,
 }

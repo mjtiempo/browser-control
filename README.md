@@ -70,7 +70,7 @@ by the binary's name.
 ## Verbs
 
 Browser level — `open`, `close`, `list`, `info`, `attach`, `detach`,
-`profile info|seed|reset`, `selftest`.
+`profile info|logins|seed|reset`, `selftest`.
 
 Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
 `reload`, `activate`, `frames`, `find`, `text`, `extract`, `js`, `wait`,
@@ -125,6 +125,40 @@ Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
 - The **action log** is JSONL (`BROWSER_CONTROL_LOG`, default
   `~/.local/state/browser-control/actions.jsonl`, `off` to disable). A password
   a verb *proves* it touched is written as a length, never as text.
+
+## Is this profile seeded?
+
+`profile seed` copies logins in; `profile logins` says what is actually there —
+without opening a browser, and without reading a single value:
+
+```console
+$ browser-control-cli profile logins --site x.com
+{"ok": true, "profile": "…/google-chrome-stable", "exists": true,
+ "profile_dirs": ["…/Default"],
+ "stores": {"cookies": {"present": true, "readable": true, "rows": 12,
+                        "hosts": 2, "error": ""},
+            "passwords": {"present": true, "readable": true, "rows": 0,
+                          "origins": 0, "error": ""}},
+ "sites": [{"host": ".x.com", "count": 10,
+            "cookies": ["auth_token", "ct0", "twid", …],
+            "expires": "2027-10-25T22:42:05", "expired": false, "more": 0}],
+ "site": "x.com", "snapshot": false, …}
+```
+
+Every store is read from a **copy** of the profile's own `Cookies` / `Login
+Data` file (Chrome holds the real one open), and only hosts, cookie NAMES,
+expiry and COUNTS are reported: never a cookie value, never a username, never a
+password. `--site HOST` narrows by host suffix — so `x.com` answers `.x.com`
+and `www.x.com`, and `notx.com` is neither — and `--cap N` bounds the hosts
+listed. `profile seed` reports the same facts for what it just copied, so
+"what landed" is answered by the login stores rather than by file sizes alone.
+
+It is evidence, not a verdict: a session-only cookie has no expiry on disk, a
+cookie can be revoked server-side, and `snapshot: true` says a browser is
+running on the profile, so what is on disk may lag it. A store that cannot be
+read (a `Cookies` that is not a database, a schema this CLI does not know) is
+reported as `readable: false` with the reason in `stores.<name>.error` — its
+rows are unknown, not zero.
 
 ## Extraction — records, no code
 

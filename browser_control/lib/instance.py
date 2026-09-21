@@ -32,8 +32,8 @@ __all__ = ["Instance"]
 
 def _outside(path: str, verb: str) -> str:
     """The refusal for a path outside this CLI's root, per verb."""
-    if verb == "info":
-        return (f"{path} is not under {root()} — `profile info` reports "
+    if verb in ("info", "logins"):
+        return (f"{path} is not under {root()} — `profile {verb}` reports "
                 "the profiles this CLI manages; name one under the root")
     return (f"{path} is not under {root()} — this CLI only manages the "
             "profiles in its own root (BROWSER_CONTROL_ROOT); it will not "

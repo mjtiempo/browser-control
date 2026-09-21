@@ -82,6 +82,7 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "tab js": ("code", "write"),
     # profiles
     "profile info": ("read",),
+    "profile logins": ("read",),
     "profile seed": ("write", "file"),
     "profile reset": ("write",),
 }

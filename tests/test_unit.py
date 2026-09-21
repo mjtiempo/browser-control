@@ -17,6 +17,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -1619,6 +1620,7 @@ def t_capability_surface() -> None:
     assert capabilities.ACTIONS["tab screenshot"] == ("read", "file")
     assert capabilities.ACTIONS["tab upload"] == ("write", "file")
     assert capabilities.ACTIONS["profile info"] == ("read",)
+    assert capabilities.ACTIONS["profile logins"] == ("read",)
     assert capabilities.ACTIONS["profile seed"] == ("write", "file")
     assert capabilities.ACTIONS["profile reset"] == ("write",)
     assert capabilities.ACTIONS["tab dialog state"] == ("read",)
@@ -2534,6 +2536,150 @@ def t_seed_lands_where_chrome_reads() -> None:
         _restore_root(keep_root)
 
 
+def _chrome_cookies(path: str, rows: list[tuple]) -> None:
+    """A Cookies store with Chrome's own column names, for the hermetic check."""
+    conn = sqlite3.connect(path)
+    conn.execute("""create table cookies (
+        host_key text, name text, value text, path text,
+        expires_utc integer, is_secure integer, is_httponly integer,
+        is_persistent integer)""")
+    conn.executemany("insert into cookies values (?, ?, ?, '/', ?, 0, 0, 1)",
+                     rows)
+    conn.commit()
+    conn.close()
+
+
+def _chrome_logins(path: str, origins: list[str]) -> None:
+    """A Login Data store; its username/password are what must NOT escape."""
+    conn = sqlite3.connect(path)
+    conn.execute("""create table logins (
+        origin_url text, username_value text, password_value blob)""")
+    conn.executemany("insert into logins values (?, ?, ?)",
+                     [(origin, "someone@example.com", b"SECRET-PASSWORD")
+                      for origin in origins])
+    conn.commit()
+    conn.close()
+
+
+def t_profile_logins() -> None:
+    """The login stores answer "is it seeded" — read from a COPY, values never.
+
+    What is checked: the stores are FOUND under the profile dir Chrome reads (a
+    root-level leftover is not counted on top of it), a host match is a SUFFIX
+    (notx.com is not x.com), an expired host and a session cookie read
+    differently, the cap truncates, a store that is not a database is an
+    ANSWER rather than a failure (`seed` reads the same stores back), and no
+    cookie value, username or password ever reaches the reply.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        target = os.path.join(root, "inst")
+        profile_dir = os.path.join(target, "Default")
+        os.makedirs(profile_dir)
+        future = int((time.time() + 86400 + 11_644_473_600) * 1_000_000)
+        past = int((time.time() - 86400 + 11_644_473_600) * 1_000_000)
+        _chrome_cookies(os.path.join(profile_dir, "Cookies"), [
+            (".x.com", "auth_token", "SECRET-COOKIE-1", future),
+            (".x.com", "twid", "SECRET-COOKIE-2", future),
+            ("www.x.com", "guest_id", "SECRET-COOKIE-3", future),
+            (".notx.com", "sid", "SECRET-COOKIE-4", future),
+            (".stale.example", "old", "SECRET-COOKIE-5", past),
+            (".session.example", "live", "SECRET-COOKIE-6", 0),
+        ])
+        _chrome_logins(os.path.join(profile_dir, "Login Data"),
+                       ["https://x.com/", "https://example.com/login"])
+        # a ROOT-level store Chrome never reads (what the old seed wrote): it
+        # must not be counted on top of the real profile's
+        _chrome_cookies(os.path.join(target, "Cookies"), [
+            (".x.com", "auth_token", "SECRET-STALE", future)])
+
+        reply = profile_lib.logins(profile=target)
+        assert reply["ok"] and reply["exists"] is True, reply
+        assert reply["profile_dirs"] == [profile_dir], reply["profile_dirs"]
+        assert reply["stores"]["cookies"]["rows"] == 6, reply
+        assert reply["stores"]["cookies"]["readable"] is True, reply
+        assert reply["stores"]["cookies"]["hosts"] == 5, reply
+        assert reply["stores"]["passwords"]["rows"] == 2, reply
+        assert reply["stores"]["passwords"]["origins"] == 2, reply
+        assert reply["snapshot"] is False, reply
+        hosts = {row["host"]: row for row in reply["sites"]}
+        assert hosts[".x.com"]["cookies"] == ["auth_token", "twid"], hosts
+        assert hosts[".x.com"]["expired"] is False, hosts
+        assert hosts[".stale.example"]["expired"] is True, hosts
+        assert hosts[".session.example"]["expires"] == "", hosts
+        assert hosts[".session.example"]["expired"] is False, hosts
+
+        # --site is a HOST SUFFIX: x.com answers .x.com and www.x.com, and
+        # notx.com is neither; a URL is normalized to its host
+        narrow = profile_lib.logins(profile=target, site="https://x.com/")
+        assert narrow["site"] == "x.com", narrow
+        assert [row["host"] for row in narrow["sites"]] == [
+            ".x.com", "www.x.com"], narrow
+        assert narrow["stores"]["cookies"]["rows"] == 3, narrow
+        assert narrow["stores"]["passwords"]["rows"] == 1, narrow
+        assert profile_lib.logins(profile=target,
+                                  site="nothing.example")["sites"] == []
+
+        capped = profile_lib.logins(profile=target, cap=1)
+        assert capped["truncated"] is True, capped
+        assert capped["sites_total"] == 5 and len(capped["sites"]) == 1, capped
+
+        # a store that is not a database is REPORTED, never a failure
+        broken = os.path.join(root, "broken")
+        os.makedirs(os.path.join(broken, "Default"))
+        Path(broken, "Default", "Cookies").write_text("not a database")
+        reply = profile_lib.logins(profile=broken)
+        assert reply["stores"]["cookies"]["present"] is True, reply
+        assert reply["stores"]["cookies"]["readable"] is False, reply
+        assert reply["stores"]["cookies"]["error"], reply
+        assert reply["sites"] == [], reply
+
+        # a profile that is not there is an ANSWER, like `profile reset`
+        absent = profile_lib.logins(profile=os.path.join(root, "absent"))
+        assert absent["exists"] is False and absent["sites"] == [], absent
+
+        # nothing secret crosses the boundary: run the CLI and read the bytes
+        rc, out, err = run_cli(["profile", "logins", "--profile", target])
+        assert rc == 0 and err == "", (rc, err)
+        for secret in ("SECRET-COOKIE", "SECRET-STALE", "SECRET-PASSWORD",
+                       "someone@example.com"):
+            assert secret not in out, (secret, out)
+        assert "auth_token" in out, out
+        refusal(lambda: profile_lib.logins(profile=target, site="  "),
+                "bad-args")
+        refusal(lambda: profile_lib.logins(profile=target, cap=0), "bad-args")
+    finally:
+        _restore_root(keep_root)
+
+
+def t_seed_reads_logins_back() -> None:
+    """`profile seed` reports what LANDED, from the stores themselves."""
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        source = os.path.join(root, "source")
+        os.makedirs(source)
+        future = int((time.time() + 86400 + 11_644_473_600) * 1_000_000)
+        _chrome_cookies(os.path.join(source, "Cookies"), [
+            (".x.com", "auth_token", "v", future)])
+        reply = profile_lib.seed(source=source,
+                                 profile=os.path.join(root, "seeded"),
+                                 force=True)
+        assert reply["logins"]["stores"]["cookies"]["rows"] == 1, \
+            reply["logins"]
+        assert reply["logins"]["sites"][0]["host"] == ".x.com", \
+            reply["logins"]
+        # a dry run copies nothing, so there is nothing to read back
+        dry = profile_lib.seed(source=source,
+                               profile=os.path.join(root, "dry"), dry=True)
+        assert "logins" not in dry, dry
+    finally:
+        _restore_root(keep_root)
+
+
 def t_seed_dry_writes_nothing() -> None:
     """`--dry` promises "without writing anything" — it creates no target."""
     root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
@@ -3024,6 +3170,8 @@ def main() -> int:
          t_profile_symlink_target_is_refused),
         ("seed --dry writes nothing", t_seed_dry_writes_nothing),
         ("seed lands where Chrome reads", t_seed_lands_where_chrome_reads),
+        ("profile logins reads the stores, never a value", t_profile_logins),
+        ("seed reads its logins back", t_seed_reads_logins_back),
         ("reset counts skipped content",
          t_reset_guard_counts_skipped_content),
         ("screenshot rules and symlinks", t_screenshot_rules_and_symlinks),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from browser_control.cli.argv import (  # pyright: ignore[reportMissingImports]
+    _int,
     _none,
     _pop,
     _switch,
@@ -22,6 +23,20 @@ def cmd_profile_info(rest: list[str], browser: str) -> dict:
              "named with --profile DIR, and a scope that cannot apply is "
              "refused rather than dropped")
     return profile_lib.info()
+
+def cmd_profile_logins(rest: list[str], browser: str) -> dict:
+    """`profile logins [--profile DIR] [--site HOST] [--cap N]`."""
+    rest, site = _pop(rest, "--site", "profile logins")
+    rest, cap = _pop(rest, "--cap", "profile logins")
+    _none(rest, "profile logins")
+    if site is not None and not str(site).strip():
+        fail(ERR_BAD_ARGS,
+             "profile logins: --site needs a HOST — an empty value is not a "
+             "site; leave the flag out to report every host")
+    return profile_lib.logins(
+        browser=browser, site=site or "",
+        cap=(_int(cap, "profile logins --cap") if cap is not None
+             else profile_lib.DEFAULT_SITES))
 
 def cmd_profile_seed(rest: list[str], browser: str) -> dict:
     """`profile seed --from DIR [--force] [--dry]`."""
