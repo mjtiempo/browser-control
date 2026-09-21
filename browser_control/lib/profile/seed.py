@@ -3,18 +3,29 @@
 A filtered, verified copy between profiles of the same machine and user: the
 login stores and preferences, never the caches, never a lock file, never this
 CLI's own records (`trees.SEED_SKIP`), with the destination's lock held across
-the whole copy. What landed is read back twice — by file size, and by the
-login stores themselves (`stores._logins_facts`).
+the whole copy — and across the `--force` wipe that precedes it, because
+`--force` REPLACES the target rather than merging into it (the wipe is
+`reset`'s, so what is left is the source's content and never a mix of the
+two). What landed is read back twice — by file size, and by the login stores
+themselves (`stores._logins_facts`).
 """
 from __future__ import annotations
 
 import os
+import shutil
 
-from browser_control.lib import locks, seedtree
+from browser_control.lib import (
+    attachments as attachments_lib,
+    browser as browser_lib,
+    locks,
+    seedtree,
+)
 from browser_control.lib.browser import root
 from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     ERR_PROFILE_EXISTS,
+    ERR_RESET_FAILED,
+    ERR_RESET_NOT_VERIFIED,
     ERR_SEED_NOT_VERIFIED,
     fail,
 )
@@ -24,6 +35,7 @@ from browser_control.lib.instance import (
 from browser_control.lib.paths import (
     expand,
     lock_path,
+    pid_file,
 )
 from browser_control.lib.profile.stores import (
     _logins_facts,
@@ -31,6 +43,8 @@ from browser_control.lib.profile.stores import (
 from browser_control.lib.profile.trees import (
     _copy,
     _has_content,
+    _remove,
+    _tree,
 )
 
 #: how many hosts `profile seed` reads back from what it just copied
@@ -72,9 +86,13 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     `Default/` with it. A profile directory's contents are placed in the
     instance's `Default/`, the subdirectory Chrome reads (see
     `_seed_destination`). The TARGET is a managed profile (scoped, or the
-    default instance for `--browser`), it must not be running, and an
-    existing one must be overwritten on purpose (`--force`) — `--dry` first
-    reports what would land, in bytes and files, without writing anything.
+    default instance for `--browser`) and it must not be running. An existing
+    one must be overwritten on purpose (`--force`), and `--force` WIPES it
+    first: the copy alone writes only what the SOURCE holds, so files unique to
+    the target used to survive it and the profile became a mix of two (a review
+    flagged the promise the refusal makes). `--dry` first reports what would
+    land AND what `--force` would destroy, in bytes and files, without writing
+    anything.
     """
     if not source:
         fail(ERR_BAD_ARGS,
@@ -118,6 +136,32 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                  f"{target} already holds a profile — `profile seed --force` "
                  "overwrites it (logins and all), or `profile reset --force` "
                  "clears it first; `--dry` reports what this call would copy")
+        # `--force` OVERWRITES, which is what the refusal above promises: the
+        # copy alone writes only what the SOURCE holds, so files unique to the
+        # target survived it and the result was a MIX of the two profiles (a
+        # review flagged the promise). This is `reset`'s wipe, under the same
+        # lock and for the same reason — the profile the caller agreed to
+        # replace goes away before anything new lands — and what it destroys is
+        # counted FIRST, because the reply has to say what was LOST, not only
+        # what arrived.
+        wipe = _tree(target, count_skips=True) if existing and force else None
+        detached = False
+        if wipe is not None and not dry:
+            detached = browser_lib.is_attached(target)
+            if detached:
+                # the root lock is already held here (instance_locks): the
+                # store's unlocked drop is the one that must be used
+                attachments_lib.STORE.drop_unlocked(target)
+            try:
+                shutil.rmtree(target)
+            except OSError as e:
+                fail(ERR_RESET_FAILED,
+                     f"profile seed --force cannot remove {target}: {e}")
+            _remove(pid_file(target))
+            if os.path.exists(target):
+                fail(ERR_RESET_NOT_VERIFIED,
+                     f"{target} still exists after the wipe — something "
+                     "recreated it")
         facts = _copy(src, dest, dry)
         if dry:
             held = False
@@ -134,6 +178,7 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                 fail(ERR_SEED_NOT_VERIFIED,
                      f"{len(absent)} file(s) did not land in {dest}: "
                      + ", ".join(absent[:4]))
+    wiped = wipe if not dry else None    # the facts of a wipe that HAPPENED
     reply = {"ok": True, "from": src, "profile": target,
              "profile_dir": dest, "dry": bool(dry),
              "copied_bytes": facts["bytes"], "copied_files": facts["files"],
@@ -143,6 +188,13 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              "special_files": facts["special"],
              "links_planted": facts["links_planted"],
              "unreadable": facts["unreadable"],
+             # what `--force` DESTROYED, not only what arrived: the wipe runs
+             # under the same lock as the copy, so the two counts describe one
+             # consistent transition
+             "wiped": wiped is not None,
+             "wiped_files": wiped["files"] if wiped is not None else 0,
+             "wiped_bytes": wiped["bytes"] if wiped is not None else 0,
+             "detached": detached,
              "verified": bool(held),
              # WHAT the check could see, said out loud: the sizes of the files
              # this copy walked. A same-size corruption is outside that oracle,
@@ -151,6 +203,11 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              "note": ("same machine, same user: Chrome's cookie and password "
                       "keys live in the OS keyring, so the copy decrypts here "
                       "and only here")}
+    if dry and wipe is not None:
+        # a dry run writes nothing, so the wipe it would cause is reported
+        # under its own name — a dry reply must never claim a wipe that did
+        # not happen
+        reply["would_wipe"] = {"files": wipe["files"], "bytes": wipe["bytes"]}
     if not dry:
         # WHAT landed, read back from the login stores themselves: the size
         # check above proves the bytes moved, and this answers the question

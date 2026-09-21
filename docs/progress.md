@@ -1117,6 +1117,48 @@ Not done, deliberately: an upper bound on `websockets` (no matrix to justify
 one) and memoizing `machine.browsers()`'s per-invocation `/proc` census (a
 staleness trade for a cost no measurement has shown to matter).
 
+### 5.29 The report-only pair — `seed --force` overwrites, `tab js` returns the page's value — done
+
+Both were left report-only by §5.25's review, and both were a promise the code
+did not keep.
+
+* **`profile seed --force` now OVERWRITES.** The refusal had always promised
+  "overwrites it (logins and all)", but the copy wrote only what the SOURCE
+  held: a file unique to the target survived it, so seeding A then
+  `--force --from B` left a MIX of the two profiles. `--force` now runs
+  `reset`'s wipe under the lock the verb already holds — the attach record
+  dropped when one named the profile, `rmtree`, the pid file removed, and the
+  "still exists after the wipe" read-back — and only then copies, so what is
+  left is the source's content. The reply says what was destroyed, not only
+  what arrived (`wiped`, `wiped_files`, `wiped_bytes`, `detached`), and a
+  `--dry --force` run reports the wipe it WOULD cause under `would_wipe`
+  rather than claiming one it did not do. The copy engine's "never write
+  through a link that is already there" guard is now reachable only for a
+  link planted between the wipe and the copy, so it is pinned at the engine
+  in the hermetic suite; the verb-level check plants a link, and now asserts
+  the wipe destroyed it and the file it pointed at was never touched.
+* **`tab js` returns the page's OWN value.** `_value_of` ran `json.loads` on
+  every string answer, so a page string that merely PARSED as JSON was
+  reported as the value it looked like — `localStorage.getItem('k')` holding
+  "null" answered `null`, "true" answered `true` (a review measured it). The
+  decode is load-bearing for this CLI's own probes, which `JSON.stringify`
+  their findings on purpose, so it stays the DEFAULT and the escape hatch asks
+  for the new `raw=True` seam (`rpc._value_of` → `Session.evaluate` →
+  `cdp.evaluate`, with `dom/queries.js` the one caller that passes it;
+  `tab wait --for js` keeps the decode). Structure is not lost:
+  `returnByValue` serializes an object or array expression itself, so
+  `({a: 1})` answers an object while `JSON.stringify({a: 1})` answers its
+  string. The live check that asserted the old decode
+  (`tab js "JSON.stringify({a: 1, b: [2, 3]})"` == the object) encoded the bug;
+  it now asserts the object expression, the stringified one, and the "null"
+  string that started it.
+
+Evidence: 73 hermetic checks green (two new — `seed --force overwrites, never
+merges`, including the engine-level link guard, and `tab js keeps a
+JSON-looking string a string`), pyright 0, `ruff check .` 0, live battery
+60/0/0, the `tab js` check now reading "a value, an object, a JSON-looking
+string kept a string, js-error, result-too-large".
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs

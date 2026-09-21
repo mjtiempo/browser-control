@@ -101,11 +101,12 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                      evidence, not a session check
   profile seed --from DIR [--force] [--dry]
                      copy a source profile's LOGINS into a managed one (no
-                     caches, no lock files, read back; --dry counts first);
-                     DIR is one Chrome profile (.../Default, Profile 1) or a
-                     whole user-data directory — either lands where Chrome
-                     reads it (a profile directory under the instance's
-                     Default/)
+                     caches, no lock files, read back; --force WIPES the
+                     target first, so what is left is the source and never a
+                     mix of the two; --dry counts first); DIR is one Chrome
+                     profile (.../Default, Profile 1) or a whole user-data
+                     directory — either lands where Chrome reads it (a
+                     profile directory under the instance's Default/)
   profile reset [--force]
                      wipe a managed profile, logins included
   tab [URL...]       open one tab per URL (about:blank when none)
@@ -134,6 +135,8 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  write a PNG of the page; its own header
                                  vouches for the size, not the page's geometry
   tab js EXPR [--tab SPEC]       evaluate an expression (can write; unverified)
+                                 — the page's OWN value: a string that parses
+                                 as JSON is still that string
   tab find TEXT|--selector CSS [--cap N] [--tab SPEC]
                                  a visible element, in PAGE coordinates
   tab text [--selector CSS] [--chars N] [--tab SPEC]

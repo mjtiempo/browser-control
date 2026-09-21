@@ -156,7 +156,13 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
 
     This is the escape hatch, and it can WRITE (it is resolved like one, so it
     needs a browser this CLI manages or has attached). The reply says
-    `verified: false` rather than pretending the value means something.
+    `verified: false` rather than pretending the value means something, and
+    the value is the page's OWN (`raw=True`): a string that parses as JSON is
+    still that string, where this CLI's internal probes stringify on purpose
+    and keep the decode. Structure still arrives — `returnByValue` serializes
+    an object or array expression itself, so `({a: 1})` answers an object
+    while `JSON.stringify({a: 1})` answers its string (a review measured the
+    ambiguity: `localStorage.getItem('k')` holding "null" answered null).
     """
     expr = str(expression or "").strip()
     if not expr:
@@ -164,7 +170,7 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
     page = _pkg.Tab.open(tab, browser, for_write=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
-        value = session.evaluate(expr)
+        value = session.evaluate(expr, raw=True)
     return {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
             "verified": False, "note": "evaluated, not interpreted",
             "browser": browser_lib.brief(row)}

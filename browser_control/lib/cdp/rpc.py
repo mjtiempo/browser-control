@@ -87,12 +87,20 @@ async def _await_reply(ws: Any, rid: int, method: str, params: dict,
             raise TimeoutError(f"no reply for id {rid} within {budget:g}s")
 
 
-def _value_of(result: dict) -> Any:
+def _value_of(result: dict, raw: bool = False) -> Any:
     """The value one Runtime.evaluate reply carries, or a refusal.
 
     A page-level exception is `js-error`: the page ANSWERED, and its answer
     was a failure — a different fact from a transport failure. A result past
     `EVAL_RESULT_CAP` refuses rather than handing back half a value.
+
+    `raw=True` returns a string answer as THAT string, without the JSON
+    decode below. The decode exists for this CLI's own probes, which
+    `JSON.stringify` their findings on purpose and read the value back; a
+    caller's own expression (`tab js`) is not one of those, and a page string
+    that merely parses as JSON was reported as the value it looked like —
+    `localStorage.getItem('k')` holding "null" answered null (a review
+    measured it). The page's OWN value is what the escape hatch promised.
     """
     details = result.get("exceptionDetails")
     if details:
@@ -114,7 +122,7 @@ def _value_of(result: dict) -> Any:
         fail(ERR_RESULT_TOO_LARGE,
              f"Runtime.evaluate answered {size} chars (cap {EVAL_RESULT_CAP}) "
              "— narrow the expression, or read the page with `tab text`")
-    if isinstance(value, str):
+    if isinstance(value, str) and not raw:
         try:
             return json.loads(value)      # a page that answered JSON
         except (ValueError, TypeError):

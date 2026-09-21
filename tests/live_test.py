@@ -788,16 +788,27 @@ def c_dom_find_resolves_targets() -> str:
 
 
 def c_dom_js_is_declared_unverified() -> str:
-    """`tab js` returns the page's value — capped, and not verified."""
+    """`tab js` returns the page's OWN value — capped, and not verified."""
     plain = ok_json("tab", "js", "document.title")
     assert plain["value"] == "dom fixture", plain
     assert plain["verified"] is False, plain
-    decoded = ok_json("tab", "js", "JSON.stringify({a: 1, b: [2, 3]})")
-    assert decoded["value"] == {"a": 1, "b": [2, 3]}, decoded
+    # an OBJECT expression arrives as an object — `returnByValue` serializes
+    # it, no JSON text involved
+    structured = ok_json("tab", "js", "({a: 1, b: [2, 3]})")
+    assert structured["value"] == {"a": 1, "b": [2, 3]}, structured
+    # …and a STRING is the string it is, however it reads: `JSON.stringify`
+    # answers its text, and the page string "null" stays a string. The decode
+    # that used to run here re-typed both (a review measured it) — the
+    # internal probes keep it because they stringify on purpose
+    stringified = ok_json("tab", "js", "JSON.stringify({a: 1})")
+    assert stringified["value"] == '{"a":1}', stringified
+    jsonish = ok_json("tab", "js", "'null'")
+    assert jsonish["value"] == "null", jsonish
     err = refuses("js-error", "tab", "js", "throw new Error('boom')")
     assert "boom" in err, err
     refuses("result-too-large", "tab", "js", "'x'.repeat(100000)")
-    return "a value, a decoded JSON value, js-error, result-too-large"
+    return ("a value, an object, a JSON-looking string kept a string, "
+            "js-error, result-too-large")
 
 
 def c_dom_wait_polls() -> str:

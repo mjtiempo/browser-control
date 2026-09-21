@@ -226,11 +226,18 @@ class Session:
         except Exception as e:                                 # noqa: BLE001
             raise ControlError(ERR_CDP_ERROR, f"{method}: {e}") from e
 
-    def evaluate(self, expression: str, timeout: float = 0.0) -> Any:
-        """One Runtime.evaluate on the open connection, value semantics."""
+    def evaluate(self, expression: str, timeout: float = 0.0,
+                 raw: bool = False) -> Any:
+        """One Runtime.evaluate on the open connection, value semantics.
+
+        `raw=True` hands a string answer back UNDECODED — the escape hatch's
+        reading, where a page string that happens to parse as JSON is still
+        that string (`rpc._value_of`). Every internal probe wants the decode,
+        which is why it stays the default.
+        """
         return _value_of(self.call(
             "Runtime.evaluate",
-            {"expression": expression, "returnByValue": True}, timeout))
+            {"expression": expression, "returnByValue": True}, timeout), raw)
 
     def handle(self, expression: str, timeout: float = 0.0) -> str:
         """The objectId of a NON-serialized expression, for `DOM.requestNode`.
@@ -279,17 +286,21 @@ def call(ws_url: str, method: str, params: dict | None = None,
         return session.call(method, params or {}, timeout)
 
 
-def evaluate(ws_url: str, expression: str, timeout: float = 15.0) -> Any:
+def evaluate(ws_url: str, expression: str, timeout: float = 15.0,
+             raw: bool = False) -> Any:
     """Evaluate an expression on ONE tab's own connection, returning its value.
 
     `returnByValue`, so a page that answers JSON is decoded to the value it
-    produced. Three failures stay apart, because a caller branches on them:
-    the page THREW (`js-error`), the page did not answer within the budget
-    (`eval-timeout`), and the transport itself failed (`cdp-error`).
+    produced — except under `raw=True`, which hands a string answer back as the
+    string it is (the escape hatch's reading; every internal caller here wants
+    the decode, which is why it stays the default). Three failures stay apart,
+    because a caller branches on them: the page THREW (`js-error`), the page
+    did not answer within the budget (`eval-timeout`), and the transport itself
+    failed (`cdp-error`).
     """
     require_websockets()
     with Session(_checked_ws(ws_url, "tab")) as session:
-        return session.evaluate(expression, timeout)
+        return session.evaluate(expression, timeout, raw)
 
 
 def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,

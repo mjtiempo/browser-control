@@ -52,6 +52,7 @@ from browser_control.lib import scope as scope_lib
 from browser_control.lib.browser import readback as readback_lib  # noqa: E402
 from browser_control.lib.cdp import rpc as cdp_rpc  # noqa: E402
 from browser_control.lib.errors import ControlError  # noqa: E402
+from browser_control.lib.profile import trees as trees_lib  # noqa: E402
 
 # Importing this module must be INERT: it used to mkdtemp a /tmp directory and
 # `setdefault` the log, so a host that exports BROWSER_CONTROL_LOG had every
@@ -2489,6 +2490,33 @@ def t_text_cap_counts_characters() -> None:
     assert got["text"] == value
 
 
+def t_js_value_keeps_a_string_a_string() -> None:
+    """`tab js` reads the page's OWN value: a string stays that string.
+
+    The JSON decode `_value_of` runs exists for this CLI's own probes, which
+    `JSON.stringify` their findings on purpose and read the value back; applied
+    to a caller's expression it re-typed the answer — a page string "null" came
+    back as null, "true" as true, "[1,2]" as a list (a review measured it).
+    `tab js` asks for `raw=True`, so what the page produced is what the caller
+    reads.
+    """
+    # the escape hatch: the page's string IS the answer, however it reads
+    raw_list = {"result": {"value": "[1, 2]"}}
+    assert cdp._value_of(raw_list, raw=True) == "[1, 2]"
+    assert cdp._value_of({"result": {"value": "null"}}, raw=True) == "null"
+    # the internal probes keep the decode they are built on
+    assert cdp._value_of(raw_list) == [1, 2]
+    assert cdp._value_of({"result": {"value": "null"}}) is None
+    # a plain string is a string either way, and a non-string passes through
+    assert cdp._value_of({"result": {"value": "dom fixture"}}, raw=True) \
+        == "dom fixture"
+    assert cdp._value_of({"result": {"value": {"a": 1}}}, raw=True) \
+        == {"a": 1}
+    # the cap is about the text the page produced, so a raw answer faces it
+    refusal(lambda: cdp._value_of({"result": {"value": "x" * 100_000}},
+                                  raw=True), "result-too-large")
+
+
 def t_wait_own_port_requires_a_verified_owner() -> None:
     """An answering endpoint that is not ours must not satisfy `open`."""
     server, port = _fake_endpoint([
@@ -2781,6 +2809,73 @@ def t_seed_dry_writes_nothing() -> None:
         _restore_root(keep_root)
 
 
+def t_seed_force_overwrites_not_merges() -> None:
+    """`profile seed --force` OVERWRITES: the result is the source, not a mix.
+
+    The refusal promised "overwrites it (logins and all)" while the copy wrote
+    only what the SOURCE held, so a file unique to the target survived it and
+    the profile became a mix of two (a review flagged the promise). `--force`
+    wipes first — `reset`'s wipe, under the same lock — and the reply says what
+    was destroyed, not only what arrived.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        first = os.path.join(root, "first")
+        os.makedirs(first)
+        Path(first, "Cookies").write_text("from-a", encoding="utf-8")
+        Path(first, "History").write_text("a-only", encoding="utf-8")
+        target = os.path.join(root, "instance")
+        profile_lib.seed(source=first, profile=target, force=True)
+        landed = os.path.join(target, "Default")
+        assert Path(landed, "History").read_text(encoding="utf-8") == "a-only"
+
+        # a second source with a different store and NOTHING named History
+        second = os.path.join(root, "second")
+        os.makedirs(second)
+        Path(second, "Cookies").write_text("from-b", encoding="utf-8")
+        reply = profile_lib.seed(source=second, profile=target, force=True)
+        assert Path(landed, "Cookies").read_text(encoding="utf-8") == "from-b"
+        assert not os.path.exists(os.path.join(landed, "History")), \
+            "a file only the OLD profile held survived `seed --force`"
+        assert reply["wiped"] is True, reply
+        assert reply["wiped_files"] == 2, reply
+        assert reply["wiped_bytes"] == len("from-a") + len("a-only"), reply
+
+        # the refusal half is unchanged: existing content, no --force
+        refusal(lambda: profile_lib.seed(source=second, profile=target),
+                "profile-exists")
+
+        # a dry --force run says what it WOULD destroy and writes nothing
+        before = sorted(os.listdir(landed))
+        dry = profile_lib.seed(source=first, profile=target, force=True,
+                               dry=True)
+        assert dry["dry"] is True and dry["wiped"] is False, dry
+        assert dry["would_wipe"]["files"] == 1, dry
+        assert dry["would_wipe"]["bytes"] == len("from-b"), dry
+        assert sorted(os.listdir(landed)) == before, \
+            "a dry --force run changed the profile"
+
+        # the copy ENGINE still refuses to write through a link that is
+        # already there: with `--force` wiping first, a link can only be
+        # present at copy time if one is planted between the wipe and the
+        # copy, so the guard is pinned where it lives
+        engine_src = os.path.join(root, "engine-src")
+        engine_dst = os.path.join(root, "engine-dst")
+        os.makedirs(engine_src)
+        os.makedirs(engine_dst)
+        Path(engine_src, "Cookies").write_text("engine", encoding="utf-8")
+        engine_victim = os.path.join(root, "engine-victim")
+        Path(engine_victim).write_text("keep", encoding="utf-8")
+        os.symlink(engine_victim, os.path.join(engine_dst, "Cookies"))
+        facts = trees_lib._copy(engine_src, engine_dst, False)  # noqa: SLF001
+        assert facts["links_planted"] == 1, facts
+        assert Path(engine_victim).read_text(encoding="utf-8") == "keep"
+    finally:
+        _restore_root(keep_root)
+
+
 def t_reset_guard_counts_skipped_content() -> None:
     """A cache-only profile refuses `reset` without `--force` — and counts."""
     root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
@@ -2934,17 +3029,20 @@ def t_audit_modes_caps_redirect_and_symlink() -> None:
         victim = os.path.join(tmp, "victim")
         Path(victim).write_text("keep", encoding="utf-8")
         # the destination a profile-dir source now lands in
-        os.symlink(victim, os.path.join(target, "Default", "Cookies"))
+        planted = os.path.join(target, "Default", "Cookies")
+        os.symlink(victim, planted)
         keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         try:
-            # the planted link is NOT written through: the copy skips it and
-            # the read-back refuses `seed-not-verified` instead of claiming a
-            # login that did not land
-            refusal(lambda: profile_lib.seed(source=source, profile=target,
-                                             force=True), "seed-not-verified")
+            # `seed --force` OVERWRITES: the wipe destroys the planted link
+            # before the copy runs, so what lands is a real file and the file
+            # the link pointed at was never written through
+            reply = profile_lib.seed(source=source, profile=target, force=True)
+            assert reply["verified"] is True, reply
         finally:
             _restore_root(keep_root)
+        assert not os.path.islink(planted), "the wipe left the planted link"
+        assert Path(planted).read_text(encoding="utf-8") == "login"
         assert Path(victim).read_text(encoding="utf-8") == "keep"
 
 
@@ -3249,6 +3347,8 @@ def main() -> int:
         ("malformed endpoints and page text refuse typed",
          t_transport_typed_refusals),
         ("the text cap counts characters", t_text_cap_counts_characters),
+        ("tab js keeps a JSON-looking string a string",
+         t_js_value_keeps_a_string_a_string),
         ("open needs its OWN endpoint",
          t_wait_own_port_requires_a_verified_owner),
         ("the close read-back tolerates a stranger",
@@ -3260,6 +3360,8 @@ def main() -> int:
         ("a symlinked profile target is refused",
          t_profile_symlink_target_is_refused),
         ("seed --dry writes nothing", t_seed_dry_writes_nothing),
+        ("seed --force overwrites, never merges",
+         t_seed_force_overwrites_not_merges),
         ("seed lands where Chrome reads", t_seed_lands_where_chrome_reads),
         ("profile logins reads the stores, never a value", t_profile_logins),
         ("seed reads its logins back", t_seed_reads_logins_back),
