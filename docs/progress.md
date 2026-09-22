@@ -1247,6 +1247,47 @@ and on the battery's headed one). On the seeding profile that failed before:
 characters (that path dropped 11 of 23 before), and a headed instance,
 launched with the same flag, drove `tab type` verified too.
 
+### 5.32 `google search` — the query is typed, never put in a URL — done
+`plugins/google_search.py` searches Google the way a person does: it opens the
+homepage, puts the caret in the search box (`focus`), types the query as
+per-character key events at 90 WPM (`12 / wpm` seconds between keystrokes,
+`--wpm N` to move it), presses Enter, and reads the rendered cards with the
+core's extraction engine. NO query URL is ever built — the one address the
+plugin navigates to is the homepage, and the `/search?q=…` in `landed_on` is
+the one the SITE put in the bar after the submit.
+
+Two pieces of core grew for it, both additive:
+
+* `dom.type_text(…, delay_s=…)` — the pause BETWEEN keystrokes. The default
+  is still `TYPE_PAUSE_S` (as fast as a page's handlers take it), and a caller
+  that wants a human cadence asks for one; a non-numeric or negative delay is
+  `bad-args`, not a traceback.
+* `plugin_api` re-exports the writing verbs a plugin like this needs —
+  `focus`, `type_text`, `press`, `click` — beside the reads it already had
+  (`nav`, `wait`, `extract`).
+
+The selector map lives at the top of the plugin (`textarea[name="q"]`,
+`#search div.MjjYud:has(h3)`, `h3`, `a@href`, `div.VwiC3b, div[data-sncf]`).
+`:has(h3)` keeps the container to cards that HAVE a heading — measured on a
+live SERP: 18 `div.MjjYud` containers, 9 with a heading — so `--cap N` counts
+results rather than the panels around them.
+
+*Done when* an offline check proves the input path (one navigation, to the
+homepage; the query through `type_text` at the cadence; a real Enter; unnamed
+rows dropped) and a live run answers with the page's rendered results.
+
+Evidence: 76 hermetic checks green (one new — `google plugin types, never
+builds a query URL`: the fakes record one `nav(HOME)`, `type_text(q, 12/90)`,
+`focus(textarea[name=q])` and `press(enter)`, and the check also covers the
+`--cap`/`--wpm` refusals, the `--deny write` refusal, and the
+`type-not-verified` refusal when the read-back says the text did not land),
+pyright 0, `ruff check .` 0 — and two live runs through the plugin on the
+managed headless browser: `araghchi speaking in UN` (23 chars, 90 WPM
+requested, 85.4 measured — the gap is the per-character CDP round trip,
+reported, not hidden; 5 named results, `landed_on` the site's own
+`/search?q=…`) and `xiaomi 18 pro max release date` (30 chars, 86.1 measured,
+3 results).
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs

@@ -3,9 +3,12 @@
 A plugin is local code running in this process with the CLI's own access; what it
 should reach for is THIS module, not `browser_control.lib` at large. The names
 here are the supported surface (`api: 1`): the refusal type and its code
-vocabulary, and the three verbs a read-only plugin needs. A context object
-carrying tab/browser/frame is a separate `api: 2` proposal — the
-`run(rest, browser)` signature does not change here.
+vocabulary, the verbs a READ-ONLY plugin needs (`nav`, `wait`, `extract`), and
+the four a plugin that drives a page the way a person does needs — `focus`,
+`type_text` (real per-character key events, with a `delay_s` for a human
+cadence), `press`, `click`. A context object carrying tab/browser/frame is a
+separate `api: 2` proposal — the `run(rest, browser)` signature does not change
+here.
 
 `errors` is re-exported WHOLE so a plugin names a refusal code
 (`errors.ERR_BAD_ARGS`) instead of typing the string: a raw string that is not
@@ -29,9 +32,10 @@ from browser_control.cli.argv import (
 )
 from browser_control.lib import errors
 from browser_control.lib.browser import nav
-from browser_control.lib.dom import extract, wait
+from browser_control.lib.dom import click, extract, focus, press, type_text, wait
 from browser_control.lib.errors import ControlError, fail
 from browser_control.lib.plugins import PLUGIN_API
 
-__all__ = ["ControlError", "PLUGIN_API", "errors", "extract", "fail", "nav",
-           "pop", "switch", "wait"]
+__all__ = ["ControlError", "PLUGIN_API", "click", "errors", "extract",
+           "fail", "focus", "nav", "pop", "press", "switch", "type_text",
+           "wait"]

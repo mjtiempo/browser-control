@@ -215,7 +215,7 @@ holds. Plugins are Python files loaded from `BROWSER_CONTROL_PLUGIN_PATH`
 `~/.local/share/browser-control/plugins/`. `selftest` lists what loaded and
 what did not; `--help` appends their usage lines.
 
-This repo ships one, `plugins/x_reader.py` — read-only X search:
+This repo ships two. `plugins/x_reader.py` is read-only X search:
 
 ```console
 $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
@@ -225,7 +225,19 @@ $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
 
 `--latest` is X's "Latest" sort (by date), `--top` its relevance ranking, and
 `sort` reports what the page's own tab strip says is selected — no verb can
-prove a site's ordering. See `plugins/README.md` for the plugin contract.
+prove a site's ordering.
+
+`plugins/google_search.py` searches Google by TYPING: the query goes into the
+site's own search box as real per-character key events at a human cadence
+(90 WPM by default), then Enter — no query URL is ever built:
+
+```console
+$ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
+    google search "araghchi speaking in UN" --cap 5
+{"ok": true, "entry": "https://www.google.com/", "typing": {"chars": 23, "wpm": 90, "measured_wpm": 85.4, "verified": true}, "count": 5, "results": [{"title": "…", "url": "…", "snippet": "…"}, …]}
+```
+
+See `plugins/README.md` for the plugin contract and both shipped plugins.
 
 ## Capabilities, machine-readable
 

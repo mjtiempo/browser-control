@@ -86,3 +86,34 @@ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
 
 The browser must be logged in on the tab's profile for anything beyond the
 public wall — seed the managed profile with `profile seed` first.
+
+## Shipped: `google_search.py`
+
+Search Google by TYPING the query into the site's own search box — real
+per-character key events at a human cadence (90 WPM by default), then `Enter`,
+then the rendered cards read with `tab extract`:
+
+```bash
+BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
+    google search "araghchi speaking in UN" --cap 5
+```
+
+* **No query URL is built.** The only address this plugin navigates to is
+  `https://www.google.com/`; `landed_on` in the reply is the `/search?q=…`
+  address the SITE put in the bar after the submit, and the `typing` block
+  reports what was typed, at what cadence, and the page's own read-back
+  (`verified`). That is the point of the plugin: typed input lands in the
+  page's field first, which is what a person does and what a site's handlers
+  (autocomplete, consent, bot checks) actually see.
+* `--wpm N` moves the cadence (`N` words a minute, 5 characters to a word, so
+  `12 / N` seconds between keystrokes); `measured_wpm` reports what the whole
+  type actually took, CDP round trips included.
+* The result container asks only for cards that HAVE a heading
+  (`#search div.MjjYud:has(h3)`), so `--cap N` counts results rather than the
+  panels around them.
+* The selector map at the top of the file (`textarea[name="q"]`,
+  `#search div.MjjYud:has(h3)`, `h3`, `a@href`, `div.VwiC3b,
+  div[data-sncf]`) is the part that breaks when Google changes its DOM.
+
+It declares `read`+`write` (it navigates for writes and types into the page),
+so `--deny write google search …` refuses it like any built-in.

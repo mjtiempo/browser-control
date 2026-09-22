@@ -3322,6 +3322,134 @@ def t_x_plugin_offline() -> None:
             os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
 
 
+def t_google_plugin_offline() -> None:
+    """The Google plugin TYPES the query — it never builds a query URL.
+
+    The input path is the whole point of the plugin: `nav` may only ever see
+    Google's HOMEPAGE, the query goes through `type_text` at the 90 WPM
+    cadence (12 / wpm seconds), and the submit is a real `Enter`. The
+    extraction is stubbed exactly like the X plugin's, so the record shape is
+    checked without a browser. The `plugin_api` import is LOCAL on purpose:
+    importing it at module scope would bind the real verbs before the X
+    plugin's own check patches them.
+    """
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    calls: dict[str, list] = {"nav": [], "focus": [], "type": [], "press": []}
+    state = {"verified": True}
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        calls["nav"].append((url, tab))
+        return {"ok": True}
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 0.0,
+                  idle_ms: int = 0, tab: str = "", browser: str = "") -> dict:
+        return {"ok": True}
+
+    def fake_focus(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, tab: str = "",
+                   browser: str = "") -> dict:
+        calls["focus"].append(selector)
+        return {"ok": True}
+
+    def fake_type(text: str, tab: str = "", browser: str = "",
+                  delay_s: float | None = None) -> dict:
+        calls["type"].append((text, delay_s))
+        return {"ok": True, "chars": len(text),
+                "verified": state["verified"],
+                "length_after": len(text) if state["verified"] else 0}
+
+    def fake_press(key: str, tab: str = "", browser: str = "") -> dict:
+        calls["press"].append(key)
+        return {"ok": True}
+
+    def fake_extract(each: str = "", fields: list | None = None, cap: int = 0,
+                     chars: int = 0, visible: bool = False, unique: str = "",
+                     tab: str = "", browser: str = "") -> dict:
+        return {"ok": True, "truncated": False,
+                "url": "https://www.google.com/search?q=araghchi+speaking",
+                "matches": [
+                    {"title": "First", "url": "https://a.example/1",
+                     "snippet": "one"},
+                    {"title": None, "url": None, "snippet": None},
+                    {"title": "Dup", "url": "https://a.example/1",
+                     "snippet": "again"},
+                    {"title": "Second", "url": "https://b.example/2",
+                     "snippet": "two"}]}
+
+    patched = {"nav": fake_nav, "wait": fake_wait, "focus": fake_focus,
+               "type_text": fake_type, "press": fake_press,
+               "extract": fake_extract}
+    real = {name: getattr(plugin_api, name) for name in patched}
+    for name, fn in patched.items():
+        setattr(plugin_api, name, fn)
+    try:
+        rc, out, err = run_cli(["google", "search", "araghchi speaking",
+                                "--cap", "5"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        # the ONE navigation is the homepage: no query ever rides a URL
+        assert [url for url, _tab in calls["nav"]] == [
+            "https://www.google.com/"], calls["nav"]
+        assert not any("/search" in url for url, _t in calls["nav"]), calls
+        # ...the query is typed at the 90 WPM cadence and submitted by hand
+        assert calls["type"] == [("araghchi speaking", 12 / 90)], calls
+        assert calls["focus"] == ['textarea[name="q"]'], calls
+        assert calls["press"] == ["enter"], calls
+        assert data["typing"]["wpm"] == 90, data
+        assert abs(data["typing"]["delay_s"] - 0.1333) < 0.001, data
+        # rows with no name are dropped, duplicates collapse, order holds
+        assert data["count"] == 2, data
+        assert [r["title"] for r in data["results"]] == ["First", "Second"], data
+        assert data["landed_on"].startswith("https://www.google.com/"), data
+        # --wpm moves the cadence
+        calls["type"].clear()
+        rc, out, err = run_cli(["google", "search", "q", "--wpm", "120"])
+        assert rc == 0, (rc, err)
+        assert calls["type"] == [("q", 0.1)], calls
+        assert json.loads(out)["typing"]["wpm"] == 120, out
+        # the refusals: no query, two queries, a cadence of zero
+        for argv in (["google", "search"], ["google", "search", "a", "b"],
+                     ["google", "search", "q", "--wpm", "0"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+        # the declared classes are enforceable, not decorative
+        rc, _out, err = run_cli(["--deny", "write", "google", "search", "q"])
+        assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+        # a field that did NOT take the text is refused, never submitted
+        calls["press"].clear()
+        state["verified"] = False
+        rc, _out, err = run_cli(["google", "search", "q"])
+        assert rc == 2 and "ERR[type-not-verified]" in err, (rc, err)
+        assert calls["press"] == [], calls
+    finally:
+        for name, fn in real.items():
+            setattr(plugin_api, name, fn)
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_type_delay_is_validated() -> None:
+    """`type_text`'s cadence refuses bad input BEFORE any browser is touched.
+
+    The plugin passes `12 / wpm`; a caller that can reach the helper directly
+    gets a refusal, not a traceback or a negative sleep.
+    """
+    # the string is the point: a caller can hand this helper anything, and it
+    # must refuse rather than raise out of `float()` (or sleep a NaN)
+    refusal(lambda: dom.type_text("q", delay_s="nope"),  # type: ignore[arg-type]
+            "bad-args")
+    refusal(lambda: dom.type_text("q", delay_s=-1), "bad-args")
+    refusal(lambda: dom.type_text("q", delay_s=float("nan")), "bad-args")
+    refusal(lambda: dom.type_text("q", delay_s=float("inf")), "bad-args")
+
+
 def t_error_codes_are_registered() -> None:
     """Every refusal code is registered, and every constant is a code.
 
@@ -3421,6 +3549,10 @@ def main() -> int:
         ("tab extract grammar", t_cli_extract_grammar),
         ("plugins load, dispatch and gate", t_plugin_system),
         ("x plugin maps records offline", t_x_plugin_offline),
+        ("google plugin types, never builds a query URL",
+         t_google_plugin_offline),
+        ("type delay is validated before any browser",
+         t_type_delay_is_validated),
         ("the net-change test", t_same_page),
         ("one page verb, one tab", t_one_tab_addressing),
         ("attach/detach grammar", t_cli_attach_grammar),
