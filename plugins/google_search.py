@@ -34,7 +34,9 @@ from browser_control.plugin_api import (
     ControlError,
     errors,
     fail,
+    int_arg,
     pop,
+    text_arg,
 )
 
 # --- Google's rendered result shape (the one place these selectors live) ---
@@ -59,20 +61,6 @@ SUBMIT_PAUSE_S = 0.6        # a person's beat between the last key and Enter
 def _delay(wpm: int) -> float:
     """Seconds between keystrokes at a given WPM (5 characters to a word)."""
     return 12.0 / wpm
-
-
-def _number(value: str | None, flag: str, default: int, top: int) -> int:
-    if value is None:
-        return default
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        fail(errors.ERR_BAD_ARGS,
-             f"google search: {flag} needs a number, got {value!r}")
-    if number < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"google search: {flag} must be at least 1, got {number}")
-    return min(number, top)
 
 
 def _results(records: list[dict]) -> list[dict]:
@@ -111,18 +99,28 @@ def run(rest: list[str], browser: str) -> dict:
     args, wpm_flag = pop(args, "--wpm", "google search")
     args, tab = pop(args, "--tab", "google search")
     tab = tab or ""
-    if not args:
-        fail(errors.ERR_BAD_ARGS,
-             "google search: a QUERY is required, e.g. "
-             "google search 'araghchi speaking in UN' --cap 5")
-    if len(args) > 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"google search: one QUERY at most, got {len(args)}")
-    query = args[0].strip()
+    # the positional rule is the CORE's (`text_arg`): a flag where the query
+    # goes, a missing query or a repeated one refuses with the same message a
+    # built-in verb gives, rather than a shape only this plugin speaks
+    query = text_arg(args, "google search").strip()
     if not query:
         fail(errors.ERR_BAD_ARGS, "google search: an empty QUERY is not a search")
-    cap_n = _number(cap, "--cap", DEFAULT_CAP, MAX_CAP)
-    wpm = _number(wpm_flag, "--wpm", DEFAULT_WPM, MAX_WPM)
+    # the parse and its "needs a number" refusal are the core's (`int_arg`);
+    # only the bounds this verb alone knows stay here — an absent flag is the
+    # default, a cadence below 1 would divide by zero, and a value above the
+    # top is clamped rather than refused
+    cap_n = (int_arg(cap, "google search: --cap")
+             if cap is not None else DEFAULT_CAP)
+    if cap_n < 1:
+        fail(errors.ERR_BAD_ARGS,
+             f"google search: --cap must be at least 1, got {cap_n}")
+    cap_n = min(cap_n, MAX_CAP)
+    wpm = (int_arg(wpm_flag, "google search: --wpm")
+           if wpm_flag is not None else DEFAULT_WPM)
+    if wpm < 1:
+        fail(errors.ERR_BAD_ARGS,
+             f"google search: --wpm must be at least 1, got {wpm}")
+    wpm = min(wpm, MAX_WPM)
 
     # the HOMEPAGE, never a query URL: the query is typed below, into the
     # page's own field, and the site builds the address from it

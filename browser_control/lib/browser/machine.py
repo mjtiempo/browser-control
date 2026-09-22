@@ -68,7 +68,17 @@ def browsers() -> list[dict]:
             endpoint["listener"] = {"pid": owner["pid"],
                                     "exe": owner["exe"]}
             if owner["verified"]:
-                endpoint["tabs"] = len(cdp.page_rows_at(port))
+                try:
+                    endpoint["tabs"] = len(cdp.page_rows_at(port))
+                except ControlError as e:
+                    # a browser that died, or stalled, between the probe and
+                    # this second GET: a census row is a REPORT, not a gate —
+                    # one vanished browser must not take `list` and every
+                    # shared resolver down with it (see `tabs_of`, which
+                    # reports the same way). None is "no count", never "no
+                    # tabs"
+                    endpoint["tabs"] = None
+                    endpoint["reason"] = e.message
             else:
                 endpoint["reason"] = str(owner["reason"])
         rows.append({"pid": pid, "exe": exe,

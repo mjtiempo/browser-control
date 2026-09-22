@@ -168,13 +168,3 @@ from browser_control.lib.images import (  # noqa: F401
     png_size,
     write_atomic,
 )
-
-# The private spellings the rest of the tree (and the suites) grew up with.
-_int = as_int
-_num = as_float
-_ints = as_ints
-_list = as_list
-_png_size = png_size
-_pixels = expected_pixels
-_shot_target = output_path
-_write_shot = write_atomic

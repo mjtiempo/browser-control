@@ -6,6 +6,7 @@ proves both the process and the endpoint are gone.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -56,6 +57,7 @@ from browser_control.lib.errors import (
     fail,
 )
 from browser_control.lib.paths import (
+    ensure_root,
     expand,
     is_managed,
     lock_path,
@@ -119,16 +121,27 @@ def instance_dir(binary_path: str) -> str:
     builds); `--profile DIR` names a second instance of the same browser
     instead, and it has to live under this CLI's root: outside it we would be
     starting a browser we then refuse to write to.
+
+    A symlinked directory is refused here as well, the same rule `Instance`
+    applies: `is_managed` compares REAL paths, so a link inside the root
+    pointing at another directory inside the root passes it — and the lock and
+    pid records are keyed by the LEXICAL spelling, so the link and its target
+    would take different locks and `open` could start a second browser on the
+    one real directory (a review flagged the split).
     """
     scoped = _scoped()
-    if not scoped:
-        return profile_dir(binary_path)
-    if not is_managed(scoped):
+    if scoped and not is_managed(scoped):
         fail(ERR_BAD_ARGS,
              f"--profile {scoped} is not under {root()} — this CLI manages the "
              "profiles in its own root (set BROWSER_CONTROL_ROOT to move it, "
              "or `attach` a browser started elsewhere)")
-    return scoped
+    profile = scoped or profile_dir(binary_path)
+    if os.path.islink(profile):
+        fail(ERR_NOT_MANAGED,
+             f"{profile} is a symlink — this CLI starts browsers on real "
+             "profile directories, and a link would lock a name its target "
+             "does not share")
+    return profile
 
 def profiles() -> list[str]:
     """Every managed profile directory, sorted.
@@ -176,8 +189,14 @@ def flags(profile: str, headless: bool = False) -> list[str]:
     and the only one that holds a page with no window (docs/progress.md §5.11
     measured the alternatives). Nothing else changes: every verb speaks CDP,
     so the same surface drives a browser nobody can see.
+
+    `--remote-debugging-address=127.0.0.1` PINS the bind: Chrome's default, but
+    the owner check reads the bound ADDRESS off the kernel, so a launch that
+    did not name it could come up on a wide bind and be refused as somebody
+    else's endpoint (a review flagged that the launch never pinned it).
     """
     argv = [f"--user-data-dir={profile}", "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
             "--no-first-run", "--no-default-browser-check",
             "--disable-extensions"]
     if headless:
@@ -397,6 +416,65 @@ def _running_headless(profile: str, owner: dict) -> bool | None:
     return is_headless_cmd(cmd, exe_name(pid))
 
 
+def _stop_failed_start(profile: str, pid: int) -> str:
+    """Stop the browser a failed `open` started, and name it in the refusal.
+
+    A start that never comes up leaves a DETACHED process holding the profile
+    (`spawn` runs it in its own session, so it outlives this call). The
+    refusal used to name neither the process nor its pid, and the caller's
+    natural next step — `open` again — saw no endpoint, no owner and therefore
+    "nothing running", and started a SECOND browser on one profile. Chrome's
+    own process singleton was the only thing standing between the two calls,
+    which is exactly the third-party guarantee this module's lock exists to
+    replace.
+
+    SIGTERM is the signal `stop` sends and STOP_WAIT_S the budget it gives it —
+    never a SIGKILL. The pid record is cleared the way `close` clears it, once
+    the process is PROVEN gone; a survivor KEEPS the record, which is what
+    lets `close --pid` (or `pid_of`) find it later.
+
+    Returns the clause the refusal carries: one line, and honest about a
+    process that outlived the signal.
+    """
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGTERM)
+    _attempts, alive = poll(lambda: pid_alive(pid), timeout=STOP_WAIT_S,
+                            interval=POLL_NORMAL, accept=lambda a: not a,
+                            on_error=lambda _e: True)
+    if alive:
+        return (f"pid {pid} survived SIGTERM and may still hold {profile} — "
+                f"stop it with `browser-control-cli close --pid {pid}`")
+    Path(pid_file(profile)).unlink(missing_ok=True)
+    return f"pid {pid} was stopped again"
+
+def _resolved_mode(profile: str, owner: dict, already: bool,
+                   headless: bool) -> bool:
+    """The headless MODE a launch runs (or adopts) in.
+
+    The mode belongs to the PROCESS, not to this call's flag: `--headless`
+    decides how a browser STARTS, so a call that asked for headless must not be
+    answered by a windowed browser that was already up (adoption would silently
+    overrule the caller's argv — the same rule that makes a scope which cannot
+    apply a refusal everywhere else). Only a READ "headed" refuses; `None` (the
+    cmdline unreadable) adopts and reports the mode it cannot prove, which is
+    `False`, not a guess.
+    """
+    detected = _running_headless(profile, owner) if already else None
+    if detected is not None:
+        if not detected and headless:
+            fail(ERR_BAD_ARGS,
+                 f"open --headless: the browser on {profile} is already "
+                 "running HEADED — this flag decides how a browser STARTS, "
+                 "and that one is already up; close it first "
+                 f"(`browser-control-cli close --profile {profile}`) and "
+                 "`open --headless` again")
+        return detected
+    if already:
+        # adoption with an unreadable cmdline: the honest report is
+        # "cannot say", and the wire format has a bool — False, named
+        return False
+    return bool(headless)
+
 def launch(urls: list[str] | None = None, browser: str = "",
            headless: bool = False) -> dict:
     """Start (or adopt) the managed browser and prove the pages are there.
@@ -425,11 +503,18 @@ def launch(urls: list[str] | None = None, browser: str = "",
     call: an adopted browser is reported in the mode it is actually running,
     and asking for headless when a windowed one is already up REFUSES rather
     than silently overrule the argv. Close it and open again to change mode.
+
+    A start that FAILS after the spawn — no CDP endpoint inside LAUNCH_WAIT_S,
+    or an endpoint that never shows the startup page — stops the process this
+    call started before refusing, and says so by pid. The browser runs in its
+    own session, so an unreported survivor held the profile while the caller's
+    retry started a second one on it (see `_stop_failed_start`).
     """
     wanted = [safe_url(url) for url in (urls or [])]
     path = binary(browser)
     profile = instance_dir(path)
     try:
+        ensure_root()
         os.makedirs(profile, mode=0o700, exist_ok=True)
     except OSError as e:
         raise ControlError(ERR_PROFILE_UNUSABLE,
@@ -450,30 +535,7 @@ def launch(urls: list[str] | None = None, browser: str = "",
         else:
             stale = ""
         already = bool(owner.get("verified"))
-        # the mode a running browser is in comes from its own cmdline, never
-        # from this call's flag: `--headless` decides how a browser STARTS,
-        # and a call that asked for headless must not be answered by a
-        # windowed browser that was already up (adoption would silently
-        # overrule the caller's argv — the same rule that makes a scope that
-        # cannot apply a refusal everywhere else). Only a READ "headed"
-        # refuses; `None` (the cmdline unreadable) adopts and reports the
-        # mode it cannot prove, which is `False`, not a guess
-        detected = _running_headless(profile, owner) if already else None
-        if detected is not None:
-            if not detected and headless:
-                fail(ERR_BAD_ARGS,
-                     f"open --headless: the browser on {profile} is already "
-                     "running HEADED — this flag decides how a browser STARTS, "
-                     "and that one is already up; close it first "
-                     f"(`browser-control-cli close --profile {profile}`) and "
-                     "`open --headless` again")
-            mode = detected
-        elif already:
-            # adoption with an unreadable cmdline: the honest report is
-            # "cannot say", and the wire format has a bool — False, named
-            mode = False
-        else:
-            mode = bool(headless)
+        mode = _resolved_mode(profile, owner, already, headless)
         requests: list[str] = []
         opened: list[dict] = []
         if already:
@@ -483,16 +545,18 @@ def launch(urls: list[str] | None = None, browser: str = "",
         else:
             first = wanted[0] if wanted else "about:blank"
             requests = [first, *wanted[1:]]
-            record_pid(profile, spawn([path, *flags(profile, headless), first]))
+            pid = spawn([path, *flags(profile, headless), first])
+            record_pid(profile, pid)
             if not _pkg._wait_own_port(profile):
                 fail(ERR_LAUNCH_FAILED,
                      f"started {path} on {profile} but no CDP endpoint "
-                     f"answered within {LAUNCH_WAIT_S:g}s")
+                     f"answered within {LAUNCH_WAIT_S:g}s — "
+                     f"{_stop_failed_start(profile, pid)}")
             row = _pkg._wait_url(profile, first)
             if row is None:
                 fail(ERR_NO_PAGE_TAB,
                      f"{path} is up on {profile} but shows no tab for "
-                     f"{first!r}")
+                     f"{first!r} — {_stop_failed_start(profile, pid)}")
             opened = [row]
             if len(wanted) > 1:
                 opened += _open_tabs(profile, wanted[1:])

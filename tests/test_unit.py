@@ -14,6 +14,7 @@ import glob
 import http.server
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -33,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # The sibling modules are not resolvable before the path insert above; the
 # project-level pyright run resolves them, so only `E402` is suppressed here.
+from browser_control.cli import argv as cli_argv  # noqa: E402
 from browser_control.cli import main as cli_main  # noqa: E402
 from browser_control.cli import registry  # noqa: E402
 from browser_control.lib import (  # noqa: E402
@@ -43,13 +45,20 @@ from browser_control.lib import (  # noqa: E402
     dom,
     errors,
 )
+from browser_control.lib import argv as argv_lib  # noqa: E402
+from browser_control.lib import coerce as coerce_lib  # noqa: E402
+from browser_control.lib import images as images_lib  # noqa: E402
 from browser_control.lib import policy as policy_lib
 from browser_control.lib import (
     profile as profile_lib,
 )
 from browser_control.lib import paths as paths_lib  # noqa: E402
+from browser_control.lib import proc as proc_lib  # noqa: E402
 from browser_control.lib import scope as scope_lib
+from browser_control.lib.browser import lifecycle as lifecycle_lib  # noqa: E402
+from browser_control.lib.browser import machine as machine_lib  # noqa: E402
 from browser_control.lib.browser import readback as readback_lib  # noqa: E402
+from browser_control.lib.cdp import endpoint as endpoint_lib  # noqa: E402
 from browser_control.lib.cdp import rpc as cdp_rpc  # noqa: E402
 from browser_control.lib.errors import ControlError  # noqa: E402
 from browser_control.lib.profile import trees as trees_lib  # noqa: E402
@@ -138,6 +147,11 @@ def t_launch_flags() -> None:
     flags = browser.flags(profile)
     assert f"--user-data-dir={profile}" in flags, flags
     assert "--remote-debugging-port=0" in flags, flags
+    # the BIND is pinned loopback: the owner check reads the bound ADDRESS off
+    # the kernel, so a launch that left it to Chrome's default could come up on
+    # a wide bind and be refused as somebody else's endpoint (a review flagged
+    # that the launch never pinned it)
+    assert "--remote-debugging-address=127.0.0.1" in flags, flags
     # load-bearing: a never-run profile publishes no CDP port without these
     assert "--no-first-run" in flags, flags
     assert "--no-default-browser-check" in flags, flags
@@ -331,6 +345,18 @@ def t_cli_new_verbs_grammar() -> None:
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
 
 
+#: The values the shape check and the compile check fill every page
+#: expression's placeholders with: ONE table, so the two checks cannot drift
+#: into disagreeing about what a placeholder means.
+_JS_PLACEHOLDERS = {"__MODE__": '"text"', "__NEEDLE__": '"x"',
+                    "__SELECTOR__": '"#x"', "__INDEX__": "0",
+                    "__ACTION__": '"play"',
+                    "__VISIBLE__": "true", "__CAP__": "1",
+                    "__VALUE__": '"v"', "__X__": "1", "__Y__": "1",
+                    "__EXPR__": "true", "__IDLE_MS__": "100",
+                    "__SCHEMA__": '{"each":"a"}'}
+
+
 def t_expressions_and_shot_rules() -> None:
     """The page expressions are wrapped and filled; the PNG rules refuse.
 
@@ -340,13 +366,7 @@ def t_expressions_and_shot_rules() -> None:
     `JSON.stringify((() => {…})())`, and every placeholder it declares is one
     the caller actually fills.
     """
-    placeholders = {"__MODE__": '"text"', "__NEEDLE__": '"x"',
-                    "__SELECTOR__": '"#x"', "__INDEX__": "0",
-                    "__ACTION__": '"play"',
-                    "__VISIBLE__": "true", "__CAP__": "1",
-                    "__VALUE__": '"v"', "__X__": "1", "__Y__": "1",
-                    "__EXPR__": "true", "__IDLE_MS__": "100",
-                    "__SCHEMA__": '{"each":"a"}'}
+    placeholders = _JS_PLACEHOLDERS
     seen = 0
     for name in dir(dom):
         src = getattr(dom, name)
@@ -382,25 +402,22 @@ def t_expressions_and_shot_rules() -> None:
     rows = [{"pid": 1, "profile": "/p", "managed": True}]
     assert browser._spec_hits(rows, {1: []}, "active") == []   # noqa: SLF001
     # a PNG is judged by its bytes, and a device size by sane arithmetic
-    assert dom._png_size(b"") == []                            # noqa: SLF001
-    assert dom._png_size(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20) == []
+    assert images_lib.png_size(b"") == []
+    assert images_lib.png_size(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20) == []
     header = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
               + (1882).to_bytes(4, "big") + (842).to_bytes(4, "big"))
-    assert dom._png_size(header) == [1882, 842]                # noqa: SLF001
-    assert dom._pixels(941, 2) == 1882                          # noqa: SLF001
+    assert images_lib.png_size(header) == [1882, 842]
+    assert images_lib.expected_pixels(941, 2) == 1882
     for css, ratio in ((941, float("inf")), (941, float("nan")),
                        (10 ** 9, 2.0), (10, 0.0), (10, -1.0)):
-        refusal(lambda css=css, ratio=ratio: dom._pixels(css, ratio),
-                "screenshot-not-verified")
+        refusal(lambda css=css, ratio=ratio: images_lib.expected_pixels(
+            css, ratio), "screenshot-not-verified")
     # the screenshot path rules are pure: no browser, no file
     with tempfile.TemporaryDirectory() as tmp:
-        refusal(lambda: dom._shot_target(f"{tmp}/x.jpg"),             # noqa: SLF001
-                "bad-args")
-        refusal(lambda: dom._shot_target(f"{tmp}/nope/x.png"),        # noqa: SLF001
-                "bad-args")
-        refusal(lambda: dom._shot_target(tmp),                         # noqa: SLF001
-                "bad-args")
-        assert dom._shot_target(f"{tmp}/ok.png") == f"{tmp}/ok.png"   # noqa: SLF001
+        refusal(lambda: images_lib.output_path(f"{tmp}/x.jpg"), "bad-args")
+        refusal(lambda: images_lib.output_path(f"{tmp}/nope/x.png"), "bad-args")
+        refusal(lambda: images_lib.output_path(tmp), "bad-args")
+        assert images_lib.output_path(f"{tmp}/ok.png") == f"{tmp}/ok.png"
     # a dialog MODE is checked before any tab is resolved, and the browser's
     # own words are what make accept/dismiss definitive
     refusal(lambda: dom.dialog("maybe"), "bad-args")
@@ -414,6 +431,62 @@ def t_expressions_and_shot_rules() -> None:
     refusal(lambda: dom._checkable({"checkable": True, "disabled": True},  # noqa: SLF001
                                    {}), "not-checkable")
     dom._checkable({"checkable": True, "disabled": False}, {})      # noqa: SLF001
+
+
+def _page_js_sources() -> list[tuple[str, str]]:
+    """Every page-side JavaScript expression as (name, source).
+
+    The module-level expressions are the `JSON.stringify` wrappers PLUS the
+    three bare arrow-IIFEs (`ELEMENT_EXPR` and the two point probes), which the
+    shape check never visited; the `WAIT_EXPRS` table is a dict, so it is
+    walked separately — including the `js` mode, whose caller code is filled
+    with a literal here.
+    """
+    out: list[tuple[str, str]] = []
+    for name in dir(dom):
+        src = getattr(dom, name)
+        if not name.isupper() or not isinstance(src, str):
+            continue
+        if src.startswith("JSON.stringify") or (
+                src.startswith("(() =>") and src.rstrip().endswith("})()")):
+            out.append((name, src))
+    for mode, expression in dom.WAIT_EXPRS.items():
+        out.append((f"WAIT_EXPRS[{mode!r}]", expression))
+    return out
+
+
+def t_page_expressions_compile() -> None:
+    """Every page expression PARSES as JavaScript — not just its shape.
+
+    The shape check above cannot see a missing bracket, a stray quote or a
+    keyword typo: those surface only when the page evaluates the source, and
+    the only place that happens is `tests/live_test.py`, which CI deliberately
+    skips (a broken expression once shipped as `js-error: SyntaxError`). Each
+    expression is assembled with the SAME placeholder table the shape check
+    uses and handed to `node`'s `new Function`, which parses it and throws
+    `SyntaxError` on anything malformed. `node` ships on the CI runner
+    (`ubuntu-latest`); when it is not installed the check prints a note and
+    SKIPS, so the suite stays hermetic everywhere.
+    """
+    if shutil.which("node") is None:
+        print("  SKIP  page expressions compile: node is not on PATH")
+        return
+    sources = _page_js_sources()
+    assert len(sources) >= 15, len(sources)
+    for name, src in sources:
+        tokens = sorted(set(re.findall(r"__[A-Z0-9_]+__", src)))
+        unknown = [token for token in tokens if token not in _JS_PLACEHOLDERS]
+        assert not unknown, (name, unknown)
+        # `fill` refuses an unfilled placeholder and an unknown name, so this
+        # is the same assembly a verb does at call time
+        filled = dom.fill(
+            src, **{token.strip("_").lower(): _JS_PLACEHOLDERS[token]
+                    for token in tokens})
+        proc = subprocess.run(
+            ["node", "-e",
+             "new Function(require('fs').readFileSync(0,'utf8'))"],
+            input=filled, capture_output=True, text=True, check=False)
+        assert proc.returncode == 0, (name, proc.stderr[-400:])
 
 
 def t_cli_dispatch() -> None:
@@ -1027,20 +1100,67 @@ def t_dom_shape_filters() -> None:
         [{"tag": "a", "box": [1, 2, 3, 4]}, {"tag": "a"}, "nope", None,
          {"box": [0, 0, 0, 0]}], ("tag", "box"))
     assert rows == [{"tag": "a", "box": [1, 2, 3, 4]}], rows
-    assert dom._int("12") == 12                              # noqa: SLF001
-    assert dom._int("x", 7) == 7                             # noqa: SLF001
-    assert dom._int(None, 3) == 3                            # noqa: SLF001
-    # the VALUES a page supplies are shapes too: `_ints` never raises out of a
-    # verb, whatever the page answered (a review measured a TypeError)
-    assert dom._ints([1, 2, 3, 4], 2) == [1, 2]              # noqa: SLF001
-    assert dom._ints(["2", 3]) == [2, 3]                     # noqa: SLF001
+    assert coerce_lib.as_int("12") == 12
+    assert coerce_lib.as_int("x", 7) == 7
+    assert coerce_lib.as_int(None, 3) == 3
+    # the VALUES a page supplies are shapes too: `as_ints` never raises out of
+    # a verb, whatever the page answered (a review measured a TypeError)
+    assert coerce_lib.as_ints([1, 2, 3, 4], 2) == [1, 2]
+    assert coerce_lib.as_ints(["2", 3]) == [2, 3]
     for bad in (7, None, "12", {"a": 1}, object()):
-        assert dom._ints(bad) == [], bad                      # noqa: SLF001
+        assert coerce_lib.as_ints(bad) == [], bad
     # the placeholder check has to be one that CAN fail: `"x" not in
     # expr.replace("x", "")` is a tautology (a review caught it)
     assert dom.FIND_EXPR.count("__SELECTOR__") == 1          # noqa: SLF001
     for placeholder in ("__MODE__", "__NEEDLE__", "__SELECTOR__", "__CAP__"):
         assert placeholder in dom.FIND_EXPR                  # noqa: SLF001
+
+
+def t_a_fractional_page_number_is_a_number() -> None:
+    """A page whose viewport is FRACTIONAL has a viewport.
+
+    `window.innerWidth` is `1280.5` on a page whose zoom is not 100%, and
+    `int(str(1280.5))` raises — so the whole value fell to the caller's
+    default: `tab find`/`scroll`/`click`/`hover` refused a page that has a
+    viewport as a "windowless or never-shown browser", `tab text` REPORTED
+    `[0, 0]` and `tab screenshot` refused on 0 px. The number was in another
+    spelling, not another kind of value; what is not a number at all — a
+    name, an empty string, a `None`, a boolean, `nan`, `inf` — is still the
+    caller's default. Both ends are pinned: the page's own rounding (so the
+    common case never depends on the parse) and the parse itself.
+    """
+    assert coerce_lib.as_int("1280.5") == 1280
+    assert coerce_lib.as_int(1280.5) == 1280
+    assert coerce_lib.as_int(" 812 ") == 812
+    assert coerce_lib.as_int("1e3") == 1000
+    assert coerce_lib.as_int("812.0") == 812
+    assert coerce_lib.as_int(-5) == -5
+    assert coerce_lib.as_int(0) == 0
+    for not_a_number in (None, "", "abc", "12abc", True, False,
+                         "nan", "inf", "-inf", float("nan"),
+                         float("inf")):
+        assert coerce_lib.as_int(not_a_number) == 0, not_a_number
+        assert coerce_lib.as_int(not_a_number, 7) == 7, not_a_number
+    # the pair the page reports together: both halves read, neither defaulted
+    assert coerce_lib.as_ints([1280.5, 812.0]) == [1280, 812]
+    assert coerce_lib.as_ints(["1280.5", "812.0"]) == [1280, 812]
+    # `as_float` is Python's own float parse, so a fractional ratio is exact
+    assert coerce_lib.as_float("1.25") == 1.25
+    assert coerce_lib.as_float(1.25) == 1.25
+    assert coerce_lib.as_float(None, 1.0) == 1.0
+    assert coerce_lib.as_float("abc", 1.0) == 1.0
+    # its `nan`/`inf` pass through as they are: `screenshot` checks
+    # `math.isfinite` on the ratio, and a silent default would have hidden a
+    # page that claims an impossible one
+    assert math.isnan(coerce_lib.as_float("nan"))
+    assert math.isinf(coerce_lib.as_float("inf"))
+    # the SOURCE rounds: the viewport the page sends is two integers, so the
+    # parse above is the second line of defence rather than the only one
+    assert "viewport: [Math.round(vw), Math.round(vh)]" in dom.FIND_EXPR
+    assert "Math.round(window.innerWidth)" in dom.TEXT_EXPR
+    assert "iw: Math.round(innerWidth)" in dom.SHOT_METRICS
+    assert "dpr: devicePixelRatio" in dom.SHOT_METRICS, \
+        "the ratio is deliberately NOT rounded"
 
 
 def t_cli_click_scroll_grammar() -> None:
@@ -1405,9 +1525,9 @@ def t_media_verdict() -> None:
     why = dom._playback_verdict("play", {"time": 0.0},             # noqa: SLF001
                                 {"time": 0.0, "ready_state": 0})
     assert "nothing to play" in why[1], why
-    assert dom._num("1.5") == 1.5                                # noqa: SLF001
-    assert dom._num("nope", 2.0) == 2.0                         # noqa: SLF001
-    assert dom._num(None, 3.0) == 3.0                            # noqa: SLF001
+    assert coerce_lib.as_float("1.5") == 1.5
+    assert coerce_lib.as_float("nope", 2.0) == 2.0
+    assert coerce_lib.as_float(None, 3.0) == 3.0
 
 
 def t_cli_media_grammar() -> None:
@@ -1528,6 +1648,83 @@ def t_cli_argv_is_strict() -> None:
     finally:
         (browser.launch, browser.new_tab, browser.close_tabs,
          browser.stop) = originals              # type: ignore[assignment]
+
+
+def t_argv_readers_live_in_lib() -> None:
+    """The token readers live in `lib`; the plugin seam never imports the CLI.
+
+    `plugin_api` aliased `browser_control.cli.argv._pop` — an arrow from the
+    library layer into the CLI adapter — so a third-party plugin depended on a
+    PRIVATE cli name, and nothing pinned it. The readers moved to
+    `browser_control.lib.argv`; this module's `cli.argv` re-exports every name
+    (underscore ones included) as the SAME object, so no call site moved and
+    `plugin_api` now reaches `lib`.
+    """
+    for name in ("_scan", "_pop", "_switch", "_int", "_float", "_text_arg",
+                 "_no_flags", "_one_text_at_most", "_twice"):
+        assert getattr(cli_argv, name) is getattr(argv_lib, name), name
+    # the seam is BELOW the CLI: importing `plugin_api` pulls in no adapter
+    # module and hands out the LIB readers, so a rename or a move under
+    # `cli.argv` cannot reach a plugin at all. The suite imports `cli.main`
+    # itself, and the plugin checks patch the seam's verb bindings, so this
+    # runs in a fresh process instead of importing `plugin_api` here.
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = (
+        "import browser_control.plugin_api as p, browser_control.lib.argv as a,"
+        " sys; print(p.pop is a._pop, p.switch is a._switch,"
+        " p.int_arg is a._int, p.float_arg is a._float,"
+        " p.text_arg is a._text_arg,"
+        " 'browser_control.cli' in sys.modules)")
+    proc = subprocess.run([sys.executable, "-c", code], cwd=repo,
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "True True True True True False", proc.stdout
+
+
+def t_unknown_flag_is_reported_first() -> None:
+    """The unknown-flag scan is ONE rule, and it speaks before arity.
+
+    `_one`, `_needle`, `_urls`, `_text_arg` and `_none` each retyped the scan
+    and its message; they now report through `_no_flags`, and the ORDER is the
+    contract: a flag-shaped token is named AS a flag even when the same argv
+    also has too many positionals. Both halves are pinned, so a reordered edit
+    fails here.
+    """
+    def said(fn: Callable[[], object]) -> str:
+        try:
+            fn()
+        except ControlError as e:
+            return e.message
+        raise AssertionError("expected a refusal")
+
+    # the flag is named, not the arity, even when both are wrong
+    for call in (lambda: cli_argv._one(["-x", "a"], "verb"),
+                 lambda: cli_argv._needle(["-x", "a"], "verb"),
+                 lambda: cli_argv._urls(["-x", "a"], "verb"),
+                 lambda: cli_argv._text_arg(["-x", "a"], "verb")):
+        assert said(call) == "verb: unknown flag '-x'", call
+    # ...and each reader's own rule, in its own words
+    assert said(lambda: cli_argv._one(["a", "b"], "verb")) == \
+        "verb: one argument at most, got 2"
+    assert said(lambda: cli_argv._one([], "verb", required=True)).startswith(
+        "verb: a TAB spec is required")
+    assert said(lambda: cli_argv._one([""], "verb")) == \
+        "verb: an empty argument is not a value"
+    assert said(lambda: cli_argv._needle(["a", "b"], "verb")) == \
+        "verb: one TEXT at most, got 2 — quote it if it has spaces"
+    assert said(lambda: cli_argv._text_arg([], "verb")) == \
+        "verb: TEXT is required"
+    assert said(lambda: cli_argv._text_arg(["a", "b"], "verb")) == \
+        "verb: one TEXT at most, got 2 — quote it if it has spaces"
+    assert said(lambda: cli_argv._none(["a"], "verb")) == \
+        "verb: takes no arguments, got 'a'"
+    # `_none`'s scan is now the shared one, so a flag reaches it AS a flag —
+    # the one message the dedup changes (a non-flag arg is unchanged above)
+    assert said(lambda: cli_argv._none(["-x"], "verb")) == \
+        "verb: unknown flag '-x'"
+    assert argv_lib._no_flags(["a"], "verb") == ["a"]
+    assert said(lambda: argv_lib._no_flags(["-x", "a"], "verb")) == \
+        "verb: unknown flag '-x'"
 
 
 def t_selftest() -> None:
@@ -1798,6 +1995,52 @@ def t_lock_lives_outside_the_wiped_profile() -> None:
                     raise AssertionError("the lock was taken after the wipe")
             except ControlError as e:
                 assert e.code == "profile-busy", e
+    finally:
+        _restore_root(keep_root)
+
+
+def t_lock_names_are_injective() -> None:
+    """Two profiles never share one lock file, and a lock never lives inside
+    the profile it protects.
+
+    The name used to fold `os.sep` to `__`, which is not injective:
+    `<root>/a/b` and a profile LITERALLY named `<root>/a__b` produced one lock
+    file, so two instances contended on it and the loser was refused
+    `profile-busy` naming a holder that was running against a different
+    profile. A path outside the root that was too long for NAME_MAX degraded
+    further — the lock could not be opened at all and the caller ran UNLOCKED.
+    The digest of the profile key makes the map injective and bounds the name;
+    the readable tail keeps a name on disk saying which profile it belongs to.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        nested = os.path.join(root, "a", "b")
+        flat = os.path.join(root, "a__b")
+        # the exact pair the old fold collided: one lock file, two profiles
+        assert paths_lib.lock_path(nested) != paths_lib.lock_path(flat), \
+            (paths_lib.lock_path(nested), paths_lib.lock_path(flat))
+        names = [paths_lib.lock_path(path) for path in (
+            root, nested, flat, os.path.join(root, "a", "b", "c"),
+            os.path.join(root, "chrome"), os.path.join(root, "a", "chrome"),
+            os.path.join(root, "chrome__"),
+            os.path.join(tempfile.gettempdir(), "outside", "profile"))]
+        assert len(set(names)) == len(names), names
+        # a name a filesystem always takes, kept readable and OUTSIDE every
+        # tree it protects (the property `profile reset` depends on)
+        for name in names:
+            assert os.path.dirname(name) == os.path.join(root, ".locks"), name
+            assert not name.startswith(nested + os.sep), name
+            assert name.endswith(".lock"), name
+            assert len(os.path.basename(name)) <= 255, name
+        deep = os.path.join("/", *["d" * 200] * 4, "profile")
+        long_lock = paths_lib.lock_path(deep)
+        assert os.path.dirname(long_lock) == os.path.join(root, ".locks")
+        assert len(os.path.basename(long_lock)) <= 255, len(long_lock)
+        assert not long_lock.startswith(deep + os.sep), long_lock
+        # the readable part survives, so a name on disk still names a profile
+        assert os.path.basename(paths_lib.lock_path(nested)).startswith("a_b.")
     finally:
         _restore_root(keep_root)
 
@@ -2554,6 +2797,161 @@ def t_http_read_never_uses_a_proxy() -> None:
         server.server_close()
 
 
+def t_cdp_read_carries_its_reader_outcome() -> None:
+    """The HTTP read's outcome is DECIDED, not guessed from an empty body.
+
+    Two failures used to arrive as one wrong answer. A reader that died
+    mid-body (a reset, a peer that hangs up early) left the chunk list empty,
+    so `b""` was parsed as the body and the endpoint was refused `cdp-error` —
+    "answered no JSON" — for never having answered at all; callers branch on
+    that class (`readback._require_tab_list_readable` separates a malformed
+    body from a dead endpoint). And the reader's own exception had nowhere to
+    go but `threading.excepthook`: a raw traceback on stderr, which breaks the
+    CLI's `ERR[code]: message`-and-nothing-else contract.
+    """
+    # the decision, for both outcomes and for a body that arrived
+    assert cdp._read_outcome("u", [b"{}"], [], False) == b"{}"   # noqa: SLF001
+    cases: list[tuple[list[bytes], list[BaseException], bool, str]] = [
+        ([], [], True, "did not finish answering"),
+        ([], [ConnectionResetError("reset mid-body")], False,
+         "reset mid-body"),
+    ]
+    for chunks_in, errors_in, timed_out, needle in cases:
+        try:
+            cdp._read_outcome("http://127.0.0.1:1/json", chunks_in,  # noqa: SLF001
+                              errors_in, timed_out)
+            raise AssertionError(f"{needle}: expected ERR[cdp-unreachable]")
+        except ControlError as e:
+            assert e.code == "cdp-unreachable", e
+            assert needle in e.message, e.message
+    # the thread target RECORDS instead of raising, which is what keeps its
+    # exception off stderr — asserted through the hook it would have hit
+    class BrokenReader:
+        def read(self, size: int) -> bytes:
+            raise ValueError("read of closed file")
+
+    chunks: list[bytes] = []
+    errors: list[BaseException] = []
+    caught: list[object] = []
+    hook = threading.excepthook
+    threading.excepthook = lambda args: caught.append(args)  # type: ignore[assignment]
+    try:
+        reader = threading.Thread(target=cdp._read_body,  # noqa: SLF001
+                                  args=(BrokenReader(), chunks, errors))
+        reader.start()
+        reader.join()
+    finally:
+        threading.excepthook = hook                           # type: ignore[assignment]
+    assert chunks == [] and len(errors) == 1, (chunks, errors)
+    assert isinstance(errors[0], ValueError), errors
+    assert caught == [], caught          # nothing surfaced as a raw traceback
+    # end to end: a reader that dies mid-body is UNREACHABLE, not "answered no
+    # JSON" — the class callers branch on — and the refusal says why
+    class Resetting:
+        """A response whose body cannot be read at all."""
+        def read(self, size: int) -> bytes:
+            raise ConnectionResetError("connection reset by peer")
+
+        def __enter__(self) -> "Resetting":
+            return self
+
+        def __exit__(self, exc_type: object, exc_value: object,
+                     traceback: object) -> bool:
+            return False
+
+    class ResettingOpener:
+        def open(self, url: str, timeout: int = 0) -> Resetting:
+            return Resetting()
+
+    real_build = endpoint_lib.urllib.request.build_opener
+    endpoint_lib.urllib.request.build_opener = \
+        lambda *a, **k: ResettingOpener()                    # type: ignore[assignment]
+    threading.excepthook = lambda args: caught.append(args)  # type: ignore[assignment]
+    try:
+        try:
+            cdp._get_bytes("http://127.0.0.1:1/json")        # noqa: SLF001
+            raise AssertionError("expected ERR[cdp-unreachable]")
+        except ControlError as e:
+            assert e.code == "cdp-unreachable", e
+            assert "connection reset by peer" in e.message, e.message
+            assert "no JSON" not in e.message, e.message
+    finally:
+        threading.excepthook = hook                           # type: ignore[assignment]
+        endpoint_lib.urllib.request.build_opener = real_build
+    assert caught == [], caught
+
+
+def t_cdp_read_deadline_refuses_without_a_traceback() -> None:
+    """A read that never finishes is `cdp-unreachable` — and its abandonment
+    is SILENT.
+
+    The reader thread cannot be cancelled, so the deadline has to fail
+    WITHOUT leaving the thread's exception to `threading.excepthook` (a raw
+    traceback on stderr, against the CLI's `ERR[code]: message`-only
+    contract) and without the caller's `fail()` unwinding THROUGH the
+    response the reader is still in: the refusal is built after the response
+    is closed, so what the abandoned reader then hits is recorded, not
+    printed. `GET_DEADLINE_S` keeps its meaning — the total time ONE answer
+    may take — and is shortened here so the suite does not spend it.
+    """
+    release = threading.Event()
+    unwound = threading.Event()
+    caught: list[object] = []
+    hook = threading.excepthook
+    real_build = endpoint_lib.urllib.request.build_opener
+    real_deadline = endpoint_lib.GET_DEADLINE_S
+
+    class Blocking:
+        """A body that never arrives, then fails like a closed response."""
+        def read(self, size: int) -> bytes:
+            release.wait(5.0)
+            try:
+                raise ValueError("read of closed file")   # what close() caused
+            finally:
+                unwound.set()
+
+        def __enter__(self) -> "Blocking":
+            return self
+
+        def __exit__(self, exc_type: object, exc_value: object,
+                     traceback: object) -> bool:
+            return False
+
+    class BlockingOpener:
+        def open(self, url: str, timeout: int = 0) -> Blocking:
+            return Blocking()
+
+    endpoint_lib.urllib.request.build_opener = \
+        lambda *a, **k: BlockingOpener()             # type: ignore[assignment]
+    endpoint_lib.GET_DEADLINE_S = 0.2
+    threading.excepthook = lambda args: caught.append(args)  # type: ignore[assignment]
+    running = set(threading.enumerate())
+    try:
+        try:
+            cdp._get_bytes("http://127.0.0.1:1/json")        # noqa: SLF001
+            raise AssertionError("expected ERR[cdp-unreachable]")
+        except ControlError as e:
+            assert e.code == "cdp-unreachable", e
+            assert "did not finish answering within 0.2s" in e.message, \
+                e.message
+    finally:
+        release.set()                                        # let it go
+        endpoint_lib.urllib.request.build_opener = real_build
+        endpoint_lib.GET_DEADLINE_S = real_deadline
+    try:
+        assert unwound.wait(2.0), "the reader never unwound"
+        # the hook is invoked BEFORE a thread leaves `enumerate`, so waiting
+        # for the reader to disappear also waits for the traceback there was
+        # to be — a sleep would only have raced it
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and any(
+                t not in running for t in threading.enumerate()):
+            time.sleep(0.02)
+        assert caught == [], caught
+    finally:
+        threading.excepthook = hook                           # type: ignore[assignment]
+
+
 def t_transport_typed_refusals() -> None:
     """A malformed endpoint URL is `cdp-not-local`, not a raw ValueError."""
     refusal(lambda: cdp._checked_ws("ws://[::1/x"), "cdp-not-local")
@@ -2622,6 +3020,140 @@ def t_wait_own_port_requires_a_verified_owner() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def t_census_survives_a_dying_endpoint() -> None:
+    """One browser that dies mid-census must not take the census down.
+
+    `browsers()` probes each endpoint (`cdp.answers`) and then reads `/json`
+    for the page count. That SECOND GET was unguarded, so a browser that
+    exited — or whose `/json` stalled past `GET_DEADLINE_S` — between the two
+    raised `cdp-unreachable` straight out of the census: `list`, and every
+    shared resolver behind it (`_drivable`, `tabs_of`, `resolve_across`,
+    `attachments`, `Instance.live_pid`), answered `ERR[...]` with no rows at
+    all instead of the machine it actually observed. A census row is a
+    REPORT, not a gate: a count that could not be read is `tabs: null` with
+    the reason, exactly as the tolerant `tabs_of` reports it.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    alive = os.path.join(root, "alive")
+    dying = os.path.join(root, "dying")
+    os.makedirs(alive)
+    os.makedirs(dying)
+    originals = (machine_lib.main_processes, cdp.answers, cdp.page_rows_at,
+                 cdp.version_at, browser.endpoint_owner)
+
+    def processes() -> list[tuple[int, str, str]]:
+        return [(11, "chrome", f"chrome\0--user-data-dir={alive}"
+                                f"\0--remote-debugging-port=1111"),
+                (22, "chrome", f"chrome\0--user-data-dir={dying}"
+                                f"\0--remote-debugging-port=2222")]
+
+    def page_rows_at(port: int) -> list[dict]:
+        if port == 2222:
+            raise ControlError("cdp-unreachable",
+                               "the endpoint stopped answering")
+        return [{"type": "page", "id": "A", "title": "t",
+                 "url": "https://a/"}]
+
+    machine_lib.main_processes = processes             # type: ignore[assignment]
+    cdp.answers = lambda port: bool(port)              # type: ignore[assignment]
+    cdp.page_rows_at = page_rows_at                    # type: ignore[assignment]
+    cdp.version_at = lambda port: {}                   # type: ignore[assignment]
+    browser.endpoint_owner = (                         # type: ignore[assignment]
+        lambda profile, port: {"verified": True, "pid": 11 if port == 1111
+                               else 22, "exe": "chrome", "reason": ""})
+    try:
+        rows = browser.browsers()
+        assert len(rows) == 2, rows                 # every row, not a refusal
+        by_pid = {row["pid"]: row for row in rows}
+        assert by_pid[11]["cdp"]["tabs"] == 1, by_pid[11]
+        assert by_pid[22]["cdp"]["tabs"] is None, by_pid[22]
+        assert by_pid[22]["cdp"]["verified"] is True, by_pid[22]
+        assert "stopped answering" in by_pid[22]["cdp"]["reason"], by_pid[22]
+        # a `None` count is not a claim of absence: the projection drops the
+        # key rather than reporting a number nobody read
+        endpoint = browser.Endpoint.from_dict(by_pid[22]["cdp"])
+        assert endpoint.tabs is None, endpoint
+        assert "tabs" not in endpoint.as_reply(), endpoint.as_reply()
+        assert browser.Endpoint.from_dict(by_pid[11]["cdp"]).tabs == 1
+        assert browser._endpoint_details(by_pid[22])["tabs"] is None
+        # and the verb that reports the machine answers with the rows it saw
+        listed = browser.list_browsers()
+        assert listed["count"] == 2 and listed["drivable"] == 2, listed
+        assert json.dumps(listed)                    # the wire format carries it
+    finally:
+        (machine_lib.main_processes, cdp.answers, cdp.page_rows_at,
+         cdp.version_at, browser.endpoint_owner) = originals  # type: ignore[assignment]
+        _restore_root(keep_root)
+
+
+def t_a_failed_open_stops_what_it_started() -> None:
+    """A start that never comes up must not leave a browser holding the
+    profile.
+
+    `spawn` runs the browser in its own SESSION, so a failed `open` used to
+    leave a live process the refusal never mentioned. The caller's natural
+    retry then found no endpoint and no owner, concluded "nothing running",
+    and spawned a SECOND browser on one profile — with Chrome's own process
+    singleton the only thing in the way, which is exactly the third-party
+    guarantee the profile lock exists to replace. Each post-spawn failure
+    stops what this call started (SIGTERM, the signal `close` sends), clears
+    the pid record the way `close` clears it, and names the pid.
+
+    The process is a REAL one (`sys.executable` asleep for a minute) so the
+    SIGTERM, the bounded wait for its death and the pid record are all
+    exercised as they are; only the browser is faked.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    profile = os.path.join(root, "chrome")
+    os.makedirs(profile)
+    originals = (lifecycle_lib.binary, lifecycle_lib.instance_dir,
+                 lifecycle_lib.spawn, browser._await_owner,
+                 browser._wait_own_port, browser._wait_url)
+    lifecycle_lib.binary = lambda name="": "/nonexistent/chrome"
+    lifecycle_lib.instance_dir = lambda path: profile
+    browser._await_owner = lambda profile, port: {}   # type: ignore[assignment]
+    try:
+        for which, code in (("port", "launch-failed"),
+                            ("url", "no-page-tab")):
+            child = subprocess.Popen([sys.executable, "-c",
+                                      "import time; time.sleep(60)"])
+            lifecycle_lib.spawn = lambda argv: child.pid  # type: ignore[assignment]
+            # the record this call writes, made explicit so "it was cleared"
+            # is a fact about a file that was certainly there
+            Path(profile, paths_lib.PID_FILE).write_text(str(child.pid),
+                                                         encoding="utf-8")
+            browser._wait_own_port = (               # type: ignore[assignment]
+                lambda profile, timeout=0: which != "port")
+            browser._wait_url = (                    # type: ignore[assignment]
+                lambda profile, url, timeout=0: None)
+            try:
+                try:
+                    browser.launch(["about:blank"])
+                    raise AssertionError(f"{which}: expected ERR[{code}]")
+                except ControlError as e:
+                    assert e.code == code, e
+                    assert f"pid {child.pid}" in e.message, e.message
+                    assert "stopped again" in e.message, e.message
+                assert not os.path.exists(paths_lib.pid_file(profile)), \
+                    "the pid record outlived the failed start"
+                assert not browser._pid_alive(child.pid), \
+                    "the browser this call started is still running"
+            finally:
+                with contextlib.suppress(OSError):
+                    child.kill()
+                child.wait()
+    finally:
+        (lifecycle_lib.binary, lifecycle_lib.instance_dir,
+         lifecycle_lib.spawn, browser._await_owner,
+         browser._wait_own_port,
+         browser._wait_url) = originals               # type: ignore[assignment]
+        _restore_root(keep_root)
 
 
 def t_tab_count_does_not_refuse_on_a_stranger() -> None:
@@ -2981,7 +3513,7 @@ def t_reset_guard_counts_skipped_content() -> None:
 
 def t_screenshot_rules_and_symlinks() -> None:
     """A relative screenshot path is refused; the temp name is O_NOFOLLOW."""
-    refusal(lambda: dom._shot_target("shot.png"), "bad-args")
+    refusal(lambda: images_lib.output_path("shot.png"), "bad-args")
     with tempfile.TemporaryDirectory() as tmp:
         victim = os.path.join(tmp, "victim")
         Path(victim).write_bytes(b"keep")
@@ -2990,17 +3522,17 @@ def t_screenshot_rules_and_symlinks() -> None:
         with contextlib.suppress(ControlError):
             # the refusal is the fix's answer; a success is checked below by
             # the victim's bytes, which must not move either way
-            dom._write_shot(target, b"\x89PNG\r\n\x1a\n", force=True)
+            images_lib.write_atomic(target, b"\x89PNG\r\n\x1a\n", force=True)
         assert Path(victim).read_bytes() == b"keep", \
             "the write followed a planted symlink"
 
 
 def t_page_lists_are_guarded() -> None:
     """`tab select` slices page answers only when they ARE lists."""
-    assert dom._list(["a", "b"]) == ["a", "b"]
-    assert dom._list(7) == []
-    assert dom._list({"labels": []}) == []
-    assert dom._list(None) == []
+    assert coerce_lib.as_list(["a", "b"]) == ["a", "b"]
+    assert coerce_lib.as_list(7) == []
+    assert coerce_lib.as_list({"labels": []}) == []
+    assert coerce_lib.as_list(None) == []
 
 
 def t_cli_flag_hardening() -> None:
@@ -3260,6 +3792,46 @@ def t_plugin_system() -> None:
         assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
 
 
+def t_plugin_seam_hands_out_the_core_readers() -> None:
+    """`api: 1` covers the positional and numeric readers, not just flags.
+
+    The seam handed out only `pop`/`switch`, so both bundled plugins
+    hand-rolled the same query/number grammar — and the refusals diverged from
+    the core's. `text_arg`/`int_arg`/`float_arg` are on the seam now and the
+    plugins' own `_number` copies are gone, so the messages below are the ones
+    a built-in verb gives.
+    """
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    for name in ("int_arg", "float_arg", "text_arg"):
+        assert name in plugin_api.__all__, plugin_api.__all__
+    assert plugin_api.int_arg is argv_lib._int
+    assert plugin_api.float_arg is argv_lib._float
+    assert plugin_api.text_arg is argv_lib._text_arg
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for plugin in ("google_search.py", "x_reader.py"):
+        source = Path(repo, "plugins", plugin).read_text(encoding="utf-8")
+        assert "def _number" not in source, plugin
+    # the refusals are the core's, and they land in argv before any browser:
+    # a missing query and a repeated one never reach `nav`
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    try:
+        for argv, phrase in (
+                (["google", "search"], "google search: TEXT is required"),
+                (["google", "search", "a", "b"],
+                 "google search: one TEXT at most, got 2"),
+                (["x", "search"], "x search: TEXT is required")):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
+    finally:
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
 def t_x_plugin_offline() -> None:
     """The X plugin builds the Latest URL and maps rows to posts."""
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -3308,10 +3880,21 @@ def t_x_plugin_offline() -> None:
             "time": "2026-09-20T07:37:24.000Z", "text": "first"}, data
         assert navs and "f=live" in navs[0][0], navs
         assert "Pardon%20Snowden" in navs[0][0], navs
-        rc, _out, err = run_cli(["x", "search"])
-        assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
-        rc, _out, err = run_cli(["x", "search", "q", "--latest", "--top"])
-        assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+        # the refusals are the CORE's readers now (`text_arg`, `int_arg`), so
+        # their messages are the ones a built-in verb gives
+        for argv, phrase in (
+                (["x", "search"], "x search: TEXT is required"),
+                (["x", "search", "a", "b"],
+                 "x search: one TEXT at most, got 2"),
+                (["x", "search", "q", "--latest", "--top"],
+                 "--latest and --top are two sorts"),
+                (["x", "search", "q", "--chars", "0"],
+                 "--chars must be at least 1, got 0"),
+                (["x", "search", "q", "--cap", "nope"],
+                 "--cap needs a number, got 'nope'")):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
     finally:
         browser.nav = real_nav                    # type: ignore[assignment]
         dom.wait = real_wait                      # type: ignore[assignment]
@@ -3412,11 +3995,19 @@ def t_google_plugin_offline() -> None:
         assert rc == 0, (rc, err)
         assert calls["type"] == [("q", 0.1)], calls
         assert json.loads(out)["typing"]["wpm"] == 120, out
-        # the refusals: no query, two queries, a cadence of zero
-        for argv in (["google", "search"], ["google", "search", "a", "b"],
-                     ["google", "search", "q", "--wpm", "0"]):
+        # the refusals are the CORE's readers now (`text_arg`, `int_arg`), so
+        # their messages are the ones a built-in verb gives
+        for argv, phrase in (
+                (["google", "search"], "google search: TEXT is required"),
+                (["google", "search", "a", "b"],
+                 "google search: one TEXT at most, got 2"),
+                (["google", "search", "q", "--wpm", "0"],
+                 "--wpm must be at least 1, got 0"),
+                (["google", "search", "q", "--cap", "nope"],
+                 "--cap needs a number, got 'nope'")):
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
         # the declared classes are enforceable, not decorative
         rc, _out, err = run_cli(["--deny", "write", "google", "search", "q"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
@@ -3484,6 +4075,585 @@ def t_error_codes_are_registered() -> None:
         sorted(registered ^ set(errors.CODES))
 
 
+def t_audit_log_refuses_a_symlink() -> None:
+    """The action-log writer follows neither a symlink nor a non-regular file.
+
+    `O_NOFOLLOW` is the guard every sibling writer carries (`proc`, `images`,
+    `attachments`, `locks`); this one did not, so a symlink at
+    `BROWSER_CONTROL_LOG` had every line appended to whatever it pointed at and
+    the target `fchmod`ed 0600 (CWE-377). A path refused this way falls back to
+    the private scratch log, exactly like a path that cannot be opened, and the
+    target keeps its bytes and mode.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        victim = os.path.join(tmp, "victim")
+        Path(victim).write_text("keep\n", encoding="utf-8")
+        before = stat.S_IMODE(os.stat(victim).st_mode)
+        path = os.path.join(tmp, "actions.jsonl")
+        os.symlink(victim, path)
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            audit.LOG.begin()
+            audit.LOG.write(action="tab", args=["x"])
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+            audit.LOG.begin()
+        # the writer refused the link: the target's bytes and mode are untouched
+        assert Path(victim).read_text(encoding="utf-8") == "keep\n"
+        assert stat.S_IMODE(os.stat(victim).st_mode) == before
+        with open(os.path.join(audit.scratch_dir(), "actions.jsonl"),
+                  encoding="utf-8") as handle:
+            assert json.loads(handle.read().splitlines()[-1])["action"] == "tab"
+    # a NON-regular file at the path is refused too: /dev/null opens fine as a
+    # character device, and the fstat guard sends the line to the scratch log
+    os.environ["BROWSER_CONTROL_LOG"] = "/dev/null"
+    try:
+        audit.LOG.begin()
+        audit.LOG.write(action="open", args=["y"])
+    finally:
+        os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+        audit.LOG.begin()
+    with open(os.path.join(audit.scratch_dir(), "actions.jsonl"),
+              encoding="utf-8") as handle:
+        assert json.loads(handle.read().splitlines()[-1])["action"] == "open"
+
+
+def t_open_refuses_a_symlinked_profile() -> None:
+    """`open --profile <link>` is refused, like every other profile verb.
+
+    `is_managed` compares REAL paths, so a link inside the root pointing at
+    another directory inside the root passed it — while the lock and pid
+    records key by the LEXICAL spelling, so the link and its target took
+    different locks and `open` could start a second browser on the one real
+    directory (a review flagged the split, vs the refusal `Instance` already
+    applies).
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        real = os.path.join(root, "real")
+        os.makedirs(real)
+        link = os.path.join(root, "link")
+        os.symlink(real, link)
+        assert paths_lib.is_managed(link), \
+            "setup: the link must look managed by real path"
+        browser.scope(link)
+        try:
+            refusal(lambda: lifecycle_lib.instance_dir("/usr/bin/chrome"),
+                    "not-managed")
+            # the real directory itself is still accepted
+            browser.scope(real)
+            assert lifecycle_lib.instance_dir("/usr/bin/chrome") == real
+        finally:
+            browser.scope("")
+    finally:
+        _restore_root(keep_root)
+
+
+def t_managed_root_is_created_0700() -> None:
+    """The managed root is created 0700, never as an intermediate 0755.
+
+    `os.makedirs(<path under root>, mode=0o700)` applies the mode to the LEAF
+    only, so the root landed at the umask default (0755) whenever a verb that
+    needed a path under it ran first — disclosing the profile names it holds to
+    any local user — while `attach`, which creates the root ITSELF, left it
+    0700: the mode depended on which verb ran first (a review flagged it).
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    managed = os.path.join(root, "cdp-profiles")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = managed
+    try:
+        assert paths_lib.ensure_root() == managed
+        assert stat.S_IMODE(os.stat(managed).st_mode) == 0o700
+        # a real creator under the root goes through it: the lock a profile
+        # verb takes FIRST must leave the root 0700, not 0755
+        profile = os.path.join(managed, "google-chrome-stable")
+        with browser._lock(paths_lib.lock_path(profile),  # noqa: SLF001
+                           "open") as lock:
+            assert lock.held, lock.warning
+        assert stat.S_IMODE(os.stat(managed).st_mode) == 0o700
+    finally:
+        _restore_root(keep_root)
+
+
+def t_endpoint_must_be_loopback() -> None:
+    """The owner check reads the BIND ADDRESS, not just the port.
+
+    A listener on `0.0.0.0` or a LAN address is reachable off this machine, so
+    it is NOT the profile's own browser however it answers: the verdict is
+    unverified and the reason NAMES the exposed bind. `/proc/net/tcp` writes the
+    address little-endian (`0100007F` is 127.0.0.1, `00000000` is 0.0.0.0), and
+    `/proc/net/tcp6` is read too (`::1` is
+    `00000000000000000000000001000000`).
+    """
+    head = ("  sl  local_address rem_address   st tx_queue rx_queue tr "
+            "tm->when retrnsmt   uid  timeout inode")
+    rows = [head]
+    for index, (address, port) in enumerate(
+            (("00000000", 8080), ("0100007F", 8081),
+             ("0101A8C0", 8082),
+             ("00000000000000000000000001000000", 8083))):
+        rows.append(f" {index}: {address}:{port:04X} 00000000:0000 0A "
+                    f"{'0' * 8}:{'0' * 8} 00:00000000 00000000  1000 0 "
+                    f"{5000 + index} 1 0000 100 0 0 10")
+    table = "\n".join(rows)
+    # a loopback bind is the profile's own browser; a wide or LAN bind is not
+    assert proc_lib._tcp_listeners(table, 8081) == ({"5001"}, ""), \
+        proc_lib._tcp_listeners(table, 8081)
+    assert proc_lib._tcp_listeners(table, 8080) == (set(), "0.0.0.0:8080")
+    assert proc_lib._tcp_listeners(table, 8082) == (set(), "192.168.1.1:8082")
+    assert proc_lib._tcp_listeners(table, 8083) == ({"5003"}, "")   # ::1
+    assert proc_lib._tcp_listeners(table, 9999) == (set(), ""), "no listener"
+    # the verdict a caller sees: an exposed bind is unverified, and the reason
+    # NAMES it rather than the mundane "no process holds the port"
+    real = cdp.listener_of
+    cdp.listener_of = lambda _port: {"exposed": "0.0.0.0:8080"}  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = os.path.join(tmp, "google-chrome-stable")
+            verdict = browser.endpoint_owner(profile, 8080)
+            assert verdict["verified"] is False, verdict
+            assert verdict["pid"] == 0, verdict
+            assert "0.0.0.0:8080" in verdict["reason"], verdict
+            assert "loopback" in verdict["reason"], verdict
+    finally:
+        cdp.listener_of = real                          # type: ignore[assignment]
+
+
+def t_frame_refusal_flattens_the_url() -> None:
+    """A page-supplied iframe URL in a refusal is flattened like its siblings.
+
+    `_frame_target`'s refusals printed the frame's own `url` raw while
+    `pagedata`, `actions` and `tabs` wrap theirs in `text.foreign`: a newline or
+    terminal control sequence in a URL could forge a line in stderr or drive the
+    terminal (a consistency gap a review flagged).
+    """
+    real = dom.frames_of
+    dom.frames_of = lambda port, page, census=None: [   # type: ignore[assignment]
+        {"index": 0, "url": "https://x/\n\x1b]0;pwned\x07", "name": "",
+         "box": [], "visible": True, "same_process": True, "target": "",
+         "candidates": 0}]
+    try:
+        try:
+            dom._frame_target(1, "PAGE", "does-not-match")   # noqa: SLF001
+        except ControlError as e:
+            assert "\n" not in e.message, repr(e.message)
+            assert "\x1b" not in e.message, repr(e.message)
+            assert "\x07" not in e.message, repr(e.message)
+            assert "https://x/" in e.message, e.message
+        else:
+            raise AssertionError("a non-matching --frame was not refused")
+    finally:
+        dom.frames_of = real                            # type: ignore[assignment]
+
+
+def t_close_reply_keys_match_the_preview() -> None:
+    """`--dry` and the real close carry the SAME filter keys.
+
+    The block that says WHAT was selected (`all`/`except`/`like`/`filter`/
+    `skipped`) was written twice, once per path — so a new key could be added
+    to the preview and not the action, and the suite, which exercises each
+    path separately, would pass. The preview and the action are two halves of
+    one contract ("a caller cannot mistake a preview for an action"), so the
+    only difference allowed here is the key that names the half.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+        os.environ["BROWSER_CONTROL_ROOT"] = tmp
+        ours = os.path.join(tmp, "ours")
+        real_browsers, real_rows = browser.browsers, cdp.page_rows_at
+        real_call = cdp.browser_call
+        real_verify = browser._verify_profile_endpoint           # noqa: SLF001
+        real_gone = browser._wait_ids_gone                       # noqa: SLF001
+        tabs = [{"type": "page", "id": "AB12", "title": "t",
+                 "url": "https://a/"},
+                {"type": "page", "id": "CD34", "title": "keep",
+                 "url": "https://b/"},
+                {"type": "page", "id": "EF56", "title": "other",
+                 "url": "https://c/"}]
+        browser.browsers = lambda: [                 # type: ignore[assignment]
+            {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
+             "profile": ours, "profile_from": "flag", "managed": True,
+             "attached": False,
+             "cdp": {"port": 1616, "reachable": True, "verified": True}}]
+        cdp.page_rows_at = lambda port: list(tabs)    # type: ignore[assignment]
+        cdp.browser_call = lambda profile, method, params: {}  # type: ignore[assignment]
+        browser._verify_profile_endpoint = lambda profile: None  # type: ignore[assignment]
+        browser._wait_ids_gone = lambda profile, ids: []     # type: ignore[assignment]
+        try:
+            cases: list[tuple[dict[str, Any], dict[str, Any]]] = [
+                ({"like": ["t"]}, {"like": ["t"]}),
+                ({"all_tabs": True, "excepts": ["keep"]},
+                 {"all": True, "except": ["keep"]}),
+                ({"title": "t"},
+                 {"filter": {"title": "t", "exact": True}}),
+            ]
+            # the keys that are one half's own shape, or the preview's note:
+            # everything else a reply carries is a FILTER key, and both paths
+            # must carry the same ones
+            halves = {"ok", "dry", "would_close", "closed", "count", "note"}
+            for kwargs, expected in cases:
+                dry = browser.close_tabs([], dry=True, **kwargs)
+                real = browser.close_tabs([], **kwargs)
+                filters_dry = {k: v for k, v in dry.items() if k not in halves}
+                filters_real = {k: v for k, v in real.items()
+                                if k not in halves}
+                assert filters_dry == expected, (kwargs, dry)
+                assert filters_real == expected, (kwargs, real)
+                # only the half a reply names may differ, and the preview
+                # must name the SAME tabs the action closed
+                assert dry["would_close"] == real["closed"], (dry, real)
+                assert "closed" not in dry, dry
+                assert "would_close" not in real, real
+                assert dry["count"] == real["count"], (dry, real)
+        finally:
+            browser.browsers = real_browsers        # type: ignore[assignment]
+            cdp.page_rows_at = real_rows            # type: ignore[assignment]
+            cdp.browser_call = real_call            # type: ignore[assignment]
+            browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
+            browser._wait_ids_gone = real_gone      # type: ignore[assignment]
+            _restore_root(keep_root)
+
+
+def t_spec_matchers_share_the_id_rule_and_read_once() -> None:
+    """`id:` is ONE rule for both matchers, and one tab-list read per browser.
+
+    `_match_spec` (the general matcher) and `_exact_spec_match` (the NAMED form
+    `tab close` uses) each implemented the `id:` prefix rule — with a comment
+    that records they must stay in lockstep, because an unchecked empty prefix
+    once made `tab close id:` close the last tab on the page. Separately,
+    `_spec_matches` re-read every browser's `/json` inside its per-spec loop,
+    so M specs were M x N loopback reads where its sibling reads each browser
+    once.
+    """
+    match = browser._match_spec                                   # noqa: SLF001
+    named = browser._exact_spec_match                             # noqa: SLF001
+    tab = {"id": "AB12CD34", "title": "a", "url": "https://a/"}
+    # whatever one matcher NAMES, the other must match: that is what one rule
+    # means, in both directions
+    for spec in ("id:AB12", "id:ab12", "ID:AB12CD34", "a", "https://a/"):
+        assert named(tab, spec) is True, spec
+        assert match([tab], spec) == [tab], spec
+    for spec in ("id:FFFF", "b", "https://b/"):
+        assert named(tab, spec) is False, spec
+        assert match([tab], spec) == [], spec
+    # `id:` with no prefix names NOTHING in both: the general matcher refuses
+    # it and the exact one must not match it
+    for spec in ("id:", "id:  "):
+        assert named(tab, spec) is False, spec
+        refusal(lambda spec=spec: match([tab], spec), "bad-args")
+    with tempfile.TemporaryDirectory() as tmp:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+        os.environ["BROWSER_CONTROL_ROOT"] = tmp
+        real_browsers, real_rows = browser.browsers, cdp.page_rows_at
+        reads: list[int] = []
+        tabs_of = {1616: [{"type": "page", "id": "AB12", "title": "a",
+                           "url": "https://a/"}],
+                   1717: [{"type": "page", "id": "CD34", "title": "b",
+                           "url": "https://b/"}]}
+
+        def row(port: int, profile: str) -> dict:
+            return {"pid": port, "exe": "chrome", "path": "/usr/bin/chrome",
+                    "profile": profile, "profile_from": "flag",
+                    "managed": True, "attached": False,
+                    "cdp": {"port": port, "reachable": True,
+                            "verified": True}}
+
+        def rows() -> list[dict]:
+            return [row(1616, os.path.join(tmp, "one")),
+                    row(1717, os.path.join(tmp, "two"))]
+
+        def page_rows_at(port: int) -> list[dict]:
+            reads.append(port)
+            return tabs_of[port]
+
+        browser.browsers = rows                      # type: ignore[assignment]
+        cdp.page_rows_at = page_rows_at              # type: ignore[assignment]
+        try:
+            found, foreign = browser._spec_matches(              # noqa: SLF001
+                ["a", "b", "a"], "")
+            assert [str(t["id"]) for _r, t, _i in found] == \
+                ["AB12", "CD34"], found
+            assert foreign == [], foreign
+            # three specs, two browsers: one read each, not one per spec
+            assert reads == [1616, 1717], reads
+        finally:
+            browser.browsers = real_browsers        # type: ignore[assignment]
+            cdp.page_rows_at = real_rows            # type: ignore[assignment]
+            _restore_root(keep_root)
+
+
+def t_focus_nodes_go_through_one_helper() -> None:
+    """`select` and `focus` take the DOM focus through ONE helper.
+
+    The node-id lookup, the `DOM.focus` call and the two refusals were written
+    twice, differing only in the verb's code and one phrase — so a fix applied
+    to one copy silently changed the other verb. BOTH verbs are driven here,
+    and both verdicts are pinned byte for byte: the message is what a caller
+    reads, and the two phrases are what the copies could drift apart on.
+    """
+    from browser_control.lib.dom import actions as actions_lib  # noqa: PLC0415
+
+    element = {"tag": "input", "name": "q"}
+    row = {"pid": 1, "exe": "chrome", "profile": "/p", "managed": True}
+    tab_row = {"id": "AB12"}
+    real_target = actions_lib._target
+    real_node_of = dom._node_of                                   # noqa: SLF001
+
+    class FakeSession:
+        """A session whose `DOM.focus` answers the way the protocol does."""
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def call(self, method: str, params: dict) -> dict:
+            self.calls.append(method)
+            if method == "DOM.focus":
+                raise ControlError("cdp-error",
+                                   "Node is not focusable (code -32000)")
+            return {}
+
+        def evaluate(self, expression: str) -> dict:
+            # the probe `select` reads before it focusses: already selected it
+            # would return early, so this is one option away from the target
+            return {"is_select": True, "matched": 1, "target": 1,
+                    "selected": 0, "value": "a", "target_value": "b",
+                    "target_label": "B", "by": "value"}
+
+    session: Any = FakeSession()
+
+    @contextlib.contextmanager
+    def target(_needle: str, _css: str, _index: int | None, _tab: str,
+               _browser: str):
+        yield session, {}, element, row, tab_row
+
+    def said(fn: Callable[[], object]) -> str:
+        try:
+            fn()
+        except ControlError as e:
+            return f"{e.code}: {e.message}"
+        raise AssertionError("expected a refusal")
+
+    def claim(fn: Callable[[], object], expected: str) -> None:
+        got = said(fn)
+        assert got == expected, got
+
+    def select() -> None:
+        dom.select(selector="#q", value="x")
+
+    def focus() -> None:
+        dom.focus(selector="#q")
+
+    try:
+        actions_lib._target = target                 # type: ignore[assignment]
+        dom._node_of = lambda _session, _expr: 0     # type: ignore[assignment]
+        claim(select, "no-match: input q left the document before the choice "
+                      "could be made")
+        claim(focus, "no-match: input q left the document before the focus "
+                     "could be set")
+        # the element is there but `DOM.focus` refuses it: each verb's own
+        # code, and the phrase only the select copy carries
+        dom._node_of = lambda _session, _expr: 7     # type: ignore[assignment]
+        claim(select, "select-not-verified: input q cannot take the DOM focus, "
+                      "so the arrow keys would go elsewhere: Node is not "
+                      "focusable (code -32000)")
+        claim(focus, "focus-not-verified: input q cannot take the DOM focus: "
+                     "Node is not focusable (code -32000)")
+        assert session.calls == ["DOM.focus", "DOM.focus"], session.calls
+    finally:
+        actions_lib._target = real_target            # type: ignore[assignment]
+        dom._node_of = real_node_of                  # type: ignore[assignment]
+
+
+def t_handler_reply_must_be_a_json_object() -> None:
+    """The 'one JSON object on stdout' contract is enforced at the boundary.
+
+    `reply = handler(rest, browser)` printed whatever came back: a plugin — or
+    a built-in — returning a LIST or `None` broke the documented contract with
+    exit status 0 and no refusal a consumer could branch on.
+    """
+    keeper = registry.HANDLERS["list"]
+
+    def returns_a_list(_rest: list[str], _browser: str) -> Any:
+        return ["not", "an", "object"]
+
+    def returns_none(_rest: list[str], _browser: str) -> Any:
+        return None
+
+    try:
+        for handler, kind in ((returns_a_list, "list"),
+                              (returns_none, "NoneType")):
+            registry.HANDLERS["list"] = handler     # type: ignore[assignment]
+            rc, out, err = run_cli(["list"])
+            assert rc == 2, (rc, out, err)
+            assert out == "", out          # nothing was printed as the reply
+            assert f"ERR[internal]: list: the handler returned {kind}, " \
+                "not a JSON object" in err, (rc, err)
+    finally:
+        registry.HANDLERS["list"] = keeper         # type: ignore[assignment]
+
+
+def t_plugin_package_has_no_dead_shims() -> None:
+    """The plugin package advertises only the surface something reaches.
+
+    `Registry = PluginSet` and a module-level `load()` were kept "for one
+    release" for callers that do not exist (a tree-wide scan finds none), and
+    both rode in `__all__` — so `from …plugins import *` bound two names
+    nothing exercises and a break there would not fail anything.
+    `PluginSet.load` is still the one loader `cli.main` calls.
+    """
+    from browser_control.lib import plugins as plugins_lib  # noqa: PLC0415
+
+    assert not hasattr(plugins_lib, "Registry"), "the old class alias is back"
+    assert not hasattr(plugins_lib, "load"), "the module-level loader is back"
+    assert "Registry" not in plugins_lib.__all__, plugins_lib.__all__
+    assert "load" not in plugins_lib.__all__, plugins_lib.__all__
+    assert "PluginSet" in plugins_lib.__all__, plugins_lib.__all__
+    assert callable(plugins_lib.PluginSet.load)
+
+
+def t_dom_facade_has_no_test_only_aliases() -> None:
+    """The dom facade keeps no private spelling alive for the suite alone.
+
+    `_int`/`_num`/`_ints`/`_list`/`_png_size`/`_pixels`/`_shot_target`/
+    `_write_shot` aliased `lib.coerce` and `lib.images` for the tests (no
+    library call site used them, and the comment claimed the rest of the tree
+    did), which made a facade of ~50 names twice as hard to read as the code.
+    The suite reaches `lib.coerce`/`lib.images` directly now.
+    """
+    for gone in ("_int", "_num", "_ints", "_list", "_png_size", "_pixels",
+                 "_shot_target", "_write_shot"):
+        assert not hasattr(dom, gone), gone
+
+
+def t_invocation_globals_and_authorise() -> None:
+    """`_parse_globals` and `_authorise` are the pure decisions, one seam each.
+
+    `_run_invocation` is kept as one body because its step ORDER is contract,
+    so the two PURE decisions moved out of it must keep the behaviour that
+    order depended on: an empty `--browser`/`--profile` is refused before any
+    scope is set, and the gate reads the action a verb and subcommand DECLARE.
+    """
+    # the name-valued globals, and the empty-value refusal they own
+    assert cli_main._parse_globals(                              # noqa: SLF001
+        {"browser": None, "profile": None, "frame": None}) == {
+            "browser": "", "profile": "", "frame": ""}
+    assert cli_main._parse_globals(                              # noqa: SLF001
+        {"browser": "brave", "profile": "/p", "frame": "1"}) == {
+            "browser": "brave", "profile": "/p", "frame": "1"}
+    for bad in ({"browser": "", "profile": None, "frame": None},
+                {"browser": None, "profile": "  ", "frame": None}):
+        refusal(lambda bad=bad: cli_main._parse_globals(bad), "bad-args")
+    # `selftest` is never gated, and a `--frame` that cannot apply refuses
+    cli_main._authorise("selftest", [], {"frame": "1"})           # noqa: SLF001
+    refusal(lambda: cli_main._authorise("open", [], {"frame": "1"}),
+            "bad-args")
+    # the gate reads the DECLARED action: `tab js` holds `code`
+    keep = registry.POLICY
+    registry.POLICY = policy_lib.Policy.from_sources(deny="code")
+    try:
+        refusal(lambda: cli_main._authorise("tab", ["js", "1"],
+                                            {"frame": None}), "not-allowed")
+        cli_main._authorise("tab", ["text"], {"frame": None})    # noqa: SLF001
+    finally:
+        registry.POLICY = keep
+
+
+def t_close_resolve_and_verify_seam() -> None:
+    """`tab close` resolves the whole set BEFORE it closes anything.
+
+    The resolution (`_resolve_close_set`) and the close-and-read-back
+    (`_close_and_verify`) are the two halves of one contract: a bad argument
+    or an unmatched `--except` must leave nothing half-closed, and a survivor
+    must be a refusal. The extraction split them, so this pins each half on
+    its own — resolution answers `(ours, skipped, filter_used)` and touches no
+    browser, and the close signals only the ids it was handed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+        os.environ["BROWSER_CONTROL_ROOT"] = tmp
+        ours = os.path.join(tmp, "ours")
+        real_browsers, real_rows = browser.browsers, cdp.page_rows_at
+        real_call = cdp.browser_call
+        real_verify = browser._verify_profile_endpoint           # noqa: SLF001
+        real_gone = browser._wait_ids_gone                       # noqa: SLF001
+        tabs = [{"type": "page", "id": "AB12", "title": "keep",
+                 "url": "https://a/"},
+                {"type": "page", "id": "CD34", "title": "other",
+                 "url": "https://b/"}]
+        browser.browsers = lambda: [                 # type: ignore[assignment]
+            {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
+             "profile": ours, "profile_from": "flag", "managed": True,
+             "attached": False,
+             "cdp": {"port": 1616, "reachable": True, "verified": True}}]
+        cdp.page_rows_at = lambda port: list(tabs)    # type: ignore[assignment]
+        closes: list[str] = []
+
+        def browser_call(profile: str, method: str, params: dict) -> dict:
+            closes.append(params["targetId"])
+            return {}
+
+        cdp.browser_call = browser_call               # type: ignore[assignment]
+        browser._verify_profile_endpoint = (          # type: ignore[assignment]
+            lambda profile: None)
+        browser._wait_ids_gone = (                    # type: ignore[assignment]
+            lambda profile, ids: [])
+        try:
+            found, skipped, filter_used = browser._resolve_close_set(  # noqa: SLF001
+                [], "", "keep", None, False, [], [])
+            assert [str(t["id"]) for _r, t, _i in found] == ["AB12"], found
+            assert skipped == [] and filter_used == {"title": "keep"}
+            assert closes == [], "resolution must not close anything"
+            browser._close_and_verify(found)          # noqa: SLF001
+            assert closes == ["AB12"], closes
+        finally:
+            browser.browsers = real_browsers         # type: ignore[assignment]
+            cdp.page_rows_at = real_rows             # type: ignore[assignment]
+            cdp.browser_call = real_call             # type: ignore[assignment]
+            browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
+            browser._wait_ids_gone = real_gone       # type: ignore[assignment]
+            _restore_root(keep_root)
+
+
+def t_launch_resolves_the_mode() -> None:
+    """`launch`'s headless mode is the PROCESS's, not this call's flag.
+
+    The mode decides, so it is one seam (`_resolved_mode`): a fresh start
+    takes the flag; an ADOPTED headed browser refuses `--headless` rather than
+    let the flag overrule the argv; and an adopted browser whose cmdline cannot
+    be read reports `False` (cannot prove a window) instead of guessing.
+    """
+    real = lifecycle_lib._running_headless                        # noqa: SLF001
+    try:
+        lifecycle_lib._running_headless = (                       # type: ignore[assignment]
+            lambda profile, owner: None)
+        assert lifecycle_lib._resolved_mode(  # noqa: SLF001
+            "/p", {}, already=False, headless=False) is False
+        assert lifecycle_lib._resolved_mode(  # noqa: SLF001
+            "/p", {}, already=False, headless=True) is True
+        # adoption, cmdline unreadable: cannot say, reported False
+        assert lifecycle_lib._resolved_mode(  # noqa: SLF001
+            "/p", {}, already=True, headless=False) is False
+        assert lifecycle_lib._resolved_mode(  # noqa: SLF001
+            "/p", {}, already=True, headless=True) is False
+        # adoption, a WINDOWED browser is already up: --headless refuses
+        lifecycle_lib._running_headless = (                       # type: ignore[assignment]
+            lambda profile, owner: False)
+        assert lifecycle_lib._resolved_mode(  # noqa: SLF001
+            "/p", {}, already=True, headless=False) is False
+        refusal(lambda: lifecycle_lib._resolved_mode(  # noqa: SLF001
+            "/p", {}, already=True, headless=True), "bad-args")
+        # adoption, a HEADLESS browser is already up: adopted in its own mode
+        lifecycle_lib._running_headless = (                       # type: ignore[assignment]
+            lambda profile, owner: True)
+        assert lifecycle_lib._resolved_mode(  # noqa: SLF001
+            "/p", {}, already=True, headless=False) is True
+    finally:
+        lifecycle_lib._running_headless = real                    # type: ignore[assignment]
+
+
 def main() -> int:
     global SUITE_LOG
     # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
@@ -3520,6 +4690,8 @@ def main() -> int:
          t_cli_new_verbs_grammar),
         ("page expressions parse; shot and dialog rules",
          t_expressions_and_shot_rules),
+        ("page expressions compile as JavaScript",
+         t_page_expressions_compile),
         ("keys, verdicts and secrets", t_keys_and_verdicts),
         ("the log redacts and never fails a verb", t_audit_redaction),
         ("the action log lands on disk", t_action_log_lands_on_disk),
@@ -3529,12 +4701,17 @@ def main() -> int:
         ("the lock serializes a check-then-act", t_lock_serializes_a_check_then_act),
         ("the lock survives the profile wipe",
          t_lock_lives_outside_the_wiped_profile),
+        ("lock names are injective", t_lock_names_are_injective),
         ("an empty profile is not the cwd", t_empty_profile_is_not_the_cwd),
         ("the opened-tab match stops at a path boundary",
          t_opened_tab_match_stops_at_a_path_boundary),
         ("the policy gate fails closed", t_policy_gate),
         ("gate and argv hardening", t_gate_and_argv_hardening),
         ("transport against a fake peer", t_transport_against_a_fake_peer),
+        ("the CDP read carries its reader outcome",
+         t_cdp_read_carries_its_reader_outcome),
+        ("the CDP read deadline refuses silently",
+         t_cdp_read_deadline_refuses_without_a_traceback),
         ("the press lands at the proven point", t_click_presses_at_the_proven_point),
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("frames bind to their tab", t_frames_bind_to_their_tab),
@@ -3545,12 +4722,16 @@ def main() -> int:
         ("media argv", t_cli_media_grammar),
         ("fill refuses leftovers", t_fill_refuses_leftovers),
         ("dom shape filters", t_dom_shape_filters),
+        ("a fractional page number is a number",
+         t_a_fractional_page_number_is_a_number),
         ("extract schema and records", t_extract_schema_and_records),
         ("tab extract grammar", t_cli_extract_grammar),
         ("plugins load, dispatch and gate", t_plugin_system),
         ("x plugin maps records offline", t_x_plugin_offline),
         ("google plugin types, never builds a query URL",
          t_google_plugin_offline),
+        ("the plugin seam hands out the core readers",
+         t_plugin_seam_hands_out_the_core_readers),
         ("type delay is validated before any browser",
          t_type_delay_is_validated),
         ("the net-change test", t_same_page),
@@ -3572,6 +4753,10 @@ def main() -> int:
          t_js_value_keeps_a_string_a_string),
         ("open needs its OWN endpoint",
          t_wait_own_port_requires_a_verified_owner),
+        ("the census survives a dying endpoint",
+         t_census_survives_a_dying_endpoint),
+        ("a failed open stops what it started",
+         t_a_failed_open_stops_what_it_started),
         ("the close read-back tolerates a stranger",
          t_tab_count_does_not_refuse_on_a_stranger),
         ("an unreadable tab list is not absence",
@@ -3590,11 +4775,42 @@ def main() -> int:
          t_reset_guard_counts_skipped_content),
         ("screenshot rules and symlinks", t_screenshot_rules_and_symlinks),
         ("prior fixes carry checks", t_audit_modes_caps_redirect_and_symlink),
+        ("the action log refuses a symlink",
+         t_audit_log_refuses_a_symlink),
+        ("open refuses a symlinked profile",
+         t_open_refuses_a_symlinked_profile),
+        ("the managed root is created 0700",
+         t_managed_root_is_created_0700),
+        ("the endpoint must be a loopback bind",
+         t_endpoint_must_be_loopback),
+        ("frame refusals flatten the url",
+         t_frame_refusal_flattens_the_url),
+        ("tab close's preview and action agree",
+         t_close_reply_keys_match_the_preview),
+        ("spec matchers share one id rule and read once",
+         t_spec_matchers_share_the_id_rule_and_read_once),
+        ("invocation globals and the gate are one seam",
+         t_invocation_globals_and_authorise),
+        ("tab close resolves the whole set before closing",
+         t_close_resolve_and_verify_seam),
+        ("launch resolves the mode from the process",
+         t_launch_resolves_the_mode),
+        ("select and focus share the focus path",
+         t_focus_nodes_go_through_one_helper),
+        ("a handler's reply is one JSON object",
+         t_handler_reply_must_be_a_json_object),
+        ("the plugin package has no dead shims",
+         t_plugin_package_has_no_dead_shims),
+        ("the dom facade keeps no test-only aliases",
+         t_dom_facade_has_no_test_only_aliases),
         ("page lists are guarded", t_page_lists_are_guarded),
         ("cli flags refuse silent drops", t_cli_flag_hardening),
         ("the no-args refusal is logged", t_cli_no_args_is_logged),
         ("a broken pipe is a refusal", t_cli_broken_pipe_is_a_refusal),
         ("cli argv is strict", t_cli_argv_is_strict),
+        ("argv readers live in lib", t_argv_readers_live_in_lib),
+        ("the unknown-flag scan is one rule",
+         t_unknown_flag_is_reported_first),
         ("selftest proves the install", t_selftest),
         ("pid liveness", t_pid_alive),
     ):

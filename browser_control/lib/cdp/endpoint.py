@@ -59,6 +59,41 @@ class _LoopbackOnly(urllib.request.HTTPRedirectHandler):
              f"{getattr(req, 'full_url', '?')}: refused a redirect "
              f"({code}) to {newurl}")
 
+def _read_body(r: Any, chunks: list[bytes],
+               errors: list[BaseException]) -> None:
+    """One body read whose OUTCOME is recorded instead of raised.
+
+    This is a thread target, so an exception has nowhere to go but
+    `threading.excepthook`: a raw traceback on stderr, which breaks the CLI's
+    contract that a run prints `ERR[code]: message` and nothing else. The
+    bytes and the exception both come back through these two lists.
+    """
+    try:
+        chunks.append(r.read(GET_CAP + 1))
+    except BaseException as e:                                 # noqa: BLE001
+        errors.append(e)
+
+def _read_outcome(url: str, chunks: list[bytes], errors: list[BaseException],
+                  timed_out: bool) -> bytes:
+    """What a read's outcome means: the body, or the refusal it earns.
+
+    One place decides for all three, because deciding separately got one of
+    them wrong: a reader that died mid-body (a reset, a peer that hangs up
+    early) left `chunks` empty, `b""` was parsed as a body, and the endpoint
+    was reported `cdp-error` — "answered no JSON" — for what is a failure to
+    ANSWER at all. That is the wrong CLASS, the one callers branch on
+    (`readback._require_tab_list_readable` separates it from a malformed
+    body). Both this case and a reader still running at the deadline are
+    `cdp-unreachable`, with the recorded reason.
+    """
+    if timed_out:
+        fail(ERR_CDP_UNREACHABLE,
+             f"{url}: the endpoint did not finish answering within "
+             f"{GET_DEADLINE_S:g}s")
+    if errors:
+        fail(ERR_CDP_UNREACHABLE, f"{url}: {errors[0]}")
+    return chunks[0] if chunks else b""
+
 def _get_bytes(url: str) -> bytes:
     """The body at `url`, capped, or a refusal — never a bare exception.
 
@@ -69,9 +104,17 @@ def _get_bytes(url: str) -> bytes:
     with a fake proxy that answered for a dead port). And the read runs under
     a wall-clock deadline: `timeout=5` bounds one socket operation, not a peer
     that drips a byte every four seconds.
+
+    The reader's outcome is CARRIED, not discarded: the deadline and a reader
+    that died mid-body are two spellings of "did not answer", and the refusal
+    says which. Raising on the deadline also happens AFTER the response is
+    closed (the refusal is built outside the `with`), so the socket is not
+    left to a thread the caller has stopped waiting for; what that thread
+    hits is recorded and swallowed (`_read_body`) rather than printed.
     """
-    body = b""
     chunks: list[bytes] = []
+    errors: list[BaseException] = []
+    timed_out = False
     try:
         # loopback by construction; redirects and proxies are refused rather
         # than followed or consulted (semgrep: ignore)
@@ -82,20 +125,16 @@ def _get_bytes(url: str) -> bytes:
             # caller cannot be interrupted, and `http.client` loops internally
             # under the per-operation timeout, so a drip-feeding endpoint held
             # a verb open indefinitely (a review flagged it)
-            reader = threading.Thread(
-                target=lambda: chunks.append(r.read(GET_CAP + 1)),
-                daemon=True)
+            reader = threading.Thread(target=_read_body,
+                                      args=(r, chunks, errors), daemon=True)
             reader.start()
             reader.join(GET_DEADLINE_S)
-            if reader.is_alive():
-                fail(ERR_CDP_UNREACHABLE,
-                     f"{url}: the endpoint did not finish answering within "
-                     f"{GET_DEADLINE_S:g}s")
-            body = chunks[0] if chunks else b""
+            timed_out = reader.is_alive()
     except ControlError:
         raise
     except Exception as e:                                     # noqa: BLE001
         fail(ERR_CDP_UNREACHABLE, f"{url}: {e}")
+    body = _read_outcome(url, chunks, errors, timed_out)
     if len(body) > GET_CAP:
         fail(ERR_RESULT_TOO_LARGE,
              f"{url}: the endpoint answered more than {GET_CAP} bytes — "

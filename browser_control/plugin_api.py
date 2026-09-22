@@ -19,23 +19,31 @@ suite rather than a user's call.
 `pop`/`switch` are the argv readers the core's own verbs use — `--flag VALUE`
 and `--flag=VALUE`, and the value-less flag — so a plugin parses its own
 arguments the way the built-ins do instead of hand-rolling the loop. `pop`
-names the verb in its refusal the same way the CLI does.
+names the verb in its refusal the same way the CLI does. `text_arg`,
+`int_arg` and `float_arg` are the positional and numeric readers beside them,
+so "one TEXT at most", "TEXT is required" and "needs a number" are the same
+refusals a built-in verb gives.
 
 Everything is re-exported from where it already lived, so nothing moves and no
-plugin that imports `lib` directly breaks.
+plugin that imports `lib` directly breaks. The readers come from
+`browser_control.lib.argv`, below the CLI adapter: this seam does not import
+`browser_control.cli`.
 """
 from __future__ import annotations
 
-from browser_control.cli.argv import (
+from browser_control.lib import errors
+from browser_control.lib.argv import (
+    _float as float_arg,
+    _int as int_arg,
     _pop as pop,
     _switch as switch,
+    _text_arg as text_arg,
 )
-from browser_control.lib import errors
 from browser_control.lib.browser import nav
 from browser_control.lib.dom import click, extract, focus, press, type_text, wait
 from browser_control.lib.errors import ControlError, fail
 from browser_control.lib.plugins import PLUGIN_API
 
 __all__ = ["ControlError", "PLUGIN_API", "click", "errors", "extract",
-           "fail", "focus", "nav", "pop", "press", "switch", "type_text",
-           "wait"]
+           "fail", "float_arg", "focus", "int_arg", "nav", "pop", "press",
+           "switch", "text_arg", "type_text", "wait"]

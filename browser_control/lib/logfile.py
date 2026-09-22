@@ -65,15 +65,24 @@ class FileSink:
         lines carry the argv, so a world-readable action log is the second half
         of the promise that only a PROVEN secret is redacted (a review flagged
         the mode).
+
+        Opened `O_NOFOLLOW` and only if it is a REGULAR file: a symlink at the
+        path had every line appended to whatever it pointed at, and the target
+        `fchmod`ed 0600 — arbitrary append into a file this CLI did not choose
+        (CWE-377, the guard the pid-file writer already carries). A refused
+        file falls back to the private scratch log like any other failure.
         """
         try:
             parent = os.path.dirname(path)
             if parent:
                 os.makedirs(parent, mode=0o700, exist_ok=True)
-            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                             0o600)
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                             | os.O_NOFOLLOW, 0o600)
             try:
-                if stat.S_IMODE(os.fstat(handle).st_mode) & 0o077:
+                info = os.fstat(handle)
+                if not stat.S_ISREG(info.st_mode):
+                    return False
+                if stat.S_IMODE(info.st_mode) & 0o077:
                     try:
                         os.fchmod(handle, 0o600)
                     except OSError:

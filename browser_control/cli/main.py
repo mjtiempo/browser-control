@@ -315,13 +315,75 @@ def action(verb: str, rest: list[str]) -> str:
                               tab_subcommands=registry.TAB_SUBCOMMANDS,
                               profile_subcommands=registry.PROFILE_SUBCOMMANDS,
                               pop=_pop)
+def _parse_globals(flags: dict[str, str | None]) -> dict[str, str]:
+    """The name-valued globals a call runs with — pure, and refused when empty.
+
+    A flag given an EMPTY value is a MISTAKE, not an absent flag: every other
+    value-carrying flag refuses one (`--tab ""`, `--frame ""`, a policy that
+    names no class), while `--profile ""` silently cleared the instance scope
+    and `--browser ""` fell back to the default (a review flagged the
+    asymmetry). Nothing here touches the process-global state: `_run_invocation`
+    sets scope, frame and policy in the ORDER that is contract.
+    """
+    for name, value in (("--browser", flags["browser"]),
+                        ("--profile", flags["profile"])):
+        if value is not None and not str(value).strip():
+            fail(ERR_BAD_ARGS,
+                 f"{name}: an empty value is not a name — name a browser "
+                 "or a profile, or leave the flag off")
+    return {"browser": flags["browser"] or "",
+            "profile": flags["profile"] or "",
+            "frame": flags["frame"] or ""}
+def _authorise(verb: str, rest: list[str],
+               flags: dict[str, str | None]) -> None:
+    """Refuse a call the surface or the policy will not run, before dispatch.
+
+    The action (with its MODE) is read by the SAME reader the handler runs
+    through (`action`), so what the gate allows and what the verb does cannot
+    disagree. `selftest` is never gated — it is the verb that REPORTS the
+    policy, and a gate that blocks its own explanation is a trap — while every
+    other verb answers to the classes its action declares. A `--frame` scope
+    that cannot apply is refused here too, so `list --frame 1` and
+    `open --frame 1 URL` cannot accept a scope and silently drop it.
+    """
+    head = str(rest[0]) if rest else ""
+    if verb == "tab" and head and head not in registry.TAB_SUBCOMMANDS:
+        _bare_tab_word(head)
+    if flags["frame"] is not None and not str(flags["frame"]).strip():
+        fail(ERR_BAD_ARGS,
+             "--frame needs a VALUE — a URL substring or an index from "
+             "`tab frames` (an empty value is not a frame)")
+    if flags["frame"] and verb != "selftest" and not (
+            verb == "tab" and head in dom.FRAME_VERBS):
+        # a scope that cannot apply is REFUSED, by every verb: `list
+        # --frame 1` and `open --frame 1 URL` used to accept it and drop it
+        fail(ERR_BAD_ARGS,
+             f"{verb}{' ' + head if head else ''}: --frame does not apply "
+             "— it scopes the verbs that act on a page's CONTENT ("
+             + ", ".join(sorted(dom.FRAME_VERBS))
+             + "), and `selftest` reports it; nothing else takes it")
+    if verb != "selftest":
+        # `selftest` is never gated: it is the verb that REPORTS the policy,
+        # and a gate that blocks its own explanation is a trap. Everything
+        # else answers to the classes its action declares — and a call whose
+        # action is "" declares none, so the verb's own refusal is what the
+        # caller sees (`bad-args` for a subcommand nobody has).
+        wanted = action(verb, rest)
+        if wanted:
+            permitted, why = registry.POLICY.allowed(
+                wanted, capabilities.classes_for(wanted))
+            if not permitted:
+                fail(ERR_NOT_ALLOWED, why)
 def _run_invocation(args: list[str]) -> int:
     """One call end to end: plugins, globals, the gate, dispatch, emit.
 
     Kept as one body because every step's ORDER is contract: plugins load before
     the help text and the gate, the scope/frame/policy are set or cleared before
     the handler runs, and the audit line is written in `finally` on every path
-    (refusals included). `main` is the facade the console script calls.
+    (refusals included). The two PURE decisions are called IN PLACE —
+    `_parse_globals` where the globals are read, `_authorise` after the handler
+    is known — so the order they run in is still this body's. `main` is the
+    facade the console script calls.
     """
     # Plugins load once per invocation, BEFORE the help text and the gate:
     # `--help`/`selftest` report them, and the classes they declare have to be
@@ -369,23 +431,13 @@ def _run_invocation(args: list[str]) -> int:
             code = ERR_BAD_ARGS           # so the audit line carries the code
             return 2
         verb, rest = rest[0], rest[1:]
-        # a flag given an EMPTY value is a MISTAKE, not an absent flag: every
-        # other value-carrying flag refuses one (--tab "", --frame "", a
-        # policy that names no class), while `--profile ""` silently cleared
-        # the instance scope and `--browser ""` fell back to the default
-        # (a review flagged the asymmetry)
-        for name, value in (("--browser", flags["browser"]),
-                            ("--profile", flags["profile"])):
-            if value is not None and not str(value).strip():
-                fail(ERR_BAD_ARGS,
-                     f"{name}: an empty value is not a name — name a browser "
-                     "or a profile, or leave the flag off")
+        globals_ = _parse_globals(flags)
         # the globals, in the order they matter: the instance, the frame, the
         # policy. Each is SET OR CLEARED per invocation, so no verb inherits
         # another call's scope.
-        browser = flags["browser"] or ""
-        browser_lib.scope(flags["profile"] or "")
-        dom.frame(flags["frame"] or "")
+        browser = globals_["browser"]
+        browser_lib.scope(globals_["profile"])
+        dom.frame(globals_["frame"])
         # NOT `or None`: a flag given an empty value must reach the policy,
         # which refuses it, instead of reading as "the call named no policy"
         registry.POLICY.update(policy_lib.Policy.from_sources(flags["allow"],
@@ -399,34 +451,17 @@ def _run_invocation(args: list[str]) -> int:
                                f"{verb} (have: "
                                + ", ".join(registry.verb_names()) + ")")
         head = str(rest[0]) if rest else ""
-        if verb == "tab" and head and head not in registry.TAB_SUBCOMMANDS:
-            _bare_tab_word(head)
-        if flags["frame"] is not None and not str(flags["frame"]).strip():
-            fail(ERR_BAD_ARGS,
-                 "--frame needs a VALUE — a URL substring or an index from "
-                 "`tab frames` (an empty value is not a frame)")
-        if flags["frame"] and verb != "selftest" and not (
-                verb == "tab" and head in dom.FRAME_VERBS):
-            # a scope that cannot apply is REFUSED, by every verb: `list
-            # --frame 1` and `open --frame 1 URL` used to accept it and drop it
-            fail(ERR_BAD_ARGS,
-                 f"{verb}{' ' + head if head else ''}: --frame does not apply "
-                 "— it scopes the verbs that act on a page's CONTENT ("
-                 + ", ".join(sorted(dom.FRAME_VERBS))
-                 + "), and `selftest` reports it; nothing else takes it")
-        if verb != "selftest":
-            # `selftest` is never gated: it is the verb that REPORTS the policy,
-            # and a gate that blocks its own explanation is a trap. Everything
-            # else answers to the classes its action declares — and a call whose
-            # action is "" declares none, so the verb's own refusal is what the
-            # caller sees (`bad-args` for a subcommand nobody has).
-            wanted = action(verb, rest)
-            if wanted:
-                permitted, why = registry.POLICY.allowed(
-                    wanted, capabilities.classes_for(wanted))
-                if not permitted:
-                    fail(ERR_NOT_ALLOWED, why)
+        _authorise(verb, rest, flags)
         reply = handler(rest, browser)
+        # ONE JSON object on stdout is the contract the usage text states and
+        # every plugin is told to keep: a handler that returns a list, a string
+        # or None used to print it with exit status 0, breaking every consumer
+        # of stdout with no refusal to branch on — so the shape is checked
+        # here, where the handler's own name is still in hand
+        if not isinstance(reply, dict):
+            fail(ERR_INTERNAL,
+                 f"{verb}: the handler returned {type(reply).__name__}, "
+                 "not a JSON object")
         scoped_frame = dom.frame()
         if verb == "tab" and head in dom.FRAME_VERBS and scoped_frame:
             # one place says which frame a scoped call acted in, so no verb has

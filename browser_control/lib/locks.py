@@ -28,6 +28,9 @@ from browser_control.lib.errors import (
     ERR_PROFILE_BUSY,
     fail,
 )
+from browser_control.lib.paths import (
+    ensure_root,
+)
 
 LOCK_WAIT_S = 20.0          # as long as a cold launch is given
 
@@ -134,6 +137,7 @@ def profile_lock(path: str, verb: str, wait: float = LOCK_WAIT_S):  # noqa: ANN2
     with contextlib.ExitStack() as stack:
         fd = -1
         try:
+            ensure_root()
             os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
             # O_NOFOLLOW: a symlink planted at the lock path is an error the
             # caller reports, not a file we truncate through (`_hold` cuts

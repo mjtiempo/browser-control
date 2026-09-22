@@ -106,9 +106,11 @@ from browser_control.lib.browser.readback import (  # noqa: F401
 from browser_control.lib.browser.selector import Selector  # noqa: F401
 from browser_control.lib.browser.tabs import (  # noqa: F401
     ACTIVE_SPEC,
+    _close_and_verify,
     _exact_matches,
     _exact_spec_match,
     _match_spec,
+    _resolve_close_set,
     _spec_hits,
     _spec_matches,
     _tab_count,

@@ -371,6 +371,33 @@ def _select_probe(session: cdp.Session, needle: str, css: str,
     probe = session.evaluate(expression)
     return probe if isinstance(probe, dict) else {}
 
+def _focus_node(session: cdp.Session, needle: str, css: str, index: int | None,
+                element: dict, *, code: str, gone: str, what: str = "") -> None:
+    """Put the DOM focus on the node a spec resolves to, or refuse.
+
+    ONE path, because `select` focuses the control so its arrow keys land in
+    it and `focus` IS the focus: the node-id lookup, the `DOM.focus` call and
+    the two refusals are the same code, and the verbs differ only in WHOSE
+    verdict they are — `code` is the verb's own, `gone` what the element did
+    when it left the document, and `what` why the focus mattered (empty for
+    the verb whose whole point is it). Keeping a copy per verb is how a fix
+    to one silently changes the other.
+
+    A `DOM.focus` refusal is the verb's verdict rather than a generic CDP
+    failure: the protocol says WHY (a disabled control, an element that
+    cannot be focused).
+    """
+    node_id = _pkg._node_of(session,
+                            _pkg._match_args(ELEMENT_EXPR, needle, css, index))
+    if not node_id:
+        fail(ERR_NO_MATCH, f"{_pkg._describe(element)} {gone}")
+    try:
+        session.call("DOM.focus", {"nodeId": node_id})
+    except ControlError as e:
+        why = f", {what}" if what else ""
+        fail(code, f"{_pkg._describe(element)} cannot take the DOM focus"
+                   f"{why}: {e.message}")
+
 def select(text: str | None = None, selector: str | None = None,
            value: str = "", index: int | None = None, tab: str = "",
            browser: str = "") -> dict:
@@ -434,18 +461,10 @@ def select(text: str | None = None, selector: str | None = None,
                     "note": "already selected — no key was sent",
                     "tab": f"id:{tab_row['id']}",
                     "browser": browser_lib.brief(row)}
-        node_id = _pkg._node_of(session,
-                           _pkg._match_args(ELEMENT_EXPR, needle, css, index))
-        if not node_id:
-            fail(ERR_NO_MATCH,
-                 f"{_pkg._describe(element)} left the document before the choice "
-                 "could be made")
-        try:
-            session.call("DOM.focus", {"nodeId": node_id})
-        except ControlError as e:
-            fail(ERR_SELECT_NOT_VERIFIED,
-                 f"{_pkg._describe(element)} cannot take the DOM focus, so the "
-                 f"arrow keys would go elsewhere: {e.message}")
+        _focus_node(session, needle, css, index, element,
+                    code=ERR_SELECT_NOT_VERIFIED,
+                    gone="left the document before the choice could be made",
+                    what="so the arrow keys would go elsewhere")
         key_name = "arrowdown" if delta > 0 else "arrowup"
         for _step in range(abs(delta)):
             session.call("Input.dispatchKeyEvent",
@@ -490,20 +509,9 @@ def focus(text: str | None = None, selector: str | None = None,
     needle, css = _pkg._query_args(text, selector, "tab focus")
     with _target(needle, css, index, tab, browser) as (session, data, element,
                                                        row, tab_row):
-        node_id = _pkg._node_of(session,
-                           _pkg._match_args(ELEMENT_EXPR, needle, css, index))
-        if not node_id:
-            fail(ERR_NO_MATCH,
-                 f"{_pkg._describe(element)} left the document before the focus "
-                 "could be set")
-        try:
-            session.call("DOM.focus", {"nodeId": node_id})
-        except ControlError as e:
-            # the protocol says WHY (a disabled control, an element that
-            # cannot be focused): that is the verb's own verdict, not a
-            # generic CDP failure
-            fail(ERR_FOCUS_NOT_VERIFIED,
-                 f"{_pkg._describe(element)} cannot take the DOM focus: {e.message}")
+        _focus_node(session, needle, css, index, element,
+                    code=ERR_FOCUS_NOT_VERIFIED,
+                    gone="left the document before the focus could be set")
         probe = session.evaluate(_pkg._match_args(FOCUS_PROBE, needle, css, index))
     probe = probe if isinstance(probe, dict) else {}
     if not probe.get("focused"):

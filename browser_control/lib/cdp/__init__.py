@@ -19,6 +19,8 @@ from browser_control.lib.cdp.endpoint import (  # noqa: F401
     _get_bytes,
     _get_port,
     _LoopbackOnly,
+    _read_body,
+    _read_outcome,
     answers,
     get_json,
     port_of,

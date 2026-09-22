@@ -7,6 +7,7 @@ implementations live here.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 
 DEFAULT_ROOT = "~/.local/share/browser-control/cdp-profiles"
@@ -14,10 +15,11 @@ ROOT_ENV = "BROWSER_CONTROL_ROOT"
 PID_FILE = ".pid"
 LOCK_FILE = ".browser-control.lock"
 LOCK_DIR = ".locks"
+LOCK_NAME_LIMIT = 40        # the readable tail of a lock file name
 
-__all__ = ["DEFAULT_ROOT", "LOCK_DIR", "LOCK_FILE", "PID_FILE", "ROOT_ENV",
-           "expand", "is_managed", "lock_path", "norm", "pid_file",
-           "profile_dir", "root"]
+__all__ = ["DEFAULT_ROOT", "LOCK_DIR", "LOCK_FILE", "LOCK_NAME_LIMIT",
+           "PID_FILE", "ROOT_ENV", "ensure_root", "expand", "is_managed",
+           "lock_path", "norm", "pid_file", "profile_dir", "root"]
 
 
 def expand(path: object) -> str:
@@ -42,6 +44,21 @@ def root() -> str:
     return expand(os.environ.get(ROOT_ENV) or DEFAULT_ROOT)
 
 
+def ensure_root() -> str:
+    """The managed root, created 0700 when it is missing.
+
+    Every creator under the root calls this BEFORE its own leaf, because the
+    `mode` of `os.makedirs` applies to the LEAF only: a call for a path UNDER
+    the root makes the root an intermediate, and it landed at the umask
+    default (0755) — so the root's mode depended on which verb ran first, and
+    any local user could list the profile names it holds. Here the root is the
+    leaf of its own call, so it is always the intended 0700 (a review flagged
+    the 0755 root).
+    """
+    os.makedirs(root(), mode=0o700, exist_ok=True)
+    return root()
+
+
 def profile_dir(binary_path: str) -> str:
     """The managed profile for a browser, keyed by the binary we run."""
     return os.path.join(root(), os.path.basename(binary_path))
@@ -51,6 +68,25 @@ def pid_file(profile: str) -> str:
     """The file a browser's pid is recorded in, inside its profile."""
     return os.path.join(profile, PID_FILE)
 
+
+def _lock_name(key: str) -> str:
+    """One lock file NAME per profile key — injective, readable, bounded.
+
+    The fold this replaced was `key.replace(os.sep, "__")`, which is NOT
+    injective: the profile `<root>/a/b` and a profile literally named
+    `<root>/a__b` both produced `a__b.lock`, so two instances contended on one
+    lock — the safe direction, but a spurious `profile-busy` naming a holder
+    that was running against a different profile. An over-long path outside
+    the root degraded further: `ENAMETOOLONG` made the lock unopenable and the
+    caller run UNLOCKED.
+
+    The digest of the WHOLE key is what makes the mapping injective, and 16
+    hex digits of it bound the name whatever the path's length (NAME_MAX is
+    255). The readable tail is only there so a name on disk still says which
+    profile it belongs to.
+    """
+    digest = hashlib.sha256(os.fsencode(key)).hexdigest()[:16]
+    return f"{key.replace(os.sep, '_')[-LOCK_NAME_LIMIT:]}.{digest}"
 
 def lock_path(profile: str) -> str:
     """Where the `flock` for `profile` lives: `<root>/.locks/<name>.lock`.
@@ -62,22 +98,24 @@ def lock_path(profile: str) -> str:
     A file the wipe cannot reach closes that hole; lock files are never
     deleted (an unlinked lock lets a fresh inode be created and double-taken).
 
-    The name is the profile's path under the root with separators folded, so
-    two profiles that share a basename (`<root>/chrome` and `<root>/a/chrome`)
-    never share a lock. The root keeps its own lock as `_root`, so no profile
-    name can collide with it.
+    The name is derived from the profile's path under the root, so two
+    profiles that share a basename (`<root>/chrome` and `<root>/a/chrome`)
+    never share a lock; `_lock_name` is the injective, bounded spelling of
+    that derivation (the old `os.sep` fold collided `a/b` with `a__b`). The
+    root keeps its own lock as `_root`, so no profile name can collide with
+    it.
     """
     target = expand(profile)
     base = root()
     rel = os.path.relpath(target, base)
     if rel == os.curdir:
-        name = "_root"
+        key = "_root"
     elif rel == os.pardir or rel.startswith(os.pardir + os.sep):
         # a caller-named path outside the root: key it by the whole path
-        name = target.strip(os.sep) or "_root"
+        key = target.strip(os.sep) or "_root"
     else:
-        name = rel
-    return os.path.join(base, LOCK_DIR, name.replace(os.sep, "__") + ".lock")
+        key = rel
+    return os.path.join(base, LOCK_DIR, _lock_name(key) + ".lock")
 
 
 def is_managed(profile: str) -> bool:

@@ -30,6 +30,7 @@ from browser_control.lib.errors import (
     ControlError,
     fail,
 )
+from browser_control.lib.text import foreign
 
 
 def frame(wanted: str | None = None) -> str:
@@ -192,11 +193,13 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
         hits = [r for r in rows
                 if text_.lower() in str(r.get("url") or "").lower()]
     if not hits:
-        have = "; ".join(f"[{r['index']}] {str(r['url'])[:52] or 'srcdoc'}"
-                         for r in rows[:4])
+        have = "; ".join(
+            f"[{r['index']}] {foreign(r['url'], 52) or 'srcdoc'}"
+            for r in rows[:4])
         fail(ERR_NO_FRAME, f"no frame matches {wanted!r} (have: {have})")
     if len(hits) > 1:
-        where = "; ".join(f"[{r['index']}] {str(r['url'])[:52]}" for r in hits[:4])
+        where = "; ".join(f"[{r['index']}] {foreign(r['url'], 52)}"
+                          for r in hits[:4])
         fail(ERR_FRAME_AMBIGUOUS,
              f"{len(hits)} frames match {wanted!r} — pick one by index "
              f"(`--frame 0` … `--frame {len(rows) - 1}`): {where}")
@@ -204,25 +207,26 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
     if found.get("attribution"):
         fail(ERR_FRAME_UNATTRIBUTABLE,
              f"frame [{found['index']}] "
-             f"{str(found['url'])[:60] or 'srcdoc'} — this browser does not "
-             "report which tab owns an iframe target, so the CLI cannot tell "
-             "this frame from another tab's with the same URL. `tab js` reads "
-             "a same-process frame, `tab click --at X,Y` hits one by "
+             f"{foreign(found['url'], 60) or 'srcdoc'} — this browser does "
+             "not report which tab owns an iframe target, so the CLI cannot "
+             "tell this frame from another tab's with the same URL. `tab js` "
+             "reads a same-process frame, `tab click --at X,Y` hits one by "
              "coordinate, or drive the tab that owns it")
     if found.get("candidates"):
         fail(ERR_FRAME_AMBIGUOUS,
-             f"frame [{found['index']}] {str(found['url'])[:60]} matches "
+             f"frame [{found['index']}] {foreign(found['url'], 60)} matches "
              f"{found['candidates']} targets in this browser and it does not "
              "say which tab owns them — run `tab frames` in the tab you mean "
              "and name the frame by its index there")
     if not found["target"]:
         fail(ERR_FRAME_NOT_SEPARATE,
              f"frame [{found['index']}] "
-             f"{str(found['url'])[:60] or 'srcdoc'} has no target of its OWN in "
-             "this tab: either it shares the page's process (a same-origin or "
-             "srcdoc frame), or its committed URL differs from the `src` the "
-             "page shows (a redirect). `tab js` reads a same-process frame, "
-             "and `tab click --at X,Y` hits either one by coordinate")
+             f"{foreign(found['url'], 60) or 'srcdoc'} has no target of its "
+             "OWN in this tab: either it shares the page's process (a "
+             "same-origin or srcdoc frame), or its committed URL differs "
+             "from the `src` the page shows (a redirect). `tab js` reads a "
+             "same-process frame, and `tab click --at X,Y` hits either one "
+             "by coordinate")
     return found
 
 def _frame_summary(row: dict, tab_row: dict,

@@ -93,7 +93,8 @@ FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const vw = window.innerWidth, vh = window.innerHeight;
   const base = {url: location.href, title: document.title,
                 ready: document.readyState,
-                visibility: document.visibilityState, viewport: [vw, vh],
+                visibility: document.visibilityState,
+                viewport: [Math.round(vw), Math.round(vh)],
                 active: describe(document.activeElement),
                 scroll: [Math.round(scrollX), Math.round(scrollY)]};
   if (vw <= 0 || vh <= 0) {
@@ -141,7 +142,8 @@ TEXT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const base = {url: location.href, title: document.title,
                 ready: document.readyState,
                 visibility: document.visibilityState,
-                viewport: [window.innerWidth, window.innerHeight],
+                viewport: [Math.round(window.innerWidth),
+                           Math.round(window.innerHeight)],
                 selector: selector || 'body'};
   const el = selector ? query(selector)[0] : document.body;
   if (!el) {
@@ -367,7 +369,8 @@ SELECT_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
 })())""")
 
 SHOT_METRICS = ("JSON.stringify((() => {" + PRELUDE + r"""
-  return {iw: innerWidth, ih: innerHeight, dpr: devicePixelRatio,
+  return {iw: Math.round(innerWidth), ih: Math.round(innerHeight),
+          dpr: devicePixelRatio,
           sw: document.documentElement.scrollWidth,
           sh: document.documentElement.scrollHeight,
           url: location.href, title: document.title,

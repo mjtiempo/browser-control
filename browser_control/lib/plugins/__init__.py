@@ -52,7 +52,7 @@ from .spec import (
 )
 
 __all__ = ["PLUGIN_API", "PLUGIN_ENV", "PluginAction", "PluginError",
-           "PluginInfo", "PluginSet", "Registry", "load"]
+           "PluginInfo", "PluginSet"]
 
 PLUGIN_ENV = discovery.PLUGIN_ENV
 DEFAULT_PLUGIN_DIR = discovery.DEFAULT_PLUGIN_DIR
@@ -131,13 +131,3 @@ class PluginSet:
         """`selftest`'s `plugins`/`plugin_errors` keys, ready for JSON."""
         return {"plugins": self.describe(),
                 "plugin_errors": [str(e) for e in self.errors]}
-
-
-#: The old name, for one release: the class grew a construction policy but the
-#: shape is the same.
-Registry = PluginSet
-
-
-def load(reserved: set[str] | None = None) -> PluginSet:
-    """`PluginSet.load`, kept as a module function for existing callers."""
-    return PluginSet.load(reserved)

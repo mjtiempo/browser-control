@@ -171,7 +171,10 @@ def _checked_ws(url: str, where: str = "endpoint") -> str:
 
     CDP is loopback by design; a `webSocketDebuggerUrl` naming a foreign host
     would receive everything this tool sends while serving fabricated
-    answers, so anything but loopback is refused.
+    answers, so anything but loopback is refused. Loopback is not a user
+    boundary, though — a co-tenant user on this machine can reach the port —
+    so this guard is against remote hosts and wrong-process takeover, not
+    against another local user.
     """
     try:
         host = (urllib.parse.urlparse(str(url)).hostname or "").lower()

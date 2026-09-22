@@ -13,6 +13,7 @@ lose its tail in the ownership check (a review flagged it).
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import os
 import subprocess
 
@@ -264,28 +265,76 @@ def spawn(argv: list[str]) -> int:
     return proc.pid
 
 
-def _listening_inodes(port: int) -> set[str]:
-    """The socket inodes LISTENING on that port, tcp4 and tcp6.
+def _address(
+        local_address: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The IP a `/proc/net/tcp{,6}` local ADDRESS names, or None.
 
-    `/proc/net/tcp` is a table: `sl local_address rem_address st … inode`, with
-    the port in HEX and `0A` meaning LISTEN.
+    The field is `HEXADDR:HEXPORT`, written little-endian: `0100007F` is
+    127.0.0.1, `00000000` is 0.0.0.0, and an IPv6 address is four little-endian
+    32-bit words (`::1` is `00000000000000000000000001000000`).
+    """
+    text = str(local_address or "").strip().lower()
+    try:
+        if len(text) == 8:
+            return ipaddress.IPv4Address(bytes.fromhex(text)[::-1])
+        if len(text) == 32:
+            raw = bytes.fromhex(text)
+            return ipaddress.IPv6Address(
+                b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
+    except ValueError:
+        return None
+    return None
+
+
+def _tcp_listeners(text: str, port: int) -> tuple[set[str], str]:
+    """One `/proc/net/tcp{,6}` table split by BIND ADDRESS for that port.
+
+    Returns `(loopback inodes, readable exposed bind)`: `sl local_address
+    rem_address st … inode`, port in HEX and `0A` meaning LISTEN. The ADDRESS
+    is read, not just the port — a listener on `0.0.0.0` or a LAN address is
+    reachable off this machine, and is NOT this profile's browser, however it
+    answers (a review flagged that only the port was matched).
     """
     wanted = f"{port:04X}"
-    inodes: set[str] = set()
+    loopback: set[str] = set()
+    exposed = ""
+    for line in str(text).splitlines()[1:]:          # the header line
+        fields = line.split()
+        if len(fields) < 10 or fields[3] != "0A":
+            continue
+        address, _sep, port_hex = fields[1].rpartition(":")
+        if port_hex.upper() != wanted:
+            continue
+        found = _address(address)
+        if found is not None and found.is_loopback:
+            loopback.add(fields[9])
+        elif not exposed:
+            exposed = f"{found if found is not None else address}:{port}"
+    return loopback, exposed
+
+
+def _listening_inodes(port: int) -> tuple[set[str], str]:
+    """The socket inodes LISTENING on that port on LOOPBACK, and the exposed
+    bind when the only listener is elsewhere ("" when there is none).
+
+    Both tables are read. The kernel's answer for the port is tcp4 in
+    `/proc/net/tcp` and tcp6 in `/proc/net/tcp6`; a listener bound wide shows
+    up in one of them, and either way its ADDRESS is what decides whether it is
+    the loopback endpoint this profile's browser owns.
+    """
+    loopback: set[str] = set()
+    exposed = ""
     for name in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
             with open(name) as handle:
-                next(handle, "")            # the header line
-                for line in handle:
-                    fields = line.split()
-                    if len(fields) < 10 or fields[3] != "0A":
-                        continue
-                    if fields[1].rpartition(":")[2] != wanted:
-                        continue
-                    inodes.add(fields[9])
+                text = handle.read()
         except OSError:
             continue
-    return inodes
+        loop, wide = _tcp_listeners(text, port)
+        loopback |= loop
+        exposed = exposed or wide
+    return loopback, exposed
 
 
 def listener_of(port: int) -> dict:
@@ -297,14 +346,21 @@ def listener_of(port: int) -> dict:
     holding that inode through `/proc/<pid>/fd`. A few milliseconds, which is
     why the caller memoises.
 
+    Only a LOOPBACK listener counts. A socket bound to `0.0.0.0` or a LAN
+    address is reachable off this machine, so it is not this profile's browser
+    — it is reported as `{"exposed": "<addr>:<port>"}` and every caller that
+    would drive it refuses (a review flagged that the address was ignored, so
+    any wide bind passed as the profile's own browser).
+
     A pid whose fd table cannot be read is skipped rather than guessed at: the
     answer is either the process holding the socket or nothing.
     """
     if not port:
         return {}
-    marks = {f"socket:[{inode}]" for inode in _listening_inodes(port)}
-    if not marks:
-        return {}
+    inodes, exposed = _listening_inodes(port)
+    if not inodes:
+        return {"exposed": exposed} if exposed else {}
+    marks = {f"socket:[{inode}]" for inode in inodes}
     try:
         entries = os.listdir("/proc")
     except OSError:

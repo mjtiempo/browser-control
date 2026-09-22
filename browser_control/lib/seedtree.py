@@ -17,6 +17,9 @@ from browser_control.lib.errors import (
     ERR_SEED_FAILED,
     fail,
 )
+from browser_control.lib.paths import (
+    ensure_root,
+)
 
 __all__ = ["TreeFacts", "copy_verified", "has_content", "missing", "remove",
            "walk"]
@@ -126,6 +129,9 @@ def copy_verified(source: str, target: str, dry: bool, *,
     facts = walk(source, skips=skips)
     if dry:
         return facts
+    # the root FIRST, so it is never an intermediate of the profile's own
+    # makedirs and left at the umask default 0755
+    ensure_root()
     stack = [(source, target)]
     while stack:
         here, there = stack.pop()

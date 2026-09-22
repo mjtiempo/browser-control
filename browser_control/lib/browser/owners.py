@@ -77,6 +77,17 @@ class EndpointGuard:
                     "profile_pid": profile_pid,
                     "reason": ("no process holds the port "
                                "(the socket is gone)")}
+        if owner.get("exposed"):
+            # a listener bound to 0.0.0.0 or a LAN address is reachable off
+            # this machine: it is not the loopback endpoint this profile's
+            # browser owns, and the reason names the bind (a review flagged
+            # that only the port was checked, so a wide bind verified)
+            return {"verified": False, "pid": 0, "exe": "",
+                    "profile_pid": profile_pid,
+                    "reason": f"the endpoint on port {port} is bound to "
+                              f"{owner['exposed']}, not loopback — reachable "
+                              "off this machine, so it is not the endpoint "
+                              "this profile's browser owns"}
         if exe not in BROWSER_EXES:
             return {"verified": False, "pid": pid, "exe": exe,
                     "profile_pid": profile_pid,

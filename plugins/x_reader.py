@@ -28,8 +28,10 @@ from browser_control.plugin_api import (
     ControlError,
     errors,
     fail,
+    int_arg,
     pop,
     switch,
+    text_arg,
 )
 
 DEFAULT_CAP = 10
@@ -58,18 +60,6 @@ def _search_url(query: str, latest: bool) -> str:
     return SEARCH_URL.format(
         query=urllib.parse.quote(query, safe=""),
         sort="live" if latest else "top")
-
-
-def _number(value: str | None, flag: str, default: int, top: int) -> int:
-    if value is None:
-        return default
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        fail(errors.ERR_BAD_ARGS, f"x search: {flag} needs a number, got {value!r}")
-    if number < 1:
-        fail(errors.ERR_BAD_ARGS, f"x search: {flag} must be at least 1, got {number}")
-    return min(number, top)
 
 
 def _selected_sort(tab: str, browser: str, fallback: str) -> str:
@@ -143,13 +133,10 @@ def run(rest: list[str], browser: str) -> dict:
     if latest and top:
         fail(errors.ERR_BAD_ARGS,
              "x search: --latest and --top are two sorts — pick one")
-    if not args:
-        fail(errors.ERR_BAD_ARGS,
-             "x search: a QUERY is required, e.g. "
-             "x search '\"Pardon Snowden\"' --latest --cap 5")
-    if len(args) > 1:
-        fail(errors.ERR_BAD_ARGS, f"x search: one QUERY at most, got {len(args)}")
-    query = args[0].strip()
+    # the positional rule is the CORE's (`text_arg`): a flag where the query
+    # goes, a missing query or a repeated one refuses with the same message a
+    # built-in verb gives, rather than a shape only this plugin speaks
+    query = text_arg(args, "x search").strip()
     if not query:
         fail(errors.ERR_BAD_ARGS, "x search: an empty QUERY is not a search")
 
@@ -165,10 +152,23 @@ def run(rest: list[str], browser: str) -> dict:
     with contextlib.suppress(ControlError):
         plugin_api.wait("element", selector=POST, timeout=POST_WAIT_S,
                  tab=tab, browser=browser)
-    data = plugin_api.extract(each=POST, fields=FIELDS,
-                       cap=_number(cap, "--cap", DEFAULT_CAP, MAX_CAP),
-                       chars=_number(chars, "--chars", DEFAULT_CHARS, 20_000),
-                       tab=tab, browser=browser)
+    # the parse and its "needs a number" refusal are the core's (`int_arg`);
+    # only this verb's bounds stay — an absent flag is the default, a value
+    # below 1 is refused, and one above the top clamps
+    cap_n = (int_arg(cap, "x search: --cap")
+             if cap is not None else DEFAULT_CAP)
+    if cap_n < 1:
+        fail(errors.ERR_BAD_ARGS,
+             f"x search: --cap must be at least 1, got {cap_n}")
+    cap_n = min(cap_n, MAX_CAP)
+    chars_n = (int_arg(chars, "x search: --chars")
+               if chars is not None else DEFAULT_CHARS)
+    if chars_n < 1:
+        fail(errors.ERR_BAD_ARGS,
+             f"x search: --chars must be at least 1, got {chars_n}")
+    chars_n = min(chars_n, 20_000)
+    data = plugin_api.extract(each=POST, fields=FIELDS, cap=cap_n, chars=chars_n,
+                              tab=tab, browser=browser)
     posts = _posts(data.get("matches") or [])
     return {
         "ok": True,
