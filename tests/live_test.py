@@ -1313,6 +1313,96 @@ def c_open_adopts_the_running_browser() -> str:
     return "the running browser was handed the URL as a new tab"
 
 
+def c_headless_browser() -> str:
+    """`open --headless` drives the SAME verbs against a browser with no window.
+
+    A second managed instance on its own profile, so every call here is SCOPED
+    with `--profile` and the battery's own browser is never disturbed. The mode
+    is read from the process's OWN command line — an independent oracle, not
+    the CLI's reply — and the verb surface is exercised on it: text, click,
+    screenshot (the PNG's header vouches), activate, tab list. The mode belongs
+    to the PROCESS, not the call: a plain `open` on that instance reports
+    `headless: true` back, asking `--headless` of the HEADED instance the
+    battery already has up refuses, and a HEADED start still carries no flag.
+    """
+    profile = os.path.join(ROOT, "headless")
+    base, pid, port = base_url(), 0, 0
+    try:
+        reply = ok_json("open", "--headless", f"{base}/one", "--profile",
+                        profile)
+        assert reply["started"] is True and reply["headless"] is True, reply
+        assert reply["profile"] == profile, reply
+        pid, port = int(reply["pid"]), int(reply["port"])
+        # independent: the process's own cmdline says which mode it is in
+        line = cmdline(pid)
+        assert "--headless=new" in line, f"pid {pid}: {line[:160]}"
+        assert f"--user-data-dir={profile}" in line, line[:160]
+        deadline = time.time() + 10
+        while time.time() < deadline and not listening(port):
+            time.sleep(0.2)
+        assert listening(port), f"port {port} accepts no connection"
+        tab = str(reply["tabs"][0]["id"])
+        # the CURRENT verbs, unchanged, against a browser nobody can see
+        seen = ok_json("tab", "text", "--chars", "40", "--profile", profile)
+        assert "one" in seen["text"], seen
+        ok_json("tab", "nav", f"{base}/dom", "--profile", profile)
+        click = ok_json("tab", "click", "Save the thing", "--profile",
+                        profile)
+        assert click["clicked"] is True and click["changed"] is True, click
+        shot_path = os.path.join(ROOT, "headless.png")
+        shot = ok_json("tab", "screenshot", shot_path, "--profile", profile)
+        assert shot["verified"] is True and shot["bytes"] > 1000, shot
+        data = Path(shot_path).read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", data[:8]
+        assert [int.from_bytes(data[16:20], "big"),
+                int.from_bytes(data[20:24], "big")] == [shot["width"],
+                                                        shot["height"]], shot
+        # a second tab makes the first a BACKGROUND tab, then activate proves
+        # `Page.bringToFront` still reaches a page with no window
+        other = str(ok_json("tab", "about:blank", "--profile",
+                            profile)["id"])
+        first = ok_json("tab", "activate", f"id:{tab[:8]}", "--profile",
+                        profile)
+        assert first["verified"] is True, first
+        assert first["visibility"] == "visible", first
+        ok_json("tab", "close", f"id:{other[:8]}", "--profile", profile)
+        # the census reports the mode too, from the same process oracle
+        row = next(b for b in ok_json("list")["browsers"] if b["pid"] == pid)
+        assert row["headless"] is True, row
+        groups = ok_json("tab", "list", "--profile", profile)["browsers"]
+        assert len(groups) == 1 and groups[0]["headless"] is True, groups
+        # the mode belongs to the PROCESS, not the call: a plain `open` adopts
+        # and reports what is running rather than the flag it was not given
+        adopted = ok_json("open", f"{base}/two", "--profile", profile)
+        assert adopted["started"] is False, adopted
+        assert adopted["headless"] is True, adopted
+        # ...and asking the HEADED instance for headless refuses, naming the fix
+        err = refuses("bad-args", "open", "--headless", f"{base}/x",
+                      "--profile", STATE["profile"])
+        assert "HEADED" in err and "close" in err, err
+        headed = cmdline(int(STATE["pid"]))
+        assert "--headless" not in headed, headed[:160]
+        # the close is verified like any other: pid AND endpoint gone
+        gone = ok_json("close", "--force", "--profile", profile)
+        assert gone["stopped"] is True and gone["pid"] == pid, gone
+        assert not Path(f"/proc/{pid}").exists(), f"pid {pid} is still in /proc"
+        deadline = time.time() + 10
+        while time.time() < deadline and listening(port):
+            time.sleep(0.2)
+        assert not listening(port), f"port {port} still accepts connections"
+    finally:
+        # whoever is still up: an aborted check must not leave an instance
+        # behind (`cleanup()` knows only the default profile's port)
+        run("close", "--profile", profile, "--force", timeout=60)
+        for _ in range(3):
+            shutil.rmtree(profile, ignore_errors=True)
+            if not os.path.exists(profile):
+                break
+            time.sleep(0.3)
+    return (f"pid {pid} drove text/click/screenshot/activate headless; "
+            "--headless=new read from /proc")
+
+
 def c_close_stops_the_browser() -> str:
     pid, port = STATE["pid"], STATE["port"]
     tabs = len(pages(port))
@@ -2258,6 +2348,8 @@ CHECKS = (
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),
     ("open adopts a running browser", c_open_adopts_the_running_browser),
+    ("open --headless drives the same verbs, windowless",
+     c_headless_browser),
     ("list names the listener that owns each port",
      c_list_reports_the_listener),
     ("a port a stranger holds is refused", c_cdp_not_local),

@@ -69,7 +69,7 @@ by the binary's name.
 
 ## Verbs
 
-Browser level — `open`, `close`, `list`, `info`, `attach`, `detach`,
+Browser level — `open [--headless]`, `close`, `list`, `info`, `attach`, `detach`,
 `profile info|logins|seed|reset`, `selftest`.
 
 Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
@@ -101,6 +101,13 @@ Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
   `BROWSER_CONTROL_ROOT` (default `~/.local/share/browser-control/cdp-profiles`).
   Your everyday browser is listed by `list` and readable by `tab list` / `tab
   text`, but it is never written to unless you say so.
+- **`open --headless` starts it with no window.** `--headless=new` is the
+  browser's own windowless mode, and every verb speaks CDP, so the surface is
+  unchanged: `tab text`, `click`, `screenshot`, `activate` all drive it. The
+  mode belongs to the PROCESS, so `open`, `list` and `info` report the mode a
+  running browser is in (read from its own command line), and asking for
+  `--headless` when a windowed browser is already up refuses — `close` it and
+  `open --headless` again to change mode.
 - **`attach` is that consent.** `attach --port N` (or `--pid`, `--profile`)
   makes a browser this CLI did not start writable — **tab writes only**:
   `close` never stops an attached browser. The verification is the browser's

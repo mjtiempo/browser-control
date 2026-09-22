@@ -141,6 +141,13 @@ def t_launch_flags() -> None:
     # load-bearing: a never-run profile publishes no CDP port without these
     assert "--no-first-run" in flags, flags
     assert "--no-default-browser-check" in flags, flags
+    # a HEADED start is the default: no headless flag rides along uninvited
+    assert not any(flag.startswith("--headless") for flag in flags), flags
+    headless = browser.flags(profile, headless=True)
+    assert "--headless=new" in headless, headless
+    assert f"--user-data-dir={profile}" in headless, headless
+    # headless ADDS a flag; it never swaps one of the load-bearing ones out
+    assert set(flags) <= set(headless), (flags, headless)
 
 
 def t_profile_keyed_by_binary() -> None:
@@ -408,9 +415,11 @@ def t_cli_dispatch() -> None:
     """One URL, several URLs, and the flags that are stripped — as argv."""
     seen: dict[str, object] = {}
 
-    def fake_launch(urls: list[str] | None = None, browser: str = "") -> dict:
+    def fake_launch(urls: list[str] | None = None, browser: str = "",
+                    headless: bool = False) -> dict:
         seen["urls"] = list(urls or [])
         seen["browser"] = browser
+        seen["headless"] = headless
         return {"ok": True, "opened": list(urls or [])}
 
     original = browser.launch
@@ -424,11 +433,58 @@ def t_cli_dispatch() -> None:
         assert json.loads(out)["opened"] == ["https://a.example",
                                               "https://b.example"]
         assert seen == {"urls": ["https://a.example", "https://b.example"],
-                        "browser": "brave-browser"}, seen
+                        "browser": "brave-browser",
+                        "headless": False}, seen
         rc, out, err = run_cli(["open"])          # no URL is allowed
         assert rc == 0 and json.loads(out)["opened"] == [], (rc, out, err)
     finally:
         browser.launch = original         # type: ignore[assignment]
+
+
+def t_cli_open_headless() -> None:
+    """`open --headless` reaches `launch(headless=True)`; the plain form False.
+
+    `--headless` decides how a browser STARTS, so the argv half of that
+    contract lives here: the switch is pulled out before `_urls` (which
+    refuses anything flag-shaped) wherever it appears, a plain `open` still
+    says headless=False, and a `tab` call is not an open at all.
+    """
+    calls: list[dict] = []
+
+    def fake_launch(urls: list[str] | None = None, browser: str = "",
+                    headless: bool = False) -> dict:
+        calls.append({"urls": list(urls or []), "browser": browser,
+                      "headless": headless})
+        return {"ok": True, "headless": headless}
+
+    def fake_new_tab(urls: list[str] | None = None,
+                     browser: str = "") -> dict:
+        calls.append({"tab": list(urls or []), "browser": browser})
+        return {"ok": True}
+
+    original_launch, original_new_tab = browser.launch, browser.new_tab
+    browser.launch = fake_launch         # type: ignore[assignment]
+    browser.new_tab = fake_new_tab       # type: ignore[assignment]
+    try:
+        rc, out, err = run_cli(["open", "--headless", "https://a.example"])
+        assert rc == 0 and err == "", (rc, err)
+        assert json.loads(out)["headless"] is True, out
+        # the flag is ORDER-FREE, like every other flag
+        rc, out, err = run_cli(["open", "https://b.example", "--headless"])
+        assert rc == 0 and json.loads(out)["headless"] is True, (rc, out, err)
+        rc, out, err = run_cli(["open", "https://c.example"])
+        assert rc == 0 and json.loads(out)["headless"] is False, (rc, out, err)
+        rc, _out, err = run_cli(["tab", "https://d.example"])
+        assert rc == 0 and err == "", (rc, err)
+    finally:
+        browser.launch = original_launch     # type: ignore[assignment]
+        browser.new_tab = original_new_tab   # type: ignore[assignment]
+    assert calls == [
+        {"urls": ["https://a.example"], "browser": "", "headless": True},
+        {"urls": ["https://b.example"], "browser": "", "headless": True},
+        {"urls": ["https://c.example"], "browser": "", "headless": False},
+        {"tab": ["https://d.example"], "browser": ""},
+    ], calls
 
 
 def t_cli_tab_grammar() -> None:
@@ -1401,6 +1457,32 @@ def t_cmdline_value() -> None:
     # the legacy space-joined form is still parsed
     assert value("chrome --remote-debugging-port=0",
                  "--remote-debugging-port") == "0"
+
+
+def t_headless_detection() -> None:
+    """`is_headless_cmd` reads the PROCESS, and only the process.
+
+    Two oracles, because a headless browser need not carry a flag: the flag
+    on the browser's OWN command line (`--headless` bare or `--headless=…`,
+    in both argv spellings Chrome produces) and the dedicated
+    `chrome-headless-shell` binary, which has no other mode. A URL argument
+    that merely CONTAINS the word is not a mode, and neither is a flag that
+    only shares its prefix.
+    """
+    headless = browser.is_headless_cmd
+    assert headless("chrome\0--headless=new\0--user-data-dir=/x") is True
+    assert headless("chrome\0--headless\0--user-data-dir=/x") is True
+    assert headless("chrome --headless=old") is True
+    assert headless("chrome\0--user-data-dir=/x") is False
+    # a URL that contains the word, and a flag that only prefixes it
+    assert headless("chrome\0https://example.com/headless") is False
+    assert headless("chrome\0--headless-mode") is False
+    # the shell binaries are headless by nature, whatever the cmdline says
+    assert headless("chrome-headless-shell\0--user-data-dir=/x",
+                    "chrome-headless-shell") is True
+    assert headless("chrome-headless-shell\0--user-data-dir=/x",
+                    "/usr/bin/chrome-headless-shell") is True
+    assert headless("chrome\0--user-data-dir=/x", "chrome") is False
 
 
 def t_cli_argv_is_strict() -> None:
@@ -3295,6 +3377,7 @@ def main() -> int:
         ("port file is not proof of a port", t_port_file),
         ("page rows from a fake endpoint", t_page_rows_from_a_fake_endpoint),
         ("cli dispatches with flags stripped", t_cli_dispatch),
+        ("open --headless reaches launch", t_cli_open_headless),
         ("tab grammar lands in one service", t_cli_tab_grammar),
         ("nav/history/reload grammar", t_cli_nav_grammar),
         ("dom verbs' argv", t_cli_dom_grammar),
@@ -3339,6 +3422,7 @@ def main() -> int:
         ("attach opens the write gate", t_attach_bookkeeping),
         ("cli lists browsers and their info", t_cli_lists),
         ("cmdline flag values are read", t_cmdline_value),
+        ("headless detection reads the process", t_headless_detection),
         ("audit redacts beyond the cap", t_audit_redaction_beats_truncation),
         ("a stale secret cannot stamp the next refusal",
          t_audit_secret_does_not_leak_into_the_next_call),

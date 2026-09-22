@@ -79,7 +79,10 @@ from browser_control.lib.errors import (
 
 USAGE = """usage: browser-control-cli VERB [ARGS]
 
-  open [URL...]      start (or adopt) the managed browser; each URL opens
+  open [URL...] [--headless]
+                     start (or adopt) the managed browser; each URL opens;
+                     --headless starts it with NO WINDOW (`--headless=new`)
+                     and the same verbs drive it
   close [--force] [--port N|--pid N|--profile DIR]
                      stop the managed browser this CLI started — or the one
                      NAMED, which is how another tool's browser goes too;

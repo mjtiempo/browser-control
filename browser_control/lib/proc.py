@@ -33,10 +33,15 @@ BROWSER_EXES = ("chrome", "chromium", "chromium-browser", "google-chrome",
                 "microsoft-edge", "vivaldi", "vivaldi-bin",
                 "chrome-headless-shell", "headless_shell")
 
-__all__ = ["BROWSER_EXES", "cmdline_value", "exe_name", "exe_path", "find_pid",
-           "listener_of", "main_processes", "pid_alive", "pid_of",
-           "pid_on_marker", "pid_on_profile", "proc_text", "record_pid",
-           "spawn"]
+# The executables that are headless WITHOUT a flag: the dedicated shell binary
+# exists for nothing else, so a row for one of these reports `headless: true`
+# however its command line is spelled.
+HEADLESS_EXES = ("chrome-headless-shell", "headless_shell")
+
+__all__ = ["BROWSER_EXES", "HEADLESS_EXES", "cmdline_value", "exe_name",
+           "exe_path", "find_pid", "is_headless_cmd", "listener_of",
+           "main_processes", "pid_alive", "pid_of", "pid_on_marker",
+           "pid_on_profile", "proc_text", "record_pid", "spawn"]
 
 
 def pid_alive(pid: int) -> bool:
@@ -101,6 +106,27 @@ def cmdline_value(cmd: str, flag: str) -> str:
         if part == flag and index + 1 < len(parts):
             return parts[index + 1]
     return ""
+
+
+def is_headless_cmd(cmd: str, exe: str = "") -> bool:
+    """Does this process say it runs WITHOUT a window?
+
+    Two oracles, because a headless browser need not carry a flag: the
+    dedicated `chrome-headless-shell`/`headless_shell` binaries are headless by
+    nature, and a full browser says so on its own command line — `--headless`
+    (bare, the spelling current Chrome accepts as well as `--headless=new`), or
+    any `--headless=…` value. A URL argument that merely CONTAINS the word is
+    not a mode, so a part must EQUAL the bare flag or START WITH `--headless=`.
+    The parts are scanned the way `cmdline_value` splits them: on NUL when one
+    is present (the real argv form), else on spaces (the in-place rewrite
+    Chrome gives a child).
+    """
+    if os.path.basename(str(exe)) in HEADLESS_EXES:
+        return True
+    text = str(cmd)
+    parts = text.split("\0") if "\0" in text else text.split()
+    return any(part == "--headless" or part.startswith("--headless=")
+               for part in parts)
 
 
 def main_processes() -> list[tuple[int, str, str]]:

@@ -52,7 +52,17 @@ def cmd_detach(rest: list[str], browser: str) -> dict:
                   profile=profile, detach_all=selector["all"])
 
 def cmd_open(rest: list[str], browser: str) -> dict:
-    return browser_lib.launch(_urls(rest, "open"), browser=browser)
+    """`open [URL...] [--headless]` — start (or adopt) the managed browser.
+
+    `--headless` is a property of the PROCESS, so `launch` owns what it means
+    when one is already up; this adapter only pulls the switch out before
+    `_urls`, which refuses anything flag-shaped. The switch always rides
+    along, given or not: `launch` answers the same thing for `False` that it
+    always did, and the mode is never guessed at one layer above the process.
+    """
+    rest, headless = _switch(rest, "--headless")
+    return browser_lib.launch(_urls(rest, "open"), browser=browser,
+                  headless=headless)
 
 def cmd_close(rest: list[str], browser: str) -> dict:
     """`close [--force] [--port N | --pid N | --profile DIR]`.

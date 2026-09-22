@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **the CLI surface is delivered, packaged, and covered by a committed
-battery.** `python3 tests/test_unit.py` → 73 passed, 0 failed; the live battery
+battery.** `python3 tests/test_unit.py` → 75 passed, 0 failed; the live battery
 (`tests/live_test.py`) runs against a real browser — run it before a release,
 and remember skip ≠ pass.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
@@ -41,7 +41,7 @@ the other verbs own the browser.
 
 | Verb | Does | Verified by (the read-back) |
 | --- | --- | --- |
-| `open [URL...] [--profile DIR]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs; `--profile DIR` names the INSTANCE, so one root can hold several (two Chrome profiles, two sessions) | the endpoint must **answer**, then every opened tab must be in the tab list |
+| `open [URL...] [--headless] [--profile DIR]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs; `--headless` starts it with NO WINDOW (`--headless=new`), which every verb then drives through the same CDP surface; `--profile DIR` names the INSTANCE, so one root can hold several (two Chrome profiles, two sessions) | the endpoint must **answer**, then every opened tab must be in the tab list; the reply reports `headless` — the mode launched on a fresh start, the mode the RUNNING browser is in on an adoption, read from its own cmdline (asking `--headless` when a windowed browser is already up refuses `bad-args` rather than overrule the argv) |
 | `close [--force] [--port N\|--pid N\|--profile DIR]` | stops the browser this CLI started — or, when NAMED, exactly that one, which is how another tool's browser goes | the pid dies **and** the endpoint stops answering; never SIGKILLs, never signals a pid whose own cmdline does not name that profile, and refuses `tabs-open` while page tabs are open unless `--force`; a named browser must be a live, answering, VERIFIED Chromium-family process |
 | `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, whether CDP answers, whether the endpoint VERIFIED, and (when it did) the listener pid/exe the kernel names (+ its tab count) | one `/proc` pass, a CDP probe on the port each one names, and the socket's owner from `/proc/net/tcp` + `/proc/<pid>/fd` |
 | `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
@@ -99,8 +99,9 @@ and a live managed browser wins. Two live managed browsers refuse
 
 ## 2. Evidence
 
-**Hermetic** — `python3 tests/test_unit.py` → **73 passed, 0 failed**: URL
-policy, tab-spec resolution (incl. `tab-ambiguous`), launch flags, profile
+**Hermetic** — `python3 tests/test_unit.py` → **75 passed, 0 failed**: URL
+policy, tab-spec resolution (incl. `tab-ambiguous`), launch flags (incl. the
+headless ones), headless detection from a cmdline, profile
 keyed by the resolved binary, port-file edge cases, `/json` reading against a
 fake endpoint, CLI dispatch and grammar, the capability surface, audit
 redaction, endpoint ownership, lock semantics, pid liveness.
@@ -1163,6 +1164,44 @@ JSON-looking string a string`), pyright 0, `ruff check .` 0, live battery
 60/0/0, the `tab js` check now reading "a value, an object, a JSON-looking
 string kept a string, js-error, result-too-large".
 
+### 5.30 `open --headless` — the same verbs, no window — done
+`open --headless [URL…]` starts the managed browser with `--headless=new`, the
+browser's own windowless mode (§5.11 measured the alternatives: a headed
+browser cannot hold a page without a window, and `--no-startup-window` buys
+only a warm endpoint). The verbs need no change to work against it — every one
+speaks CDP, which does not need a screen — so the feature is the mode flag,
+its read-back, and the one rule that keeps the answer honest.
+
+The mode belongs to the PROCESS, not the call: `flags(profile, headless)`
+appends the flag at spawn, `open`'s reply carries `headless`, and adopting a
+browser that is already up reports the mode THAT one is in, read from its own
+`/proc/<pid>/cmdline` (`proc.is_headless_cmd`: bare `--headless`, any
+`--headless=…`, or the dedicated `chrome-headless-shell` binary, which needs
+no flag). `list`, `info` and `tab list` report the same field on every row, so
+a caller can tell a windowless browser from a windowed one without guessing.
+
+Asking for `--headless` when a windowed browser is already on the profile
+REFUSES `bad-args` and names the fix (`close` it, then `open --headless`
+again): `open` adopts what is running, and silently answering a headless
+request with a windowed browser would overrule the caller's argv. The other
+wrong direction cannot happen — `open` with no flag adopts either mode and
+reports which.
+
+*Done when* one live check starts a headless browser on its own profile,
+proves `--headless=new` in its `/proc` cmdline, drives `tab text`, `click`,
+`screenshot` and `activate` against it, sees it in `tab list` as
+`headless: true`, and stops it again.
+
+Evidence: 75 hermetic checks green (two new — `open --headless reaches
+launch`, `headless detection reads the process`), pyright 0, `ruff check .` 0,
+live battery 61/0/0 — the new `open --headless drives the same verbs,
+windowless` check started a second instance on `<ROOT>/headless`, read
+`--headless=new` from its own `/proc/<pid>/cmdline`, drove `text`, `nav`,
+`click`, `screenshot` (PNG header verified), `activate` and `tab list`
+(`headless: true`) against it, saw a plain `open` adopt and report
+`headless: true`, saw `--headless` against the HEADED instance refuse
+`bad-args` naming the fix, and stopped it verified.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -1190,7 +1229,8 @@ component extensions) for nothing a caller could do with it.
 
 The measurements are kept because the question will come back — *can a headed
 browser hold a page with no window?* No. `--headless=new` is the only mode
-that can, and that is the plugin tier's business (5.9).
+that can — which is why it is now core `open --headless` (§5.30), not the
+plugin tier's business.
 
 ## 6. Decisions needed
 
@@ -1245,7 +1285,7 @@ that can, and that is the plugin tier's business (5.9).
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser (73 checks)
+python3 tests/test_unit.py            # hermetic, no browser (75 checks)
 python3 tests/live_test.py            # the battery, needs a browser (60 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com

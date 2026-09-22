@@ -55,7 +55,8 @@ packages — `lib/cdp/`, `lib/browser/`, `lib/dom/` (which absorbed `input.py`,
   divergence (never written back).
 - Launch flags always include `--remote-debugging-port=0`,
   `--user-data-dir=…`, **`--no-first-run`**, `--no-default-browser-check` (so a
-  never-run/empty profile becomes drivable in ~2 s, not never).
+  never-run/empty profile becomes drivable in ~2 s, not never), and
+  `--headless=new` when `open --headless` asks for a browser with no window.
 - Port/pid/lock files with stale-vs-live semantics; lock is fail-closed; stop
   only a verified browser exe; `status` reports path/source/size/age/in_use.
 - **One resolver**: the browser is resolved once (launch plan `argv[0]`
@@ -153,7 +154,7 @@ for tabs) rather than page JavaScript, and `tab js` is the last resort.
 
 Browser-level:
 
-`open URL…` · `close [--force]` · `list` · `info` · `attach [--port N|--pid N|--profile
+`open URL… [--headless]` · `close [--force]` · `list` · `info` · `attach [--port N|--pid N|--profile
 DIR]` · `attach --list` · `detach [--port N|--pid N|--profile DIR|--all]` ·
 `selftest` · `profile info` · `profile logins [--site HOST] [--cap N]` ·
 `profile seed --from DIR [--force] [--dry]` · `profile reset [--force]` ·

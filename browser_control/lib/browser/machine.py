@@ -31,6 +31,7 @@ from browser_control.lib.paths import (
 from browser_control.lib.proc import (
     cmdline_value,
     exe_path,
+    is_headless_cmd,
     main_processes,
 )
 
@@ -43,7 +44,9 @@ def browsers() -> list[dict]:
     and whether a DevTools endpoint answers for it — which is what makes it
     drivable. `managed` says the profile is one this CLI owns and `attached`
     that it was attached for tab writes, so the answer is about the whole
-    machine rather than our own corner of it.
+    machine rather than our own corner of it; `headless` says it runs with no
+    window, read from the process's own cmdline (`proc.is_headless_cmd`) —
+    the mode is a fact about the process, not about this CLI's flags.
     """
     rows: list[dict] = []
     attached = attachments_lib.STORE.records()
@@ -75,6 +78,7 @@ def browsers() -> list[dict]:
                                       ("default" if profile else "")),
                      "managed": is_managed(profile),
                      "attached": norm(profile) in attached,
+                     "headless": is_headless_cmd(cmd, exe),
                      "cdp": endpoint})
     # ours first, then the attached ones, then whatever can be driven, by pid
     return sorted(rows, key=lambda r: (not r["managed"], not r["attached"],
@@ -169,7 +173,7 @@ class Endpoint:
 
 @dataclass(frozen=True)
 class BrowserRow:
-    """One browser on this machine: identity, profile, and its endpoint."""
+    """One browser on this machine: identity, profile, mode, its endpoint."""
 
     pid: int = 0
     exe: str = ""
@@ -178,6 +182,7 @@ class BrowserRow:
     profile_from: str = ""
     managed: bool = False
     attached: bool = False
+    headless: bool = False
     endpoint: Endpoint = Endpoint()
 
     @classmethod
@@ -188,6 +193,7 @@ class BrowserRow:
                    profile_from=str(row.get("profile_from") or ""),
                    managed=bool(row.get("managed")),
                    attached=bool(row.get("attached")),
+                   headless=bool(row.get("headless")),
                    endpoint=Endpoint.from_dict(endpoint_of(row)))
 
     def as_reply(self) -> dict:
@@ -195,19 +201,20 @@ class BrowserRow:
         return {"pid": self.pid, "exe": self.exe, "path": self.path,
                 "profile": self.profile, "profile_from": self.profile_from,
                 "managed": self.managed, "attached": self.attached,
-                "cdp": self.endpoint.as_reply()}
+                "headless": self.headless, "cdp": self.endpoint.as_reply()}
 
     def as_brief(self) -> dict:
         """The row small enough to ride along in a tab reply."""
         return {"pid": self.pid, "exe": self.exe, "profile": self.profile,
                 "managed": self.managed, "attached": self.attached,
-                "port": self.endpoint.port}
+                "headless": self.headless, "port": self.endpoint.port}
 
     def as_row(self) -> dict:
         """The row without its endpoint block (reported apart)."""
         return {"pid": self.pid, "exe": self.exe, "path": self.path,
                 "profile": self.profile, "profile_from": self.profile_from,
-                "managed": self.managed, "attached": self.attached}
+                "managed": self.managed, "attached": self.attached,
+                "headless": self.headless}
 
     @property
     def may_write(self) -> bool:
@@ -390,7 +397,7 @@ def browser_info(browser: str = "") -> dict:
             "browser": {"pid": 0, "exe": os.path.basename(path),
                         "path": path, "profile": profile,
                         "profile_from": "managed", "managed": True,
-                        "attached": False},
+                        "attached": False, "headless": False},
             "cdp": {"port": 0, "reachable": False}}
 
 def _foreign_row(row: dict, tab: dict) -> dict:

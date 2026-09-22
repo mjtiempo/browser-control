@@ -137,6 +137,7 @@ from browser_control.lib.paths import (  # noqa: F401
 from browser_control.lib.proc import (  # noqa: F401
     BROWSER_EXES,
     cmdline_value,
+    is_headless_cmd,
     pid_alive,
     pid_of,
 )

@@ -69,9 +69,12 @@ from browser_control.lib.poll import (
     poll,
 )
 from browser_control.lib.proc import (
+    exe_name,
+    is_headless_cmd,
     pid_alive,
     pid_of,
     pid_on_profile,
+    proc_text,
     record_pid,
     spawn,
 )
@@ -151,16 +154,24 @@ def ensure_up(profile: str) -> None:
              "`browser-control-cli open`, or attach a running one with "
              "`browser-control-cli attach --port N`")
 
-def flags(profile: str) -> list[str]:
+def flags(profile: str, headless: bool = False) -> list[str]:
     """The launch flags that make a browser drivable ON its managed profile.
 
     `--no-first-run`/`--no-default-browser-check` are load-bearing: on a
     profile that has never run a browser, Chrome's first-run flow keeps the
     DevTools endpoint from coming up at all (measured: no port in 30 s
     without them, 2 s with).
+
+    `headless=True` adds `--headless=new` — the browser's own windowless mode,
+    and the only one that holds a page with no window (docs/progress.md §5.11
+    measured the alternatives). Nothing else changes: every verb speaks CDP,
+    so the same surface drives a browser nobody can see.
     """
-    return [f"--user-data-dir={profile}", "--remote-debugging-port=0",
+    argv = [f"--user-data-dir={profile}", "--remote-debugging-port=0",
             "--no-first-run", "--no-default-browser-check"]
+    if headless:
+        argv.append("--headless=new")
+    return argv
 
 def safe_url(url: str) -> str:
     """A URL we are willing to hand to the browser: http(s) or about:blank."""
@@ -351,7 +362,32 @@ def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
              "list: " + ", ".join(missing[:4]))
     return [found[target_id] for target_id in ids]
 
-def launch(urls: list[str] | None = None, browser: str = "") -> dict:
+def _running_headless(profile: str, owner: dict) -> bool | None:
+    """Is the browser ALREADY on that profile running without a window?
+
+    Its own `/proc/<pid>/cmdline` is the oracle — the same one `browsers()`
+    builds its rows from. The endpoint that answers does not advertise a mode
+    and the port file is only a port, so the process is the only witness. The
+    owner verdict names the pid holding the listening socket; `pid_of` is the
+    fallback for the race where that verdict carries none.
+
+    `None` is "cannot say" — no pid, or a cmdline that could not be read
+    (it exited between the owner verdict and here). That is not a HEADED
+    verdict: an unclear oracle is not proof of a window, so a caller that
+    asked for headless is answered by the adoption, not by a refusal that
+    claims to know the mode it could not read.
+    """
+    pid = as_int(owner.get("pid")) or pid_of(profile)
+    if not pid:
+        return None
+    cmd = proc_text(pid, "cmdline")
+    if not cmd:
+        return None
+    return is_headless_cmd(cmd, exe_name(pid))
+
+
+def launch(urls: list[str] | None = None, browser: str = "",
+           headless: bool = False) -> dict:
     """Start (or adopt) the managed browser and prove the pages are there.
 
     `urls` is what to open: a fresh start loads the FIRST as its startup page
@@ -372,6 +408,12 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
     loser waits, then sees the endpoint (a real one, verified) and ADOPTS:
     `started: true` happens exactly once, or the loser refuses `profile-busy`
     naming the holder. Nothing is left to a third party's behaviour.
+
+    `headless=True` starts a browser with no window (`--headless=new`) and the
+    reply says `headless: true`. The mode belongs to the PROCESS, not to the
+    call: an adopted browser is reported in the mode it is actually running,
+    and asking for headless when a windowed one is already up REFUSES rather
+    than silently overrule the argv. Close it and open again to change mode.
     """
     wanted = [safe_url(url) for url in (urls or [])]
     path = binary(browser)
@@ -397,6 +439,30 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
         else:
             stale = ""
         already = bool(owner.get("verified"))
+        # the mode a running browser is in comes from its own cmdline, never
+        # from this call's flag: `--headless` decides how a browser STARTS,
+        # and a call that asked for headless must not be answered by a
+        # windowed browser that was already up (adoption would silently
+        # overrule the caller's argv — the same rule that makes a scope that
+        # cannot apply a refusal everywhere else). Only a READ "headed"
+        # refuses; `None` (the cmdline unreadable) adopts and reports the
+        # mode it cannot prove, which is `False`, not a guess
+        detected = _running_headless(profile, owner) if already else None
+        if detected is not None:
+            if not detected and headless:
+                fail(ERR_BAD_ARGS,
+                     f"open --headless: the browser on {profile} is already "
+                     "running HEADED — this flag decides how a browser STARTS, "
+                     "and that one is already up; close it first "
+                     f"(`browser-control-cli close --profile {profile}`) and "
+                     "`open --headless` again")
+            mode = detected
+        elif already:
+            # adoption with an unreadable cmdline: the honest report is
+            # "cannot say", and the wire format has a bool — False, named
+            mode = False
+        else:
+            mode = bool(headless)
         requests: list[str] = []
         opened: list[dict] = []
         if already:
@@ -406,7 +472,7 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
         else:
             first = wanted[0] if wanted else "about:blank"
             requests = [first, *wanted[1:]]
-            record_pid(profile, spawn([path, *flags(profile), first]))
+            record_pid(profile, spawn([path, *flags(profile, headless), first]))
             if not _pkg._wait_own_port(profile):
                 fail(ERR_LAUNCH_FAILED,
                      f"started {path} on {profile} but no CDP endpoint "
@@ -426,7 +492,8 @@ def launch(urls: list[str] | None = None, browser: str = "") -> dict:
              "(browser-control-cli open https://…)")
     notes = [text for text in (stale, lock.warning) if text]
     reply = {"ok": True, "started": not already, "browser": path,
-             "profile": profile, "port": cdp.port_of(profile),
+             "profile": profile, "headless": mode,
+             "port": cdp.port_of(profile),
              "pid": pid_of(profile), "tabs": rows,
              "opened": [{"requested": requests[index], "id": row["id"],
                          "url": row["url"], "title": row["title"]}
