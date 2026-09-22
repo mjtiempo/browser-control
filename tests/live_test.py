@@ -1324,6 +1324,9 @@ def c_headless_browser() -> str:
     to the PROCESS, not the call: a plain `open` on that instance reports
     `headless: true` back, asking `--headless` of the HEADED instance the
     battery already has up refuses, and a HEADED start still carries no flag.
+    The extension contract is read the same way — from the process's own
+    cmdline — in both modes: a managed profile may be seeded from the user's,
+    so neither instance may load what the seed dragged in.
     """
     profile = os.path.join(ROOT, "headless")
     base, pid, port = base_url(), 0, 0
@@ -1337,6 +1340,9 @@ def c_headless_browser() -> str:
         line = cmdline(pid)
         assert "--headless=new" in line, f"pid {pid}: {line[:160]}"
         assert f"--user-data-dir={profile}" in line, line[:160]
+        # ...and a seeded profile's extensions are never loaded, in EITHER
+        # mode: the flag is on the PROCESS, which is where the mode lives too
+        assert "--disable-extensions" in line, f"pid {pid}: {line[:160]}"
         deadline = time.time() + 10
         while time.time() < deadline and not listening(port):
             time.sleep(0.2)
@@ -1382,6 +1388,7 @@ def c_headless_browser() -> str:
         assert "HEADED" in err and "close" in err, err
         headed = cmdline(int(STATE["pid"]))
         assert "--headless" not in headed, headed[:160]
+        assert "--disable-extensions" in headed, headed[:160]
         # the close is verified like any other: pid AND endpoint gone
         gone = ok_json("close", "--force", "--profile", profile)
         assert gone["stopped"] is True and gone["pid"] == pid, gone
@@ -1400,7 +1407,7 @@ def c_headless_browser() -> str:
                 break
             time.sleep(0.3)
     return (f"pid {pid} drove text/click/screenshot/activate headless; "
-            "--headless=new read from /proc")
+            "--headless=new read from /proc; no extensions in either mode")
 
 
 def c_close_stops_the_browser() -> str:

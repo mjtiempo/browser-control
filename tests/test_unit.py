@@ -141,10 +141,15 @@ def t_launch_flags() -> None:
     # load-bearing: a never-run profile publishes no CDP port without these
     assert "--no-first-run" in flags, flags
     assert "--no-default-browser-check" in flags, flags
+    # a SEEDED profile's extensions are never loaded, in EITHER mode: one of
+    # them spins a headless browser's main thread until its own DevTools
+    # endpoint starves (measured: 126% CPU, `/json` in 7.4 s vs 4 ms)
+    assert "--disable-extensions" in flags, flags
     # a HEADED start is the default: no headless flag rides along uninvited
     assert not any(flag.startswith("--headless") for flag in flags), flags
     headless = browser.flags(profile, headless=True)
     assert "--headless=new" in headless, headless
+    assert "--disable-extensions" in headless, headless
     assert f"--user-data-dir={profile}" in headless, headless
     # headless ADDS a flag; it never swaps one of the load-bearing ones out
     assert set(flags) <= set(headless), (flags, headless)

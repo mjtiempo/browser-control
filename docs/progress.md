@@ -1202,6 +1202,51 @@ windowless` check started a second instance on `<ROOT>/headless`, read
 `headless: true`, saw `--headless` against the HEADED instance refuse
 `bad-args` naming the fix, and stopped it verified.
 
+### 5.31 A seeded profile's extensions are never loaded — done
+`flags()` now carries `--disable-extensions` in BOTH modes. A managed profile
+is routinely SEEDED from the user's own (`profile seed` copies the tree minus
+caches and locks, `Default/Extensions` included), so a "managed" instance was
+loading third-party code the CLI never chose — and under `--headless=new` one
+of them broke the browser it was loaded into.
+
+Same binary (Chrome 153), same flags, the profile the only variable:
+
+| profile at launch | main-thread CPU | `/json/version` |
+| --- | --- | --- |
+| scratch (`/tmp`) | 0.0% | 5 ms |
+| seeded (managed) | 126% | 7.4 s |
+| seeded + `--disable-extensions` | ~7% | 4 ms |
+
+The spinner was in the target census before the endpoint starved: MetaMask's
+`offscreen.html` background page plus extension service workers
+(`nkbihfbeogaeaoehlefnkodbefgpgknn`, `nngceckbapebfimnlniiiahkandclblb`,
+`bnccfnkpnedbcganaoiaiancmfddjedl`). A browser whose own DevTools HTTP
+endpoint answers in 7 s is not drivable: `open --headless` on the seeded
+profile left the process at 114–126% CPU, every call a 5–15 s timeout
+(`cdp-unreachable`), and the keystrokes that did land arrived mangled — a
+query typed as `araghchi speaking in UN` reached the box as `hchi speak in
+UN`.
+
+The flag rides along in both modes on purpose: the mode is a property of the
+PROCESS, and a headed instance is otherwise the same browser as the headless
+one — one launch contract, not two. The extensions stay on disk; only the
+code is never loaded.
+
+*Done when* the live check reads the contract off a real process in both
+modes, and the previously-failing case (`open --headless` on the seeding
+profile) drives the verb surface with no timeouts and no dropped keystrokes.
+
+Evidence: 75 hermetic checks green (the launch-flags check now asserts
+`--disable-extensions` in the headed AND headless argv), pyright 0, `ruff
+check .` 0, live battery 61/0/0 (`open --headless drives the same verbs,
+windowless` now also asserts `--disable-extensions` on the headless process
+and on the battery's headed one). On the seeding profile that failed before:
+`open --headless` launches at 6–11% CPU (was 114–126%), `/json/list` reports
+0 `chrome-extension://` targets (was 4), `tab info` answers in 125–131 ms
+(was 5–15 s timeouts), `tab type "headless fix check"` verifies all 18
+characters (that path dropped 11 of 23 before), and a headed instance,
+launched with the same flag, drove `tab type` verified too.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs

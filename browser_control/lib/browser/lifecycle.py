@@ -162,13 +162,24 @@ def flags(profile: str, headless: bool = False) -> list[str]:
     DevTools endpoint from coming up at all (measured: no port in 30 s
     without them, 2 s with).
 
+    `--disable-extensions` is not a preference: a managed profile is often
+    SEEDED from the user's own, so it carries whatever extensions that profile
+    had — third-party code this CLI never chose. One of them (a wallet's
+    offscreen document and service workers) spun a headless browser's main
+    thread at ~126% CPU and starved its OWN DevTools endpoint: `/json`
+    answered in 7.4 s where the same profile with extensions off answers in
+    4 ms, which stranded every verb on timeouts and dropped keystrokes. The
+    flag rides along in BOTH modes — a headed instance is the same browser as
+    the headless one, and neither loads code the seed dragged in.
+
     `headless=True` adds `--headless=new` — the browser's own windowless mode,
     and the only one that holds a page with no window (docs/progress.md §5.11
     measured the alternatives). Nothing else changes: every verb speaks CDP,
     so the same surface drives a browser nobody can see.
     """
     argv = [f"--user-data-dir={profile}", "--remote-debugging-port=0",
-            "--no-first-run", "--no-default-browser-check"]
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions"]
     if headless:
         argv.append("--headless=new")
     return argv

@@ -108,6 +108,14 @@ Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
   running browser is in (read from its own command line), and asking for
   `--headless` when a windowed browser is already up refuses — `close` it and
   `open --headless` again to change mode.
+- **Managed instances load no extensions.** A managed profile is often
+  seeded from yours (`profile seed`), so it can carry your extensions on
+  disk — but the browser always starts with `--disable-extensions`, windowed
+  or headless. That is not tidiness: a wallet extension's background pages
+  were measured spinning a headless instance's main thread at ~126% CPU
+  until its own DevTools endpoint answered in 7 s instead of 4 ms, which
+  starves every verb. The files stay in the profile; only the code is never
+  loaded.
 - **`attach` is that consent.** `attach --port N` (or `--pid`, `--profile`)
   makes a browser this CLI did not start writable — **tab writes only**:
   `close` never stops an attached browser. The verification is the browser's
