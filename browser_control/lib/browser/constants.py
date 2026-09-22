@@ -31,6 +31,8 @@ STOP_WAIT_S = 10.0
 
 PORT_WAIT_S = 5.0
 
+VERSION_WAIT_S = 5.0        # `--version` answers in ms, or it never will
+
 ACTIVE_SPEC = "active"
 
 NAV_TIMEOUT_S = 25.0        # a cold page; long enough, short enough to report

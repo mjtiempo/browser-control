@@ -167,6 +167,27 @@ def t_launch_flags() -> None:
     assert f"--user-data-dir={profile}" in headless, headless
     # headless ADDS a flag; it never swaps one of the load-bearing ones out
     assert set(flags) <= set(headless), (flags, headless)
+    # no UA handed in: no claim rides along — the launch reads the binary's
+    # own version, and an unreadable one adds nothing rather than a guess
+    assert not any(flag.startswith("--user-agent") for flag in flags), flags
+    spoofed = browser.flags(profile, user_agent="UA-TEST")
+    assert "--user-agent=UA-TEST" in spoofed, spoofed
+    # the UA rides in BOTH modes, and ADDS; it never swaps a flag out
+    assert set(flags) <= set(spoofed), (flags, spoofed)
+    both = browser.flags(profile, headless=True, user_agent="UA-TEST")
+    assert "--user-agent=UA-TEST" in both, both
+    assert "--headless=new" in both, both
+
+
+def t_user_agent_spoof() -> None:
+    """The spoofed UA is the binary's own version, in Chrome's reduced form."""
+    ua = browser.ua_from_version("Google Chrome 153.0.8010.52", "x86_64")
+    assert ua == ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"), ua
+    assert "HeadlessChrome" not in ua
+    # no version, no claim: the launch then sends the browser's own UA
+    assert browser.ua_from_version("") == ""
+    assert browser.ua_from_version("Google Chrome") == ""
 
 
 def t_profile_keyed_by_binary() -> None:
@@ -4676,6 +4697,7 @@ def main() -> int:
         ("safe_url policy", t_safe_url),
         ("resolve_tab refuses ambiguity", t_resolve_tab),
         ("launch flags make a profile drivable", t_launch_flags),
+        ("the spoofed UA is the binary's own version", t_user_agent_spoof),
         ("profile keyed by the resolved binary", t_profile_keyed_by_binary),
         ("port file is not proof of a port", t_port_file),
         ("page rows from a fake endpoint", t_page_rows_from_a_fake_endpoint),

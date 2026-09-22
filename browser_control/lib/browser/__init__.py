@@ -25,6 +25,7 @@ from browser_control.lib.browser.lifecycle import (  # noqa: F401
     attach,
     attachments,
     binary,
+    desktop_user_agent,
     detach,
     ensure_up,
     flags,
@@ -35,6 +36,7 @@ from browser_control.lib.browser.lifecycle import (  # noqa: F401
     safe_url,
     scope,
     stop,
+    ua_from_version,
 )
 from browser_control.lib.browser.machine import (  # noqa: F401
     BrowserRow,

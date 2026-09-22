@@ -108,6 +108,16 @@ Page level, under `tab` — `list`, `info`, `close`, `nav`, `back`, `forward`,
   running browser is in (read from its own command line), and asking for
   `--headless` when a windowed browser is already up refuses — `close` it and
   `open --headless` again to change mode.
+- **A launch never announces itself as automation.** Every start — windowed
+  or headless — carries the UA a windowed run would send: the binary's own
+  version, read with `--version` and written in Chrome's reduced form
+  (`Chrome/153.0.0.0`), plus `--disable-blink-features=AutomationControlled`
+  (Chrome 153 sets `navigator.webdriver` when the DevTools port is `0`).
+  Measured: a stricter bot check (Cloudflare on `pna.gov.ph`) looped its
+  challenge forever for an instance whose UA said `HeadlessChrome/…` and
+  loaded the page with the spoof — a windowed instance already sent that same
+  string. If the version cannot be read, no UA flag is added; the browser
+  keeps its own.
 - **Managed instances load no extensions.** A managed profile is often
   seeded from yours (`profile seed`), so it can carry your extensions on
   disk — but the browser always starts with `--disable-extensions`, windowed

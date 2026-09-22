@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from browser_control.lib.browser.constants import (
     LAUNCH_WAIT_S,
     PORT_WAIT_S,
     STOP_WAIT_S,
+    VERSION_WAIT_S,
 )
 from browser_control.lib.browser.machine import (
     endpoint_of,
@@ -167,7 +169,40 @@ def ensure_up(profile: str) -> None:
              "`browser-control-cli open`, or attach a running one with "
              "`browser-control-cli attach --port N`")
 
-def flags(profile: str, headless: bool = False) -> list[str]:
+def ua_from_version(version: str, machine: str = "") -> str:
+    """The UA a DESKTOP run of this version sends, in Chrome's REDUCED form.
+
+    UA reduction keeps only the major version in the string
+    (`Chrome/153.0.0.0`), so the template is fixed and the version is the one
+    the binary itself reports. "" when no version can be read: a UA the
+    binary cannot back is worse than the browser's own.
+    """
+    match = re.search(r"\b(\d+)\.\d+\.\d+\.\d+\b", version or "")
+    if not match:
+        return ""
+    arch = machine or os.uname().machine or "x86_64"
+    return (f"Mozilla/5.0 (X11; Linux {arch}) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{match.group(1)}.0.0.0 "
+            "Safari/537.36")
+
+
+def desktop_user_agent(path: str) -> str:
+    """The UA a windowed run of THIS binary sends, read from the binary.
+
+    `--version` is the only oracle available BEFORE a launch — CDP's
+    `Browser.getVersion` needs a running browser, and the UA flag has to ride
+    on the launch itself. The probe never touches a profile.
+    """
+    try:
+        done = subprocess.run([path, "--version"], capture_output=True,
+                              text=True, timeout=VERSION_WAIT_S)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return ua_from_version(f"{done.stdout or ''}{done.stderr or ''}")
+
+
+def flags(profile: str, headless: bool = False,
+          user_agent: str = "") -> list[str]:
     """The launch flags that make a browser drivable ON its managed profile.
 
     `--no-first-run`/`--no-default-browser-check` are load-bearing: on a
@@ -194,11 +229,33 @@ def flags(profile: str, headless: bool = False) -> list[str]:
     the owner check reads the bound ADDRESS off the kernel, so a launch that
     did not name it could come up on a wide bind and be refused as somebody
     else's endpoint (a review flagged that the launch never pinned it).
+
+    `--disable-blink-features=AutomationControlled` answers a quirk of the
+    port: Chrome 153 sets `navigator.webdriver` to true when it is launched
+    with `--remote-debugging-port=0` and false for an explicit port (measured
+    on a throwaway profile: port 0 -> true, fixed port -> false, port 0 + this
+    flag -> false). A site's stricter bot check reads that bit and loops its
+    non-interactive challenge forever — PNA's Cloudflare wall climbed
+    `cf_chl_rc_ni`, rotated its Ray ID and never rendered a widget to answer,
+    where the same browser, profile and port WITH the flag loaded the page.
+    The flag suppresses only the marker the port itself produced; CDP is
+    untouched, and every verb still speaks it.
+
+    `--user-agent=…` carries the REAL version in BOTH modes: headless Chrome
+    announces itself in the string (`HeadlessChrome/153…`), and a stricter
+    bot check reads it before anything else runs (measured: the same browser,
+    profile and flags stayed on a Cloudflare challenge until the UA said
+    `Chrome/…` instead — a windowed run already sends that string, so GUI is
+    unchanged). No version read, no flag: a claim the binary cannot back is
+    worse than the truth.
     """
     argv = [f"--user-data-dir={profile}", "--remote-debugging-port=0",
             "--remote-debugging-address=127.0.0.1",
+            "--disable-blink-features=AutomationControlled",
             "--no-first-run", "--no-default-browser-check",
             "--disable-extensions"]
+    if user_agent:
+        argv.append(f"--user-agent={user_agent}")
     if headless:
         argv.append("--headless=new")
     return argv
@@ -545,7 +602,9 @@ def launch(urls: list[str] | None = None, browser: str = "",
         else:
             first = wanted[0] if wanted else "about:blank"
             requests = [first, *wanted[1:]]
-            pid = spawn([path, *flags(profile, headless), first])
+            ua = desktop_user_agent(path)
+            pid = spawn([path, *flags(profile, headless, user_agent=ua),
+                         first])
             record_pid(profile, pid)
             if not _pkg._wait_own_port(profile):
                 fail(ERR_LAUNCH_FAILED,
