@@ -3910,6 +3910,43 @@ def t_the_remaining_refusal_codes() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def t_an_unreadable_proc_path_is_a_row() -> None:
+    """A `/proc/<pid>` this user cannot READ is a census row, not a crash.
+
+    Found by CI on GitHub's runner, where pid 11 belongs to root: the census
+    calls `exe_path(pid)` for every row, and `os.path.realpath` on an
+    unreadable `/proc/<pid>/exe` raises PermissionError — so `list`, `tab
+    list`, `info` and every shared resolver died with a traceback instead of
+    reporting the machine. `exe_name` already guarded this; `exe_path` did
+    not (the deep-research round's CI run caught it on its first push).
+    """
+    # 1. the guard itself: a process whose `/proc/<pid>/exe` cannot be read
+    #    answers "" instead of raising (a pid that does not exist is NOT an
+    #    error — realpath returns the path unchanged, which is why only the
+    #    PermissionError branch needs arming here)
+    real_realpath = os.path.realpath
+
+    def denied(filename: Any, *args: Any, **kwargs: Any) -> str:
+        if str(filename).startswith("/proc/"):
+            raise PermissionError(13, "Permission denied", str(filename))
+        return str(real_realpath(filename, *args, **kwargs))
+
+    real_processes = machine_lib.main_processes
+    os.path.realpath = denied                          # type: ignore[assignment]
+    try:
+        assert proc_lib.exe_path(11) == "" and proc_lib.exe_name(11) == ""
+        # 2. the census ROW survives it: built from what was readable, with
+        #    the path left empty rather than the whole answer refused
+        machine_lib.main_processes = lambda: [         # type: ignore[assignment]
+            (11, "chrome", "chrome\0--user-data-dir=/nowhere")]
+        rows = browser.browsers()
+    finally:
+        machine_lib.main_processes = real_processes    # type: ignore[assignment]
+        os.path.realpath = real_realpath               # type: ignore[assignment]
+    assert len(rows) == 1, rows
+    assert rows[0]["path"] == "" and rows[0]["exe"] == "chrome", rows
+
+
 def t_audit_redaction_beats_truncation() -> None:
     """A secret longer than ARG_CAP is redacted BEFORE the cap truncates it.
 
@@ -6031,6 +6068,8 @@ def main() -> int:
          t_evaluate_until_retries_a_silent_sample),
         ("the remaining refusal codes are produced",
          t_the_remaining_refusal_codes),
+        ("an unreadable /proc path is a row, not a crash",
+         t_an_unreadable_proc_path_is_a_row),
         ("the close read-back tolerates a stranger",
          t_tab_count_does_not_refuse_on_a_stranger),
         ("an unreadable tab list is not absence",

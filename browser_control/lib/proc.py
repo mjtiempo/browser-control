@@ -87,8 +87,19 @@ def exe_name(pid: int | str) -> str:
 
 
 def exe_path(pid: int | str) -> str:
-    """The executable a pid is running, by real path."""
-    return os.path.realpath(f"/proc/{pid}/exe")
+    """The executable a pid is running, by real path — or "" if unreadable.
+
+    `os.path.realpath` on `/proc/<pid>/exe` RAISES for a process this user
+    cannot inspect (GitHub's runner: pid 11 belongs to root), and the census
+    calls this for every row — so one unreadable process took `list`, `tab
+    list`, `info` and every shared resolver down with a traceback instead of
+    reporting the machine it observed. `exe_name` already caught this; both
+    now answer "" and the row keeps whatever else could be read.
+    """
+    try:
+        return os.path.realpath(f"/proc/{pid}/exe")
+    except OSError:
+        return ""
 
 
 def cmdline_value(cmd: str, flag: str) -> str:

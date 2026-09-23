@@ -1406,14 +1406,23 @@ dialog and never hangs, and then watches the blocked move LAND once the
 one-shot client detaches — on its own tab, so the battery's shared fixture is
 never parked.
 
+The first CI run on GitHub's runner then found a REAL portability bug in the
+product: `proc.exe_path` read `/proc/<pid>/exe` without the OSError guard its
+sibling `exe_name` carries, so a census row for a process this user cannot
+inspect (pid 11, root-owned, on that runner) raised PermissionError out of
+`browsers()` — `list`, `tab list`, `info` and every shared resolver died with
+a traceback instead of reporting the machine. The guard is fixed and
+`t_an_unreadable_proc_path_is_a_row` pins it (the row is built with `path: ""`
+and what else was readable).
+
 *Done when* every review P0 and every named refusal code has a check, the
 research's input-shape and anti-bot contracts are pinned, and both suites are
 green.
 
-Evidence: 119 hermetic checks green (17 new), pyright 0, `ruff check .` 0, and
+Evidence: 120 hermetic checks green (18 new), pyright 0, `ruff check .` 0, and
 the live battery **62 passed, 0 failed, 0 skipped** (additions above, run
-twice against google-chrome-stable 153.0.8010.52 on a throwaway root; the
-beforeunload check was stable in a separate measurement too).
+three times against google-chrome-stable 153.0.8010.52 on a throwaway root;
+the beforeunload check was stable in a separate measurement too).
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
@@ -1498,7 +1507,7 @@ plugin tier's business.
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser (119 checks)
+python3 tests/test_unit.py            # hermetic, no browser (120 checks)
 python3 tests/live_test.py            # the battery, needs a browser (62 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com
