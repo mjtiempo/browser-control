@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import glob
 import http.server
+import base64
 import io
 import json
 import math
@@ -26,7 +27,8 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -46,8 +48,10 @@ from browser_control.lib import (  # noqa: E402
     errors,
 )
 from browser_control.lib import argv as argv_lib  # noqa: E402
+from browser_control.lib import attachments as attachments_lib  # noqa: E402
 from browser_control.lib import coerce as coerce_lib  # noqa: E402
 from browser_control.lib import images as images_lib  # noqa: E402
+from browser_control.lib import poll as poll_lib  # noqa: E402
 from browser_control.lib import policy as policy_lib
 from browser_control.lib import (
     profile as profile_lib,
@@ -58,10 +62,20 @@ from browser_control.lib import scope as scope_lib
 from browser_control.lib.browser import lifecycle as lifecycle_lib  # noqa: E402
 from browser_control.lib.browser import machine as machine_lib  # noqa: E402
 from browser_control.lib.browser import readback as readback_lib  # noqa: E402
+# These four are bound through importlib because their facades re-export the
+# VERB of the same name (`browser.nav` is the function, not the module), so a
+# plain `from … import nav` would hand the check a function where it needs the
+# module's patchable seams (`page_eval`, `poll`).
+nav_lib: Any = import_module("browser_control.lib.browser.nav")
+dialog_lib: Any = import_module("browser_control.lib.dom.dialog")
+media_lib: Any = import_module("browser_control.lib.dom.media")
+scroll_lib: Any = import_module("browser_control.lib.dom.scroll")
+actions_lib: Any = import_module("browser_control.lib.dom.actions")
 from browser_control.lib.cdp import endpoint as endpoint_lib  # noqa: E402
 from browser_control.lib.cdp import rpc as cdp_rpc  # noqa: E402
 from browser_control.lib.errors import ControlError  # noqa: E402
 from browser_control.lib.profile import trees as trees_lib  # noqa: E402
+from browser_control.lib import seedtree as seedtree_lib  # noqa: E402
 
 # Importing this module must be INERT: it used to mkdtemp a /tmp directory and
 # `setdefault` the log, so a host that exports BROWSER_CONTROL_LOG had every
@@ -72,6 +86,11 @@ SUITE_LOG = "/dev/null"          # replaced in main()
 
 PASS: list[str] = []
 FAIL: list[str] = []
+# A check that could not run (a missing prerequisite, a browser-free host):
+# recorded, printed, and paid for in the exit status — a skip is not a pass
+# (the battery has always said so; the hermetic suite did not, and a machine
+# without `node` reported a green run for a check that never ran).
+SKIP: list[tuple[str, str]] = []
 
 
 def _gate(allow: str | None = None, deny: str | None = None) -> Any:
@@ -85,12 +104,15 @@ def _may(policy: Any, action: str) -> tuple[bool, str]:
 
 
 def check(name: str, fn: Callable[[], None]) -> None:
+    skipped_before = len(SKIP)
     try:
         fn()
     except Exception as e:                                     # noqa: BLE001
         FAIL.append(name)
         print(f"FAIL  {name}  {type(e).__name__}: {e}")
     else:
+        if len(SKIP) > skipped_before:
+            return              # the check recorded its own skip
         PASS.append(name)
         print(f"PASS  {name}")
 
@@ -159,6 +181,18 @@ def t_launch_flags() -> None:
     # them spins a headless browser's main thread until its own DevTools
     # endpoint starves (measured: 126% CPU, `/json` in 7.4 s vs 4 ms)
     assert "--disable-extensions" in flags, flags
+    # the automation MARKER is suppressed on every launch, and its opposite is
+    # never sent: Chrome 153 sets `navigator.webdriver` when it is started with
+    # `--remote-debugging-port=0`, and a site's stricter bot check (Cloudflare
+    # on pna.gov.ph, measured) loops its challenge forever on that bit. The
+    # security research named the other half: no `--enable-automation`, and no
+    # `--remote-allow-origins` (the CLI sends no Origin header, so it needs
+    # none — a wildcard origin would re-open the DevTools port to any page)
+    assert "--disable-blink-features=AutomationControlled" in flags, flags
+    assert not any(flag.startswith("--enable-automation") for flag in flags), \
+        flags
+    assert not any(flag.startswith("--remote-allow-origins") for flag in flags), \
+        flags
     # a HEADED start is the default: no headless flag rides along uninvited
     assert not any(flag.startswith("--headless") for flag in flags), flags
     headless = browser.flags(profile, headless=True)
@@ -490,6 +524,8 @@ def t_page_expressions_compile() -> None:
     SKIPS, so the suite stays hermetic everywhere.
     """
     if shutil.which("node") is None:
+        SKIP.append(("page expressions compile as JavaScript",
+                     "node is not on PATH — the check needs `new Function`"))
         print("  SKIP  page expressions compile: node is not on PATH")
         return
     sources = _page_js_sources()
@@ -1128,6 +1164,10 @@ def t_dom_shape_filters() -> None:
     # a verb, whatever the page answered (a review measured a TypeError)
     assert coerce_lib.as_ints([1, 2, 3, 4], 2) == [1, 2]
     assert coerce_lib.as_ints(["2", 3]) == [2, 3]
+    # `count=0` means NO limit, not "keep none": the documented footgun the
+    # docs warn about, pinned so a refactor to `out[:count]` cannot ship
+    assert coerce_lib.as_ints([1, 2, 3], 0) == [1, 2, 3]
+    assert coerce_lib.as_ints([1, 2, 3], None) == [1, 2, 3]
     for bad in (7, None, "12", {"a": 1}, object()):
         assert coerce_lib.as_ints(bad) == [], bad
     # the placeholder check has to be one that CAN fail: `"x" not in
@@ -1977,6 +2017,9 @@ def t_lock_serializes_a_check_then_act() -> None:
         with browser._lock(path, "open", wait=0.0) as again:      # noqa: SLF001
             assert again == browser.LockState(held=True, warning=""), again
         assert os.path.exists(path), path
+        # ...and the lock file is 0600 while every other create is 0700
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, \
+            oct(stat.S_IMODE(os.stat(path).st_mode))
         # a path that cannot be opened at all is a WARNING, never a failure:
         # a guard that silently does nothing would be worse than none
         with browser._lock("/proc/nope/lock", "open") as broken:  # noqa: SLF001
@@ -2590,8 +2633,14 @@ def t_transport_against_a_fake_peer() -> None:
     from websockets.sync.server import serve
 
     seen: list[dict] = []
+    handshakes: list[dict] = []
 
     def handler(connection: object) -> None:
+        # the HANDSHAKE headers of every connection, for the Origin rule below
+        request = getattr(connection, "request", None)
+        if request is not None:
+            handshakes.append({str(k).lower(): v for k, v in
+                               request.headers.items()})
         send = connection.send                    # type: ignore[union-attr]
         for raw in connection:                    # type: ignore[union-attr]
             message = json.loads(raw)
@@ -2647,10 +2696,21 @@ def t_transport_against_a_fake_peer() -> None:
             server.shutdown()
             serving.join(timeout=5)
     # what the peer was actually asked, in order: the id filter, the non-JSON
-    # frame, `Page.enable` (refused), and the evaluate that still answered
+    # frame, `Page.enable` (refused), and the evaluate that still answered.
+    # EXACT equality is also the anti-bot contract: `Page.enable` is the only
+    # domain this transport opens — never `Runtime.enable`, `Console.enable`
+    # or `Debugger.enable`, the side-channel the security research named as
+    # actively detected by anti-bot vendors.
     assert [m.get("method") for m in seen] == [
         "Runtime.evaluate", "Nonsense", "Page.enable",
         "Runtime.evaluate"], seen
+    # ...and the upgrade carries NO Origin header (the security research's
+    # regression test for the `--remote-allow-origins` temptation: an Origin
+    # is what the browser would have to allow-list, and that allow-list is
+    # exactly what re-opens the DevTools port to any page)
+    assert handshakes, "the peer saw no handshake to inspect"
+    for headers in handshakes:
+        assert not any(name.startswith("origin") for name in headers), headers
 
 
 def t_click_presses_at_the_proven_point() -> None:
@@ -2712,6 +2772,1142 @@ def _restore_root(keep: str | None) -> None:
         os.environ.pop("BROWSER_CONTROL_ROOT", None)
     else:
         os.environ["BROWSER_CONTROL_ROOT"] = keep
+
+
+#: The browser row and tab row a scripted page hangs off: one shape, so every
+#: fake below agrees on what a resolution looks like.
+_SCRIPTED_ROW = {"pid": 4321, "exe": "chrome", "profile": "/profiles/x",
+                 "managed": True, "attached": False,
+                 "cdp": {"port": 1515}}
+_SCRIPTED_TAB = {"id": "TAB", "url": "u"}
+
+
+class _ScriptedPage:
+    """A `Session` stand-in whose page answers come from one routing table.
+
+    The mutation verbs read their read-backs through `evaluate` and act
+    through `call`; a script that answers each expression lets a check make
+    the page say exactly "no" — the half of verify-or-refuse no check had
+    ever driven (a review measured the gap for the whole verb family: every
+    success path was pinned, and not one refusal path was).
+
+    `route` sees the page expression and returns the value the page is made to
+    report; `call` records every CDP method (so a check can prove the real
+    input WAS dispatched before the read-back said no).
+    """
+
+    def __init__(self, route: Callable[[str], object]) -> None:
+        self.route = route
+        self.calls: list[dict] = []
+        self.events: list[dict] = []
+
+    def __enter__(self) -> _ScriptedPage:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object,
+                 tb: object) -> None:
+        return None
+
+    def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+        return self.route(expression)
+
+    def handle(self, expression: str, timeout: float = 0.0) -> str:
+        return "OBJECT-ID-1"
+
+    def call(self, method: str, params: dict | None = None,
+             timeout: float = 0.0) -> dict:
+        self.calls.append({"method": method, **(params or {})})
+        return {}
+
+
+def _element_row(**extra: object) -> dict:
+    """One matched element the `aim` guards accept: in view, hit, usable."""
+    row = {"tag": "input", "name": "input#tick", "box": [10, 20, 30, 40],
+           "center": [20, 30], "point": [20, 30], "hit_at": [12, 34],
+           "in_viewport": True, "hit": True, "hit_element": "input#tick"}
+    row.update(extra)
+    return row
+
+
+@contextlib.contextmanager
+def _capped_poll(module: Any, cap: float = 0.25) -> Iterator[Any]:
+    """A module's `poll`, with every budget capped at `cap` seconds.
+
+    The verdicts under test are decided by the READ-BACK and the refusal, not
+    by how long the loop waited for a page that will never say yes — so a
+    refusal-path check spends a fraction of the verb's own timeout (2-5 s)
+    instead of all of it (the flake research's own rule: a check that waits
+    the full budget is a check that cannot run often).
+    """
+    real = module.poll
+
+    def capped(probe: Callable[[], Any], *, timeout: float,
+               **kwargs: Any) -> tuple[int, Any]:
+        return real(probe, timeout=min(float(timeout), cap), **kwargs)
+
+    module.poll = capped                            # type: ignore[assignment]
+    try:
+        yield module
+    finally:
+        module.poll = real                          # type: ignore[assignment]
+
+
+def _matches_data(*elements: dict) -> dict:
+    """The matcher's reply shape, with the elements given."""
+    return {"matches": list(elements), "total": len(elements),
+            "offscreen": 0, "truncated": False, "title": "t", "url": "u",
+            "ready": "complete", "active": "body", "scroll": [0, 0],
+            "viewport": [1280, 800]}
+
+
+def t_mutation_readbacks_refuse_when_the_page_says_no() -> None:
+    """The REFUSAL half of "verify, or refuse" — never driven before.
+
+    Every mutation verb's SUCCESS path was pinned (the battery drives each one
+    live; the hermetic suite pins the argv and the pure verdicts), while the
+    branch where the READ-BACK says "no" was reached by no check at all (a
+    review found it for the whole family: insert/type/check/hover/upload and
+    the rest). Each case here scripts the page's own probe to answer the state
+    a re-rendering or lying page produces, asserts the refusal — and asserts
+    the real input WAS dispatched, so the refusal is about the read-back and
+    not a verb that quietly did nothing.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    # 1. the shared text reply: a field that did not take the text, by rung.
+    #    `insert` and `type` share ONE reply builder; the rung names the code a
+    #    caller branches on, so both spellings are pinned.
+    before = {"active": "input#s", "target": "input#s@0.1", "length": 3,
+              "frame": False, "editable": True, "focused": True}
+    refusal(lambda: dom._text_reply(                                     # noqa: SLF001
+        row, tab_row, before, dict(before), "hello", "insert"),
+        "insert-not-verified")
+    refusal(lambda: dom._text_reply(                                     # noqa: SLF001
+        row, tab_row, before, dict(before), "hello", "type"),
+        "type-not-verified")
+    # ...and through the VERB, not only the reply builder it calls: a
+    # regression that stopped routing the verdict through `insert` would
+    # leave the builder assertions green (the deepseek review's finding)
+    page = _ScriptedPage(lambda expr: dict(before)
+                         if "editable" in expr else {})
+    real = (dom._resolve, dom._session)                                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                                # noqa: SLF001
+    try:
+        refusal(lambda: dom.insert("hello"), "insert-not-verified")
+        assert [c for c in page.calls
+                if c["method"] == "Input.insertText"], page.calls
+    finally:
+        (dom._resolve, dom._session) = real                               # noqa: SLF001
+    # 2. `tab check`: the click is REALLY dispatched and the control still
+    #    reports its old state — the page may re-set it, or re-render
+    page = _ScriptedPage(lambda expr: (
+        {"found": True, "tag": "input", "type": "checkbox",
+         "name": "input#tick", "checkable": True, "checked": False,
+         "disabled": False} if "checkable" in expr else {}))
+    real = (dom._resolve, dom._session, dom._matches_in)                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                            # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                                # noqa: SLF001
+    dom._matches_in = (lambda session, needle, css, cap:                  # noqa: SLF001
+                       _matches_data(_element_row()))
+    try:
+        with _capped_poll(actions_lib):
+            refusal(lambda: dom.check(selector="#tick"), "check-not-verified")
+            pressed = [e for e in page.calls
+                       if e.get("method") == "Input.dispatchMouseEvent"
+                       and e.get("type") == "mousePressed"]
+            assert pressed, "the refusal never dispatched the click it reports on"
+    finally:
+        (dom._resolve, dom._session,                                     # noqa: SLF001
+         dom._matches_in) = real
+    # 3. `tab hover`: the move is dispatched and `:hover` still says no
+    page = _ScriptedPage(lambda expr: (
+        {"found": True, "hovered": False, "chain": False,
+         "under": "div#cover"} if "hovered" in expr else {}))
+    real = (dom._resolve, dom._session, dom._matches_in)                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                            # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                                # noqa: SLF001
+    dom._matches_in = (lambda session, needle, css, cap:                  # noqa: SLF001
+                       _matches_data(_element_row()))
+    try:
+        refusal(lambda: dom.hover(selector="#hover-me"),
+                "hover-not-verified")
+        moved = [e for e in page.calls
+                 if e.get("method") == "Input.dispatchMouseEvent"
+                 and e.get("type") == "mouseMoved"]
+        assert moved, "the refusal never dispatched the move it reports on"
+    finally:
+        (dom._resolve, dom._session,                                     # noqa: SLF001
+         dom._matches_in) = real
+    # 4. `tab upload`: the file was set and the page reports it holds
+    #    something else — the one control page JavaScript cannot fill
+    upload_dir = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    upload_file = os.path.join(upload_dir, "me.txt")
+    Path(upload_file).write_text("upload me", encoding="utf-8")
+    try:
+        page = _ScriptedPage(lambda expr: (
+            _matches_data(_element_row(tag="input", name="input#file"))
+            if "truncated" in expr else
+            {"found": True, "files": [{"name": "other.txt", "size": 3}]}))
+        real = (dom._resolve, dom._session)                              # noqa: SLF001
+        dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                        for_write=True: (row, tab_row))
+        dom._session = lambda _row, _tab: page                            # noqa: SLF001
+        try:
+            refusal(lambda: dom.upload(upload_file, selector="#file"),
+                    "upload-not-verified")
+            set_files = [e for e in page.calls
+                         if e.get("method") == "DOM.setFileInputFiles"]
+            assert set_files and set_files[0]["files"] == [upload_file], \
+                page.calls
+            # the element is bound by OBJECT id, not node id: that is what
+            # makes an upload work through a shadow root (the CDP research
+            # named the distinction)
+            assert set_files[0]["objectId"] == "OBJECT-ID-1", set_files[0]
+        finally:
+            (dom._resolve, dom._session) = real                           # noqa: SLF001
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+    # 5. `tab media play`: a clock that never advances refuses, even though
+    #    the element stopped reporting `paused` (measured: an element with no
+    #    source reports paused: false and never plays a frame)
+    state = {"found": True, "element": "video", "count": 1, "playing": True,
+             "paused": False, "ended": False, "time": 0.0, "duration": 0.0,
+             "ready_state": 4, "error": ""}
+    page = _ScriptedPage(lambda expr: dict(state) if "video, audio" in expr
+                         else {})
+    real = (dom._resolve, dom._session)                                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                                # noqa: SLF001
+    try:
+        with _capped_poll(media_lib):
+            refusal(lambda: dom.media("play"), "media-not-verified")
+    finally:
+        (dom._resolve, dom._session) = real                               # noqa: SLF001
+    # 6. several VISIBLE matches refuse instead of picking: the pure pick
+    two = _matches_data(_element_row(), _element_row())
+    refusal(lambda: dom._pick(two, "", "#tick", None,                      # noqa: SLF001
+                              row=row, tab_row=tab_row),
+            "ambiguous-element")
+    assert dom._pick(two, "", "#tick", 1)["name"] == "input#tick"      # noqa: SLF001
+    no_rows = _matches_data()
+    refusal(lambda: dom._pick(no_rows, "", "#tick", None,                 # noqa: SLF001
+                              row=row, tab_row=tab_row),
+            "no-match")
+
+
+def t_screenshot_refusals_write_nothing() -> None:
+    """`tab screenshot`'s verification refusals leave NO file behind.
+
+    The three refusal branches each promise "nothing was written" — the
+    promise that makes the PNG's own header one of the two page-independent
+    oracles — and no check asserted it: the pure helpers were pinned
+    (`png_size`, `expected_pixels`) and the battery drove only the success
+    path, so a regression that wrote the file AND refused (or never refused)
+    passed both suites (a review found the gap). A scripted page answers the
+    geometry and the capture; the bytes on disk are the oracle.
+    """
+    good = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
+            + (941).to_bytes(4, "big") + (400).to_bytes(4, "big")
+            + b"\x00\x00\x00\x00")
+    wrong = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
+             + (640).to_bytes(4, "big") + (480).to_bytes(4, "big")
+             + b"\x00\x00\x00\x00")
+    metrics = {"iw": 941, "ih": 400, "dpr": 1.0, "sw": 941, "sh": 2500,
+               "url": "u", "title": "t", "visibility": "visible"}
+
+    def make_page(png: bytes, dpr: object = 1.0) -> _ScriptedPage:
+        def route(expression: str) -> object:
+            if "dpr" in expression:
+                return dict(metrics, dpr=dpr)
+            return {}
+
+        page = _ScriptedPage(route)
+        # `call` must answer the capture with the bytes we scripted
+        def call(method: str, params: dict | None = None,
+                 timeout: float = 0.0) -> dict:
+            page.calls.append({"method": method, **(params or {})})
+            return {"data": base64.b64encode(png).decode("ascii")}
+
+        page.call = call  # type: ignore[method-assign]
+        return page
+
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (dom._resolve, dom._session)                                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. the geometry disagrees: refused, and NO file on disk
+            target = os.path.join(tmp, "wrong.png")
+            dom._session = lambda _row, _tab: make_page(wrong)            # noqa: SLF001
+            refusal(lambda: dom.screenshot(target),
+                    "screenshot-not-verified")
+            assert not os.path.exists(target), \
+                "a refused screenshot left a file behind"
+            # 2. the bytes are not a PNG at all: refused, nothing written
+            target = os.path.join(tmp, "garbage.png")
+            dom._session = (lambda _row, _tab:                           # noqa: SLF001
+                            make_page(b"not a png at all"))
+            refusal(lambda: dom.screenshot(target),
+                    "screenshot-not-verified")
+            assert not os.path.exists(target), target
+            # 3. a devicePixelRatio no size can be checked against
+            target = os.path.join(tmp, "ratio.png")
+            dom._session = (lambda _row, _tab:                           # noqa: SLF001
+                            make_page(good, dpr=float("nan")))
+            refusal(lambda: dom.screenshot(target),
+                    "screenshot-not-verified")
+            assert not os.path.exists(target), target
+            # 4. the positive half: a matching header IS written, and the
+            #    reply's numbers are the file's own
+            target = os.path.join(tmp, "good.png")
+            dom._session = lambda _row, _tab: make_page(good)             # noqa: SLF001
+            reply = dom.screenshot(target)
+            assert reply["verified"] is True and reply["width"] == 941, reply
+            data = Path(target).read_bytes()
+            assert data == good and len(data) == reply["bytes"], reply
+            # 5. a base64 body that does not decode is a transport refusal
+            target = os.path.join(tmp, "broken.png")
+            page = make_page(good)
+            page.call = (lambda method, params=None, timeout=0.0:          # type: ignore[method-assign]  # noqa: E501
+                         {"data": "!!!not base64!!!"})
+            dom._session = lambda _row, _tab: page                         # noqa: SLF001
+            refusal(lambda: dom.screenshot(target), "cdp-error")
+            assert not os.path.exists(target), target
+    finally:
+        (dom._resolve, dom._session) = real                               # noqa: SLF001
+
+
+def t_seed_refuses_a_partial_copy() -> None:
+    """A PARTIAL copy never reports `verified: true`.
+
+    The two halves of the seed read-back's refusal, both reachable without a
+    browser: a directory under the source the walk could not READ (the copy is
+    partial, so nothing may be claimed), and a file that walked but did not
+    LAND (the manifest oracle `seedtree.missing` names it by relative path).
+    A regression that dropped either check would let a half-seeded profile
+    answer `verified: true` — exactly the overclaim the stance forbids (a
+    review found neither branch asserted anywhere).
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        if os.geteuid() == 0:
+            # chmod 000 does not make a directory unreadable to root, so the
+            # fixture cannot be built: a skip with a reason, not a failure
+            SKIP.append(("a partial seed never reports verified",
+                         "running as root: chmod 000 is still readable"))
+            return
+        # 1. an unreadable directory under the source: the copy is PARTIAL
+        source = os.path.join(root, "src")
+        os.makedirs(os.path.join(source, "locked", "inner"))
+        Path(source, "Cookies").write_text("login", encoding="utf-8")
+        Path(source, "locked", "inner", "x").write_text("x", encoding="utf-8")
+        os.chmod(os.path.join(source, "locked"), 0o000)
+        try:
+            refusal(lambda: profile_lib.seed(
+                source=source, profile=os.path.join(root, "dst"),
+                force=True), "seed-not-verified")
+        finally:
+            os.chmod(os.path.join(source, "locked"), 0o700)
+        # 2. the manifest oracle: a file that walked but is not in the target
+        entries = [os.path.join(source, "Cookies")]
+        empty = os.path.join(root, "empty-dst")
+        assert seedtree_lib.missing(entries, source, empty) == ["Cookies"]
+        made = os.path.join(root, "made-dst")
+        os.makedirs(made)
+        Path(made, "Cookies").write_text("login", encoding="utf-8")
+        assert seedtree_lib.missing(entries, source, made) == []
+        # ...and one that landed with the WRONG SIZE is absent too: the oracle
+        # is the size, not the name
+        Path(made, "Cookies").write_text("logi", encoding="utf-8")
+        assert seedtree_lib.missing(entries, source, made) == ["Cookies"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        _restore_root(keep_root)
+
+
+def t_lifecycle_readbacks_refuse_when_the_page_says_no() -> None:
+    """The nav/history/activate/reload REFUSALS — the half never driven.
+
+    The research and the review agree on the shape: every success path of
+    these verbs is pinned live (the battery drives each one), while the branch
+    where the READ-BACK says "it did not happen" was reached by no check —
+    `nav-not-verified` (a beforeunload prompt the browser waits on),
+    `reload-not-verified` (no new document), `activate-not-verified` (the tab
+    still reports hidden). Each case scripts the page's own reads and asserts
+    the code a caller branches on — and that the navigation command itself
+    WAS sent, so the refusal is about the read-back and not a verb that did
+    nothing (the flake research's "ack != effect" rule, both halves).
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    before_url, target = "https://before.example/", "https://after.example/"
+    real_one_tab = browser._one_tab                                  # noqa: SLF001
+    browser._one_tab = (lambda spec="", name="",                      # noqa: SLF001
+                         for_write=True: (row, tab_row))
+    try:
+        # 1. nav: the document never left — a beforeunload prompt, typically
+        def eval_stuck(profile: str, target_id: str, expression: str,
+                       timeout: float = 15.0) -> object:
+            if "location.href" in expression:
+                return before_url
+            if "timeOrigin" in expression:
+                return 100.0
+            if "readyState" in expression:
+                return "complete+body"
+            return {}
+
+        page = _ScriptedPage(lambda expr: {})
+        real = (nav_lib.page_eval, nav_lib.page_session)
+        nav_lib.page_eval = eval_stuck                                  # noqa: SLF001
+        nav_lib.page_session = (lambda profile, target_id,              # noqa: SLF001
+                                page_domain=True: page)
+        try:
+            with _capped_poll(nav_lib):
+                refusal(lambda: browser.nav(target), "nav-not-verified")
+                sent = [e for e in page.calls if e["method"] == "Page.navigate"]
+                assert sent and sent[0]["url"] == target, page.calls
+        finally:
+            (nav_lib.page_eval, nav_lib.page_session) = real             # noqa: SLF001
+        # 2. reload: no NEW document within the deadline (timeOrigin frozen).
+        #    `reload_page` reads only through `page_eval` — no session opens —
+        #    so that is the one seam patched here (the deepseek review found
+        #    the first version also patched a session the verb never uses)
+        real = (nav_lib.page_eval,)
+        nav_lib.page_eval = eval_stuck                                  # noqa: SLF001
+        with _capped_poll(nav_lib):
+            try:
+                refusal(lambda: browser.reload_page(),
+                        "reload-not-verified")
+            finally:
+                nav_lib.page_eval = real[0]                              # noqa: SLF001
+        # 3. activate: the tab still reports `hidden` after bringToFront
+        page = _ScriptedPage(lambda expr: "hidden"
+                             if "visibilityState" in expr else {})
+        real = (nav_lib.page_eval, nav_lib.page_session)
+        nav_lib.page_eval = (lambda *a, **k: "")                        # noqa: SLF001
+        nav_lib.page_session = (lambda profile, target_id,              # noqa: SLF001
+                                page_domain=True: page)
+        with _capped_poll(nav_lib):
+            try:
+                refusal(lambda: browser.activate(), "activate-not-verified")
+                front = [e for e in page.calls
+                         if e["method"] == "Page.bringToFront"]
+                assert front, "the refusal never sent the activation"
+            finally:
+                (nav_lib.page_eval, nav_lib.page_session) = real         # noqa: SLF001
+        # 4. back with nothing to go back to: a NAV-FAILED, not a lie
+        real = (nav_lib.page_ws, nav_lib.page_eval)
+        nav_lib.page_ws = lambda profile, target_id: "ws://unused"       # noqa: SLF001
+        nav_lib.page_eval = eval_stuck                                  # noqa: SLF001
+        real_call = cdp.call
+        cdp.call = lambda ws, method, params=None, timeout=15.0: (        # noqa: SLF001
+            {"entries": [{"id": 1, "url": before_url}], "currentIndex": 0})
+        try:
+            refusal(lambda: browser.history("back"), "nav-failed")
+        finally:
+            (nav_lib.page_ws, nav_lib.page_eval) = real                   # noqa: SLF001
+            cdp.call = real_call                                          # noqa: SLF001
+    finally:
+        browser._one_tab = real_one_tab                                   # noqa: SLF001
+
+
+def t_scroll_and_viewport_refusals() -> None:
+    """A wheel nothing takes, an edge never reached, a page with no viewport.
+
+    `scroll-not-verified` has three raise sites and none was asserted; the
+    `no-viewport` guard (a windowless or never-shown browser) was equally
+    unpinned. Both are decided by the page's own reads, so a scripted page
+    decides them here — with the wheel REALLY dispatched, so the refusal is
+    about the read-back (a review and the flake research both named the
+    missing negative half).
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    # the page facts the verb reads first: a viewport, no matches needed
+    facts = _matches_data()
+    probe = {"y": 0, "x": 0, "max": 5000, "nested": None}
+
+    def route(expression: str) -> object:
+        if "viewport" in expression:
+            return facts
+        if "elementFromPoint" in expression:
+            return dict(probe)
+        return {}
+
+    page = _ScriptedPage(route)
+    real = (dom._resolve, dom._session)                                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                                # noqa: SLF001
+    try:
+        with _capped_poll(scroll_lib):
+            refusal(lambda: dom.scroll(by=600), "scroll-not-verified")
+            wheels = [e for e in page.calls
+                      if e.get("method") == "Input.dispatchMouseEvent"
+                      and e.get("type") == "mouseWheel"]
+            assert wheels, "the refusal never dispatched the wheel it reports on"
+            assert wheels[0]["deltaY"] == 600, wheels[0]
+    finally:
+        (dom._resolve, dom._session) = real                               # noqa: SLF001
+    # a page that reports NO viewport refuses before any input: a box in no
+    # viewport is not a target (the pure guard the verbs share)
+    refusal(lambda: dom._viewport({"viewport": [0, 0]}, "TAB12345"),   # noqa: SLF001
+            "no-viewport")
+    refusal(lambda: dom._viewport({}, "TAB12345"), "no-viewport")       # noqa: SLF001
+    assert dom._viewport({"viewport": [1280, 800]}, "T") == [1280, 800]  # noqa: SLF001
+
+
+def t_dialog_verdicts_are_three_state() -> None:
+    """`tab dialog` hermetically: the tri-state, and the two refusals.
+
+    `state` answers `open: null, verified: false` when the tab cannot answer
+    (an unclear oracle is not proof of absence — the stance's second rule);
+    `accept` on a tab that never comes back after the browser answered is
+    `dialog-not-verified`; and `accept` with no dialog at all is `no-dialog`
+    with the recovery note. None of the three had a hermetic check (a review
+    found the verb's refusals only exercised live).
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (dom._resolve, dom._session)                                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    try:
+        # 1. state on a tab that cannot answer: NULL, not a claim of absence
+        class SilentTab(_ScriptedPage):
+            def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+                raise ControlError("eval-timeout", "no reply within 1.5s")
+
+        dom._session = lambda _row, _tab: SilentTab(lambda expr: {})     # noqa: SLF001
+        reply = dom.dialog("state")
+        assert reply["open"] is None and reply["verified"] is False, reply
+        assert reply["blocked"] is True and reply["note"], reply
+        # 2. accept: the browser answered, the renderer never came back
+        handled = _ScriptedPage(
+            lambda expr: (_ for _ in ()).throw(ControlError(
+                "eval-timeout", "no reply within 0.8s")))
+        real_session = dom.page_session
+        dom.page_session = (lambda row, tab_row,                    # noqa: SLF001
+                            page_domain=True: handled)
+        dom._session = lambda _row, _tab: handled                   # noqa: SLF001
+        with _capped_poll(dialog_lib):
+            try:
+                refusal(lambda: dom.dialog("accept"), "dialog-not-verified")
+                answered = [e for e in handled.calls
+                            if e["method"] == "Page.handleJavaScriptDialog"]
+                assert answered and answered[0]["accept"] is True, handled.calls
+            finally:
+                dom.page_session = real_session                     # noqa: SLF001
+        # 3. the browser's own "No dialog is showing" is the definitive answer
+        refused = _ScriptedPage(lambda expr: {})
+
+        def call(method: str, params: dict | None = None,
+                 timeout: float = 0.0) -> dict:
+            refused.calls.append({"method": method, **(params or {})})
+            raise ControlError(
+                "cdp-error", "Page.handleJavaScriptDialog: No dialog is "
+                "showing (code -32602)")
+
+        refused.call = call  # type: ignore[method-assign]
+        dom.page_session = (lambda row, tab_row,                    # noqa: SLF001
+                            page_domain=True: refused)
+        try:
+            refusal(lambda: dom.dialog("dismiss"), "no-dialog")
+        finally:
+            dom.page_session = real_session                         # noqa: SLF001
+    finally:
+        (dom._resolve, dom._session) = real                               # noqa: SLF001
+
+
+def t_select_and_ambiguous_option() -> None:
+    """`tab select`: an ambiguous option set refuses instead of guessing."""
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    probe = {"found": True, "is_select": True, "tag": "select",
+             "name": "select#pick", "multiple": False, "disabled": False,
+             "value": "red", "selected": 0, "options": 3, "matched": 2,
+             "by": "value", "target": -1, "target_value": "",
+             "target_label": "", "labels": ["Red", "Red"],
+             "candidates": ["Red (red)", "Red (crimson)"]}
+    page = _ScriptedPage(lambda expr: (
+        probe if "is_select" in expr else
+        (_matches_data(_element_row(tag="select", name="select#pick"))
+         if "truncated" in expr else {})))
+    real = (dom._resolve, dom._session, dom._matches_in)                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                                # noqa: SLF001
+    dom._matches_in = (lambda session, needle, css, cap:                  # noqa: SLF001
+                       _matches_data(_element_row(tag="select",
+                                                  name="select#pick")))
+    try:
+        refusal(lambda: dom.select(selector="#pick", value="Red"),
+                "ambiguous-option")
+        # and an element that is not a select at all
+        page.route = (lambda expr:                        # type: ignore[method-assign]
+                      {"found": True, "is_select": False, "tag": "input",
+                       "name": "input#tick"}
+                      if "is_select" in expr else {})
+        refusal(lambda: dom.select(selector="#tick", value="red"),
+                "not-a-select")
+    finally:
+        (dom._resolve, dom._session,                                     # noqa: SLF001
+         dom._matches_in) = real
+
+
+def t_close_survivor_is_a_refusal() -> None:
+    """A tab that survives its own close is NAMED, never counted as closed.
+
+    The one `close-tab-not-verified` branch no check reached: the ids were
+    read back and one was still there (the existing check covers only the
+    unreadable-LIST half). A scripted read-back answers the survivor.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+        os.environ["BROWSER_CONTROL_ROOT"] = tmp
+        ours = os.path.join(tmp, "ours")
+        real_browsers, real_rows = browser.browsers, cdp.page_rows_at
+        real_call, real_verify = cdp.browser_call, browser._verify_profile_endpoint  # noqa: SLF001
+        real_gone = browser._wait_ids_gone                               # noqa: SLF001
+        browser.browsers = lambda: [                 # type: ignore[assignment]
+            {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
+             "profile": ours, "profile_from": "flag", "managed": True,
+             "attached": False,
+             "cdp": {"port": 1616, "reachable": True, "verified": True}}]
+        cdp.page_rows_at = lambda port: [              # type: ignore[assignment]
+            {"type": "page", "id": "AB12", "title": "zombie",
+             "url": "https://a/"}]
+        cdp.browser_call = lambda profile, method, params: {}  # type: ignore[assignment]
+        browser._verify_profile_endpoint = lambda profile: None  # type: ignore[assignment]
+        # the read-back finds the tab STILL THERE after the close
+        browser._wait_ids_gone = (                      # type: ignore[assignment]
+            lambda profile, ids: list(ids))
+        try:
+            refusal(lambda: browser.close_tabs(["id:AB12"]),
+                    "close-tab-not-verified")
+        finally:
+            browser.browsers = real_browsers         # type: ignore[assignment]
+            cdp.page_rows_at = real_rows             # type: ignore[assignment]
+            cdp.browser_call = real_call             # type: ignore[assignment]
+            browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
+            browser._wait_ids_gone = real_gone       # type: ignore[assignment]
+            _restore_root(keep_root)
+
+
+def t_input_dispatch_shapes() -> None:
+    """WHICH CDP frames each input verb sends, not only what they report.
+
+    The CDP-hard-operations research named the exact contracts: characters go
+    through `Input.insertText` (one atomic IME-style call — no key events), a
+    named key goes through `Input.dispatchKeyEvent` keyDown/keyUp with the
+    table's code, a key with NO text (an arrow) goes as `rawKeyDown` so the
+    page receives no stray character, and a click is the moved → pressed →
+    released triad at one point with `buttons`/`clickCount` set. The suite
+    pinned the argv and the read-backs; the wire shape itself — what a site's
+    handlers and bot checks actually see — was never asserted.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (dom._resolve, dom._session)                                  # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    try:
+        # 1. `tab insert`: exactly ONE Input.insertText, zero key events
+        before = {"focused": True, "editable": True, "active": "input#s",
+                  "target": "input#s@0.1", "length": 0, "frame": False}
+        after = dict(before, length=5)
+        reads = {"n": 0}
+
+        def insert_route(expression: str) -> object:
+            if "editable" in expression:
+                reads["n"] += 1
+                return dict(before if reads["n"] == 1 else after)
+            return {}
+
+        page = _ScriptedPage(insert_route)
+        dom._session = lambda _row, _tab: page                            # noqa: SLF001
+        reply = dom.insert("hello")
+        assert reply["verified"] is True, reply
+        inserts = [c for c in page.calls if c["method"] == "Input.insertText"]
+        keys = [c for c in page.calls
+                if c["method"] == "Input.dispatchKeyEvent"]
+        assert len(inserts) == 1 and inserts[0]["text"] == "hello", page.calls
+        assert keys == [], page.calls     # no per-character events on insert
+        # 2. `tab press enter`: keyDown WITH text, then keyUp WITHOUT it — the
+        #    variant that submits a form is the one with text
+        page = _ScriptedPage(lambda expr: {})
+        dom._session = lambda _row, _tab: page                            # noqa: SLF001
+        dom.press("enter")
+        events = [c for c in page.calls
+                  if c["method"] == "Input.dispatchKeyEvent"]
+        assert len(events) == 2, page.calls
+        assert events[0]["type"] == "keyDown" and events[0]["code"] == "Enter", \
+            events[0]
+        assert events[0]["text"] == "\r" and events[0]["key"] == "Enter", \
+            events[0]
+        assert events[1]["type"] == "keyUp" and "text" not in events[1], \
+            events[1]
+        # 3. a key with NO text goes as rawKeyDown — no stray character
+        page = _ScriptedPage(lambda expr: {})
+        dom._session = lambda _row, _tab: page                            # noqa: SLF001
+        dom.press("arrowleft")
+        events = [c for c in page.calls
+                  if c["method"] == "Input.dispatchKeyEvent"]
+        assert events[0]["type"] == "rawKeyDown" and events[0]["code"] == \
+            "ArrowLeft", events[0]
+        assert "text" not in events[0] and "unmodifiedText" not in events[0], \
+            events[0]
+        # 4. `tab click`: the full triad at ONE point, button/buttons/clickCount
+        page = _ScriptedPage(lambda expr: {})
+        real_matches = dom._matches_in                                # noqa: SLF001
+        dom._matches_in = (lambda session, needle, css, cap:          # noqa: SLF001
+                           _matches_data(_element_row()))
+        dom._session = lambda _row, _tab: page                        # noqa: SLF001
+        try:
+            dom.click(selector="#tick")
+        finally:
+            dom._matches_in = real_matches                            # noqa: SLF001
+        mouse = [c for c in page.calls
+                 if c["method"] == "Input.dispatchMouseEvent"]
+        assert [m["type"] for m in mouse] == ["mouseMoved", "mousePressed",
+                                              "mouseReleased"], mouse
+        assert (mouse[1]["button"], mouse[1]["buttons"],
+                mouse[1]["clickCount"]) == ("left", 1, 1), mouse[1]
+        assert (mouse[2]["buttons"], mouse[2]["button"]) == (0, "left"), \
+            mouse[2]
+        assert {(m["x"], m["y"]) for m in mouse} == {(12, 34)}, mouse
+    finally:
+        (dom._resolve, dom._session) = real                               # noqa: SLF001
+
+
+def t_plugin_specs_fail_closed() -> None:
+    """Every plugin-schema refusal branch, and the gate-enforcing ones.
+
+    The plugin tier's failure modes were half covered (import error, a verb
+    colliding with a built-in, a wrong api) while the branches that keep a
+    broken plugin from becoming a silent hole were not: no PLUGIN dict, no
+    name, no actions, a verb name that is not a verb, no `run`, and — the
+    security-relevant one — an action declaring NO capability class or an
+    unknown one, which is what makes `--deny` enforceable against plugins.
+    Two plugins colliding with EACH OTHER is the remaining branch (a review
+    found only the built-in collision was pinned).
+    """
+    cases = {
+        "no_dict.py": "PLUGIN = None\n",
+        "no_name.py": ("PLUGIN = {'api': 1, 'name': '', 'actions': "
+                       "{'a': {'run': lambda r, b: {}, 'classes': ('read',)}}}\n"),
+        "no_actions.py": "PLUGIN = {'api': 1, 'name': 'x', 'actions': {}}\n",
+        "bad_verb.py": ("PLUGIN = {'api': 1, 'name': 'x', 'actions': "
+                        "{'Not-A-Verb': {'run': lambda r, b: {}, "
+                        "'classes': ('read',)}}}\n"),
+        "no_run.py": ("PLUGIN = {'api': 1, 'name': 'x', 'actions': "
+                      "{'a': {'classes': ('read',)}}}\n"),
+        "no_classes.py": ("PLUGIN = {'api': 1, 'name': 'x', 'actions': "
+                           "{'a': {'run': lambda r, b: {}}}}\n"),
+        "unknown_class.py": ("PLUGIN = {'api': 1, 'name': 'x', 'actions': "
+                             "{'a': {'run': lambda r, b: {}, "
+                             "'classes': ('telepathy',)}}}\n"),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, source in cases.items():
+            Path(tmp, name).write_text(source, encoding="utf-8")
+        # two plugins claiming the SAME verb: the second is refused, the first
+        # stays — the branch the built-in collision check never reached
+        Path(tmp, "first.py").write_text(
+            "PLUGIN = {'api': 1, 'name': 'first', 'actions': "
+            "{'shared': {'run': lambda r, b: {}, 'classes': ('read',)}}}\n",
+            encoding="utf-8")
+        Path(tmp, "second.py").write_text(
+            "PLUGIN = {'api': 1, 'name': 'second', 'actions': "
+            "{'shared': {'run': lambda r, b: {}, 'classes': ('read',)}}}\n",
+            encoding="utf-8")
+        keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+        os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = tmp
+        try:
+            rc, out, err = run_cli(["selftest"])
+            assert rc == 0, (rc, err)
+            data = json.loads(out)
+            errors = "\n".join(data["plugin_errors"])
+            for needle in ("declares no PLUGIN dict", "has no name",
+                           "declares no actions", "is not a verb name",
+                           "has no run(rest, browser)",
+                           "needs at least one of", "telepathy"):
+                assert needle in errors, (needle, errors)
+            # the two-plugin collision: one of the two is refused BY NAME
+            assert ("first.py" in errors or "second.py" in errors) \
+                and "already taken" in errors, errors
+            # the surviving plugin is the one that registered its verb
+            assert [p["name"] for p in data["plugins"]] == ["first"], \
+                data["plugins"]
+            # the gate-enforcing half: an action with no valid class is NOT on
+            # the surface, so `--deny` cannot be routed around by a plugin
+            rc, _out, err = run_cli(["--deny", "read", "a"])
+            assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
+            # ...and a plugin's OWN usage line rides `--help`
+            rc, out, _err = run_cli(["--help"])
+            assert rc == 0 and "shared" in out, out[-400:]
+        finally:
+            if keep is None:
+                os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+            else:
+                os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_attachment_store_fails_closed() -> None:
+    """A malformed attach file is NOT an authorization; a scratch file blocks.
+
+    The attach records are what open the tab-write gate, and only their happy
+    path was exercised (a review found no check for the file's own failure
+    modes). `records()` answers `{}` for anything it cannot parse — so a
+    corrupt file must read as "nothing is attached", never as a holdover
+    authorization — and a leftover `.new` scratch file refuses `attach-failed`
+    rather than silently adopting or clobbering it.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        store = attachments_lib.AttachmentStore(base=root)
+        profile = os.path.join(root, "a-browser")
+        os.makedirs(profile, exist_ok=True)
+        # a malformed file: not a list, so not a set of authorizations
+        Path(root, attachments_lib.ATTACH_FILE).write_text(
+            '{"not": "a list"}', encoding="utf-8")
+        assert store.records() == {}, "a malformed file became an authorization"
+        assert store.is_attached(profile) is False
+        assert browser.is_attached(profile) is False
+        # a list whose rows are not records: dropped, not guessed at
+        Path(root, attachments_lib.ATTACH_FILE).write_text(
+            '["a string", 7, {"profile": ""}]', encoding="utf-8")
+        assert store.records() == {}, store.records()
+        # a REAL record reads back, and dropping by pid takes it out
+        record = {"profile": profile, "pid": 4242, "port": 1515}
+        already, _lock = store.put(record)
+        assert already is False and store.is_attached(profile) is True
+        removed, _lock = store.drop(pid=4242)
+        assert removed == [paths_lib.norm(profile)] and \
+            store.is_attached(profile) is False
+        # a leftover scratch file is a REFUSAL, never an adoption
+        Path(root, attachments_lib.ATTACH_FILE + ".new").write_text(
+            "leftover", encoding="utf-8")
+        refusal(lambda: store.put(record), "attach-failed")
+        assert Path(root, attachments_lib.ATTACH_FILE).read_text(
+            encoding="utf-8") == "[]", "the refusal replaced the records"
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def t_write_atomic_refuses_a_leftover_temp() -> None:
+    """`write_atomic`'s own refusals, both branches.
+
+    The symlink plant was asserted only by the victim's bytes (a review found
+    the `write-failed` CODE never asserted, and the leftover-temp branch — a
+    real file at the predictable `.part` name — not reached at all).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        # 1. a symlink planted at the TEMP name: refused by CODE, victim kept
+        victim = os.path.join(tmp, "victim")
+        Path(victim).write_bytes(b"keep")
+        target = os.path.join(tmp, "shot.png")
+        os.symlink(victim, f"{target}.bc-{os.getpid()}.part")
+        refusal(lambda: images_lib.write_atomic(target, b"\x89PNG\r\n\x1a\n",
+                                                force=True),
+                "write-failed")
+        assert Path(victim).read_bytes() == b"keep"
+        assert not os.path.exists(target), "the refused write landed anyway"
+        os.unlink(f"{target}.bc-{os.getpid()}.part")
+        # 2. a REAL leftover temp file: refused by name, both kept
+        Path(f"{target}.bc-{os.getpid()}.part").write_bytes(b"leftover")
+        refusal(lambda: images_lib.write_atomic(target, b"x", force=True),
+                "write-failed")
+        assert Path(f"{target}.bc-{os.getpid()}.part").read_bytes() \
+            == b"leftover", "the refusal consumed the temp file"
+        assert not os.path.exists(target)
+
+
+def t_tab_count_sums_verified_rows() -> None:
+    """The close read-back SUMS what verified — the positive half too.
+
+    The existing check drove only a stranger row (a review flagged that a
+    `_tab_count` returning 0 unconditionally would pass it). One verified row
+    with two tabs must answer 2; adding the stranger must not change it.
+    """
+    verified = {"pid": 1, "exe": "chrome", "path": "/x",
+                "profile": "/managed/one", "profile_from": "flag",
+                "managed": True, "attached": False,
+                "cdp": {"port": 1616, "reachable": True, "verified": True}}
+    stranger = {"pid": 2, "exe": "chrome", "path": "/x",
+                "profile": "/stranger", "profile_from": "",
+                "managed": False, "attached": False,
+                "cdp": {"port": 9222, "reachable": True, "verified": False,
+                        "reason": "not ours"}}
+    tabs = {1616: [{"type": "page", "id": "A"}, {"type": "page", "id": "B"}]}
+    real_browsers, real_rows = browser.browsers, cdp.page_rows_at
+    browser.browsers = lambda: [verified, stranger]   # type: ignore[assignment]
+    cdp.page_rows_at = lambda port: tabs.get(port, [])  # type: ignore[assignment]
+    try:
+        assert browser._tab_count() == 2                      # noqa: SLF001
+        browser.browsers = lambda: [stranger]       # type: ignore[assignment]
+        assert browser._tab_count() == 0                      # noqa: SLF001
+    finally:
+        browser.browsers = real_browsers               # type: ignore[assignment]
+        cdp.page_rows_at = real_rows                   # type: ignore[assignment]
+
+
+def t_seedtree_walk_counts_what_it_skips() -> None:
+    """The walk's own bookkeeping: links, special files, unreadable, `ours`.
+
+    `links_planted` was the only count asserted (a review found `links`,
+    `special`, `unreadable` and the `ours` filter — the reason a fresh profile
+    does not refuse `profile-exists` — untested). A symlink, a FIFO and a
+    chmod-000 directory pin all four in one fixture.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    try:
+        source = os.path.join(root, "src")
+        os.makedirs(source)
+        Path(source, "Cookies").write_text("login", encoding="utf-8")
+        Path(source, ".pid").write_text("1", encoding="utf-8")
+        Path(source, "SingletonLock").write_text("lock", encoding="utf-8")
+        os.symlink("/nowhere", os.path.join(source, "a-link"))
+        os.mkfifo(os.path.join(source, "a-fifo"))
+        os.makedirs(os.path.join(source, "locked"))
+        Path(source, "locked", "x").write_text("x", encoding="utf-8")
+        os.chmod(os.path.join(source, "locked"), 0o000)
+        try:
+            facts = seedtree_lib.walk(source, skips=frozenset())
+            assert facts.files == 3, facts.files          # Cookies, .pid, lock
+            assert facts.links == 1 and facts.special == 1, \
+                (facts.links, facts.special)
+            # the unreadable entry NAMES the directory and the reason
+            assert len(facts.unreadable) == 1 and "locked" in facts.unreadable[0] \
+                and "Permission denied" in facts.unreadable[0], facts.unreadable
+            # the `ours` filter: this CLI's own bookkeeping is not content, so
+            # a profile holding only .pid and the lock is EMPTY for `seed`
+            fresh = os.path.join(root, "fresh")
+            os.makedirs(fresh)
+            Path(fresh, ".pid").write_text("1", encoding="utf-8")
+            Path(fresh, "SingletonLock").write_text("lock", encoding="utf-8")
+            assert seedtree_lib.has_content(fresh, ours=(".pid",
+                                                          "SingletonLock")) \
+                is False
+            assert seedtree_lib.has_content(fresh, ours=()) is True
+            assert seedtree_lib.has_content(os.path.join(root, "absent"),
+                                            ours=()) is False
+        finally:
+            os.chmod(os.path.join(source, "locked"), 0o700)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def t_poll_runs_on_a_monotonic_clock() -> None:
+    """`poll`'s deadline is MONOTONIC: a wall-clock step cannot move it.
+
+    The flake research's rule (a budget is a duration): an NTP step or a VM
+    resume moves `time.time`, and a wait keyed on it either expires on the
+    first sample or runs long — which is exactly the flake class a poll loop
+    exists to eliminate. `time.time` is armed to RAISE here, so a regression
+    that keyed the deadline to the wall clock fails LOUDLY instead of merely
+    spinning past a bound (the deepseek review found the first version of
+    this check could not fail for the reason it named).
+    """
+    real_time = time.time
+    started = time.monotonic()
+
+    def wall_clock_used() -> float:
+        raise AssertionError("poll read the wall clock, not time.monotonic")
+
+    time.time = wall_clock_used                        # type: ignore[assignment]
+    try:
+        # a probe that never satisfies: the budget is the only way out
+        attempts, last = poll_lib.poll(lambda: False, timeout=0.3,
+                                       interval=0.05)
+    finally:
+        time.time = real_time                           # type: ignore[assignment]
+    took = time.monotonic() - started
+    assert attempts >= 1 and last is False
+    assert 0.25 <= took < 2.0, took
+
+
+def t_evaluate_until_retries_a_silent_sample() -> None:
+    """`evaluate_until`: a sample that does not answer is RETRIED, not fatal.
+
+    The one-connection poll loop behind `tab wait` had no test at all (a
+    review found it): its two load-bearing behaviours are that a sample which
+    times out is what the loop is FOR — the next sample is taken on the same
+    connection — and that a tab already PARKED when the session opened refuses
+    `blocked` instead of polling a renderer that cannot answer. Both are
+    driven here against the fake websocket peer, exactly like the transport
+    check.
+    """
+    from websockets.sync.server import serve                          # noqa: PLC0415
+
+    seen: list[dict] = []
+
+    def handler(connection: object) -> None:
+        send = connection.send                    # type: ignore[union-attr]
+        for raw in connection:                    # type: ignore[union-attr]
+            message = json.loads(raw)
+            seen.append(message)
+            mid, method = message.get("id"), message.get("method")
+            if method == "Runtime.evaluate":
+                if sum(1 for m in seen
+                       if m.get("method") == "Runtime.evaluate") == 1:
+                    # the renderer parks MID-POLL: a dialog opens (which the
+                    # session sees, shortening its wait to the dialog grace)
+                    # and the evaluate is never answered — the sample fails
+                    # `blocked`, which is exactly what the loop swallows
+                    send(json.dumps({
+                        "method": "Page.javascriptDialogOpening",
+                        "params": {"type": "alert", "message": "mid-poll",
+                                   "url": "u", "hasBrowserHandler": False,
+                                   "defaultPrompt": ""}}))
+                    continue
+                send(json.dumps({"id": mid, "result": {
+                    "result": {"type": "boolean", "value": True}}}))
+            else:
+                send(json.dumps({"id": mid, "result": {}}))
+
+    real_enable = cdp_rpc.PAGE_ENABLE_S
+    cdp_rpc.PAGE_ENABLE_S = 0.3
+    try:
+        with serve(handler, "127.0.0.1", 0) as server:
+            port = server.socket.getsockname()[1]
+            serving = threading.Thread(target=server.serve_forever,
+                                       daemon=True)
+            serving.start()
+            url = f"ws://127.0.0.1:{port}/devtools/page/FAKE"
+            try:
+                value, samples = cdp.evaluate_until(
+                    url, "1", lambda v: v is True, timeout=5.0, interval=0.05)
+                assert value is True and samples == 2, (value, samples)
+            finally:
+                server.shutdown()
+                serving.join(timeout=5)
+        # the PARKED half: a Page.enable that never answers parks the session,
+        # and the poll refuses instead of sampling a dead renderer
+
+        def silent(connection: object) -> None:
+            for _raw in connection:                   # type: ignore[union-attr]
+                pass                    # nothing is ever answered
+
+        with serve(silent, "127.0.0.1", 0) as server:
+            port = server.socket.getsockname()[1]
+            serving = threading.Thread(target=server.serve_forever,
+                                       daemon=True)
+            serving.start()
+            url = f"ws://127.0.0.1:{port}/devtools/page/FAKE"
+            try:
+                refusal(lambda: cdp.evaluate_until(
+                    url, "1", lambda v: True, timeout=5.0), "blocked")
+            finally:
+                server.shutdown()
+                serving.join(timeout=5)
+    finally:
+        cdp_rpc.PAGE_ENABLE_S = real_enable
+
+
+def t_the_remaining_refusal_codes() -> None:
+    """The six refusal codes no suite had ever PRODUCED, each by its real path.
+
+    A code is the contract a caller branches on, and the progress claim "every
+    named refusal code has a check" has to mean it: the deepseek review found
+    `eval-timeout`, `browser-not-stopped`, `profile-unusable`, `reset-failed`,
+    `reset-not-verified` and `seed-failed` registered and raised but never
+    provoked. Each is driven here through the code that raises it — an
+    unanswered `Runtime.evaluate` over the fake peer, an endpoint that answers
+    with no process to signal, a root that cannot be created, an rmtree that
+    fails, a target that survives its wipe, and a copy that cannot be written.
+    """
+    # 1. `eval-timeout`: Page.enable answers, Runtime.evaluate never does
+    from websockets.sync.server import serve                          # noqa: PLC0415
+
+    def silent_evaluate(connection: object) -> None:
+        for raw in connection:                    # type: ignore[union-attr]
+            message = json.loads(raw)
+            if message.get("method") != "Runtime.evaluate":
+                connection.send(                  # type: ignore[union-attr]
+                    json.dumps({"id": message.get("id"), "result": {}}))
+
+    with serve(silent_evaluate, "127.0.0.1", 0) as server:
+        port = server.socket.getsockname()[1]
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        url = f"ws://127.0.0.1:{port}/devtools/page/FAKE"
+        try:
+            refusal(lambda: cdp.evaluate(url, "1", timeout=0.5),
+                    "eval-timeout")
+        finally:
+            server.shutdown()
+            serving.join(timeout=5)
+    # 2. `browser-not-stopped`: an endpoint answers on the profile, but no
+    #    Chromium process on it can be identified — the CLI refuses to signal
+    #    a process it cannot attribute
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        target = os.path.join(root, "google-chrome-stable")
+        real = (lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+                lifecycle_lib._page_count, lifecycle_lib.cdp.reachable)
+        lifecycle_lib.managed_profile = lambda browser="": target     # type: ignore[assignment]
+        lifecycle_lib.pid_of = lambda profile: 0                      # type: ignore[assignment]
+        lifecycle_lib._page_count = lambda profile: 0                 # type: ignore[assignment]
+        lifecycle_lib.cdp.reachable = lambda profile: True            # type: ignore[assignment]
+        try:
+            refusal(lambda: browser.stop(), "browser-not-stopped")
+        finally:
+            (lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+             lifecycle_lib._page_count,
+             lifecycle_lib.cdp.reachable) = real
+        # 3. `profile-unusable`: a root that cannot be created at all
+        os.environ["BROWSER_CONTROL_ROOT"] = "/proc/1/cannot-exist/bc"
+        refusal(lambda: browser.launch(["about:blank"]), "profile-unusable")
+        os.environ["BROWSER_CONTROL_ROOT"] = root
+        # 4/5. `reset-failed` and `reset-not-verified`: rmtree raising, and a
+        #      target that survives a wipe that returned clean
+        victim = os.path.join(root, "victim")
+        os.makedirs(victim)
+        Path(victim, "Cookies").write_text("login", encoding="utf-8")
+        real_rmtree = shutil.rmtree
+
+        def cannot_remove(path: str, *a: object, **k: object) -> None:
+            raise OSError("device busy")
+
+        shutil.rmtree = cannot_remove                      # type: ignore[assignment]
+        try:
+            refusal(lambda: profile_lib.reset(profile=victim, force=True),
+                    "reset-failed")
+        finally:
+            shutil.rmtree = real_rmtree                     # type: ignore[assignment]
+        shutil.rmtree = lambda path, *a, **k: None          # type: ignore[assignment]
+        try:
+            refusal(lambda: profile_lib.reset(profile=victim, force=True),
+                    "reset-not-verified")
+        finally:
+            shutil.rmtree = real_rmtree                     # type: ignore[assignment]
+        # 6. `seed-failed`: a copy that cannot be written (the disk says no)
+        source = os.path.join(root, "seed-src")
+        os.makedirs(source)
+        Path(source, "Cookies").write_text("login", encoding="utf-8")
+        real_copy = shutil.copy2
+
+        def cannot_copy(src: str, dst: str, **k: object) -> str:
+            raise OSError("no space left on device")
+
+        shutil.copy2 = cannot_copy                        # type: ignore[assignment]
+        try:
+            refusal(lambda: profile_lib.seed(
+                source=source, profile=os.path.join(root, "seed-dst")),
+                "seed-failed")
+        finally:
+            shutil.copy2 = real_copy                      # type: ignore[assignment]
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def t_audit_redaction_beats_truncation() -> None:
@@ -2813,6 +4009,16 @@ def t_http_read_never_uses_a_proxy() -> None:
                     "cdp-unreachable")
         finally:
             os.environ.update(keep)
+            # the keys this check SET but did not find must be REMOVED, not
+            # just overwritten: `update(keep)` restores only what was there,
+            # so `http_proxy` survived the check pointing at the fake proxy's
+            # now-dead port — and every later outbound connection a
+            # proxy-honoring client made (websockets dials through
+            # `connect_http_proxy`) failed ECONNREFUSED against it (found by
+            # the first check that opened a websocket after this one)
+            for name in ("http_proxy", "HTTP_PROXY", "no_proxy", "NO_PROXY"):
+                if name not in keep:
+                    os.environ.pop(name, None)
     finally:
         server.shutdown()
         server.server_close()
@@ -3294,6 +4500,8 @@ def _chrome_cookies(path: str, rows: list[tuple]) -> None:
         host_key text, name text, value text, path text,
         expires_utc integer, is_secure integer, is_httponly integer,
         is_persistent integer)""")
+    # nosemgrep -- literal schema and bound parameters, no interpolation:
+    # the values ride as `?` placeholders (this is a test fixture builder)
     conn.executemany("insert into cookies values (?, ?, ?, '/', ?, 0, 0, 1)",
                      rows)
     conn.commit()
@@ -3423,6 +4631,16 @@ def t_seed_reads_logins_back() -> None:
             reply["logins"]
         assert reply["logins"]["sites"][0]["host"] == ".x.com", \
             reply["logins"]
+        # the independent read: the COPIED database itself is opened and
+        # counted, so a census regression that read the reply's own
+        # bookkeeping cannot satisfy this
+        landed = os.path.join(root, "seeded", "Default", "Cookies")
+        conn = sqlite3.connect(landed)
+        try:
+            rows = conn.execute("select host_key, name from cookies")
+            assert list(rows) == [(".x.com", "auth_token")], "copied store"
+        finally:
+            conn.close()
         # a dry run copies nothing, so there is nothing to read back
         dry = profile_lib.seed(source=source,
                                profile=os.path.join(root, "dry"), dry=True)
@@ -4779,6 +5997,40 @@ def main() -> int:
          t_census_survives_a_dying_endpoint),
         ("a failed open stops what it started",
          t_a_failed_open_stops_what_it_started),
+        ("the mutation read-backs refuse when the page says no",
+         t_mutation_readbacks_refuse_when_the_page_says_no),
+        ("a refused screenshot writes nothing",
+         t_screenshot_refusals_write_nothing),
+        ("a partial seed never reports verified",
+         t_seed_refuses_a_partial_copy),
+        ("nav/reload/activate refuse on a failed read-back",
+         t_lifecycle_readbacks_refuse_when_the_page_says_no),
+        ("a wheel nothing takes, and no viewport",
+         t_scroll_and_viewport_refusals),
+        ("dialog verdicts are three-state",
+         t_dialog_verdicts_are_three_state),
+        ("an ambiguous option set refuses",
+         t_select_and_ambiguous_option),
+        ("a close survivor is named",
+         t_close_survivor_is_a_refusal),
+        ("plugin specs fail closed",
+         t_plugin_specs_fail_closed),
+        ("the attach store fails closed",
+         t_attachment_store_fails_closed),
+        ("write_atomic refuses a leftover temp",
+         t_write_atomic_refuses_a_leftover_temp),
+        ("the close read-back sums verified rows",
+         t_tab_count_sums_verified_rows),
+        ("input verbs send the right CDP frames",
+         t_input_dispatch_shapes),
+        ("the seed walk counts what it skips",
+         t_seedtree_walk_counts_what_it_skips),
+        ("poll runs on a monotonic clock",
+         t_poll_runs_on_a_monotonic_clock),
+        ("evaluate_until retries a silent sample",
+         t_evaluate_until_retries_a_silent_sample),
+        ("the remaining refusal codes are produced",
+         t_the_remaining_refusal_codes),
         ("the close read-back tolerates a stranger",
          t_tab_count_does_not_refuse_on_a_stranger),
         ("an unreadable tab list is not absence",
@@ -4837,8 +6089,12 @@ def main() -> int:
         ("pid liveness", t_pid_alive),
     ):
         check(name, fn)
-    print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
-    return 1 if FAIL else 0
+    print(f"\n{len(PASS)} passed, {len(FAIL)} failed, {len(SKIP)} skipped")
+    for name, why in SKIP:
+        print(f"SKIPPED  {name}  {why}")
+    if FAIL:
+        return 2 if SKIP else 1
+    return 2 if SKIP else 0
 
 
 if __name__ == "__main__":

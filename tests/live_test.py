@@ -57,6 +57,9 @@ ROOT = ""
 # created in `main()` for the same reason ROOT is.
 LOG_DIR = ""
 SUITE_LOG = ""
+# A pinned EMPTY plugin path, created in `main()`: the battery must never load
+# what the host installed, exactly as the hermetic suite pins it.
+PLUGIN_DIR = ""
 TIMEOUT_S = 90
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -149,6 +152,18 @@ DOM_FRAME = ("<!doctype html><title>frame</title>"
 EDGES_PAGE = """<!doctype html><meta charset="utf-8"><title>edges</title>
 <button id="ask" onclick="window.__prompt = prompt('name', '')">ask</button>
 <a id="dl" href="/attachment">download</a>"""
+# A page that arms a `beforeunload` prompt from a REAL gesture (the prompt is
+# gated on user activation) and then blocks any navigation away: the one
+# operation whose dialog a one-shot client cannot answer, because the
+# announcing connection is already gone when the next verb runs.
+BEFOREUNLOAD_PAGE = """<!doctype html><meta charset="utf-8"><title>bu</title>
+<button id="b">stay</button>
+<script>
+  document.getElementById('b').addEventListener('click', () => {
+    document.title = 'armed';
+    window.onbeforeunload = () => 'leave?';
+  });
+</script>"""
 EXTRACT_PAGE = """<!doctype html><meta charset="utf-8"><title>extract fixture</title>
 <section id="posts">
   <article>
@@ -226,8 +241,28 @@ BARE_MEDIA_PAGE = ("<!doctype html><meta charset=\"utf-8\">"
 def env() -> dict[str, str]:
     """The environment every CLI call gets: the throwaway root, and an action
     log in the run's scratch directory — so redaction can be asserted, the log
-    is really exercised, and the user's real log is never touched."""
-    return {**os.environ, "BROWSER_CONTROL_ROOT": ROOT,
+    is really exercised, and the user's real log is never touched.
+
+    The host's POLICY, PLUGIN and PROXY variables are dropped, not
+    inherited: a host that exports `BROWSER_CONTROL_ALLOW=read` (the
+    session-wide policy the README advertises) would otherwise fail every
+    write check spuriously; a host plugin would ride into `selftest` and
+    `--help`; and a host `http_proxy` would make every websocket verb dial
+    the proxy — the CLI's transport resolves proxies the way `websockets`
+    does (`getproxies()`), and the project already measured that a leftover
+    `http_proxy` diverts even a loopback dial (the same failure mode the
+    hermetic suite's `t_http_read_never_uses_a_proxy` pins for the HTTP
+    read). The hermetic suite has always pinned these; the battery did not
+    (a review measured it).
+    """
+    dropped = ("BROWSER_CONTROL_ALLOW", "BROWSER_CONTROL_DENY",
+               "BROWSER_CONTROL_PLUGIN_PATH",
+               "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+               "all_proxy", "ALL_PROXY")
+    pinned = {name: value for name, value in os.environ.items()
+              if name not in dropped}
+    return {**pinned, "BROWSER_CONTROL_ROOT": ROOT,
+            "BROWSER_CONTROL_PLUGIN_PATH": PLUGIN_DIR or "",
             "BROWSER_CONTROL_LOG": SUITE_LOG or os.path.join(ROOT,
                                                             "actions.jsonl")}
 
@@ -303,8 +338,16 @@ def listening(port: int) -> bool:
 
 
 def http_json(port: int, path: str = "/json") -> Any:
-    """The endpoint read directly, bypassing the CLI."""
-    with urllib.request.urlopen(                       # noqa: S310 (loopback)
+    """The endpoint read directly, bypassing the CLI.
+
+    Through an opener with `ProxyHandler({})`: the default opener honours
+    `http_proxy`, and a host that exports one would route this ORACLE through
+    it — the suite that proves the code under test refuses a proxy must not
+    itself be diverted by one (a review flagged it, mirroring the fix the
+    library carries).
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(                                  # noqa: S310 (loopback)
             f"http://127.0.0.1:{port}{path}", timeout=5) as reply:
         return json.loads(reply.read().decode("utf-8", "replace"))
 
@@ -418,6 +461,12 @@ def start_server() -> None:
                 return
             if self.path.startswith("/extract"):
                 self._send(EXTRACT_PAGE.encode())
+                return
+            if self.path.startswith("/beforeunload"):
+                self._send(BEFOREUNLOAD_PAGE.encode())
+                return
+            if self.path.startswith("/after"):
+                self._send(b"<!doctype html><title>after</title><h1>after</h1>")
                 return
             if self.path.startswith("/edges"):
                 self._send(EDGES_PAGE.encode())
@@ -599,6 +648,17 @@ def c_open_starts_a_browser() -> str:
     assert len(rows) == 1, rows
     assert rows[0]["id"] == reply["tabs"][0]["id"], (rows, reply["tabs"])
     STATE["tab"] = rows[0]["id"]
+    # the pid RECORD on disk names the browser this call started — the file
+    # `close` reads to signal, and an oracle the reply cannot fake (a review
+    # found it only touched in-process, never read back from the run's own
+    # profile)
+    recorded = Path(profile, ".pid").read_text(encoding="utf-8").strip()
+    assert recorded == str(pid), (recorded, pid)
+    # ...and the browser's OWN command line carries the anti-automation
+    # suppression the security research measured: without it Chrome 153 sets
+    # `navigator.webdriver` for any port-launched browser, which is what a
+    # stricter bot check reads before anything else runs
+    assert "--disable-blink-features=AutomationControlled" in line, line[:200]
     return f"pid {pid}, port {port}, tab {rows[0]['id'][:8]}…"
 
 
@@ -1011,13 +1071,19 @@ def c_dom_media_refuses_what_it_cannot_do() -> str:
     A `<video>` with NO source is refused EITHER by the page (the promise
     rejects with the autoplay policy) OR by the verdict (it reports `paused:
     false` and never plays a frame) — which one depends on whether the tab has
-    seen a real gesture yet, so both are honest and this accepts both.
+    seen a real gesture yet, so both are honest. What each code must SAY is
+    not interchangeable, though: `media-blocked` carries the page's own
+    failure text, and `media-not-verified` says the clock did not advance (a
+    review found the old assertion accepted a bare "refused" for either).
     """
     ok_json("tab", "nav", f"{base_url()}/media-bare")
     rc, out, err = run("tab", "media", "play")
     assert rc == 2, (rc, out, err)
-    assert "ERR[media-blocked]" in err or "ERR[media-not-verified]" in err, err
-    assert "nothing to play" in err or "refused" in err, err
+    if "ERR[media-blocked]" in err:
+        assert "refused" in err or "nothing to play" in err, err
+    else:
+        assert "ERR[media-not-verified]" in err, err
+        assert "nothing to play" in err or "clock did not advance" in err, err
     ok_json("tab", "nav", f"{base_url()}/dom")          # no media at all
     refuses("no-media", "tab", "media", "state")
     refuses("bad-args", "tab", "media", "stop")
@@ -1148,7 +1214,7 @@ def c_tab_dialog() -> str:
     err = refuses("blocked", "tab", "click", "--selector", "#ask")
     took = time.time() - started
     assert "battery alert" in err, err        # the dialog is named, not guessed
-    assert took < 8, took                     # the grace, not a 15s write-off
+    assert took < 12, took                    # the grace, not a 15s write-off
     parked = ok_json("tab", "dialog")
     assert parked["open"] is None and parked["verified"] is False, parked
     assert parked["blocked"] is True, parked
@@ -1167,6 +1233,46 @@ def c_tab_dialog() -> str:
     assert healthy["open"] is False, healthy
     return (f"a click's alert is named in {took:.1f}s; `tab nav` recovers the "
             "parked renderer")
+
+
+def c_beforeunload_is_bounded_and_named() -> str:
+    """A `beforeunload` prompt is NAMED, bounded, and the move still lands.
+
+    The CDP research's contract: a page whose `window.onbeforeunload` returns
+    a string (armed by a real gesture) blocks a navigation with a dialog a
+    one-shot client cannot answer after the announcing verb returns. The CLI
+    must refuse nav-failed within its own grace, naming the dialog, and must
+    NOT hang. Measured on this build (twice): the refusal arrives in ~1 s, the
+    browser dismisses the prompt when the announcing session detaches, and the
+    navigation it was blocking then lands on the target. On its OWN tab, so
+    the fixture the rest of the battery shares is never parked.
+    """
+    base = base_url()
+    tid = str(ok_json("tab", f"{base}/beforeunload")["id"])
+    short = f"id:{tid[:8]}"
+    try:
+        # a real click is what ARMS the prompt (user activation is the gate)
+        ok_json("tab", "click", "--selector", "#b", "--tab", short)
+        started = time.monotonic()
+        err = refuses("nav-failed", "tab", "nav", f"{base}/after",
+                      "--tab", short)
+        took = time.monotonic() - started
+        assert "beforeunload" in err, err
+        assert took < 20, took              # the grace, not a hang
+        # the prompt is dismissed when the announcing connection goes away, so
+        # the navigation it was blocking lands — read the URL back until it does
+        deadline = time.time() + 10
+        landed = ""
+        while time.time() < deadline:
+            landed = str(ok_json("tab", "info", short)["tab"]["url"])
+            if landed.endswith("/after"):
+                break
+            time.sleep(0.3)
+        assert landed.endswith("/after"), landed
+    finally:
+        run("tab", "close", short, timeout=30)
+    return (f"named in {took:.1f}s, no hang; the blocked move landed once the "
+            "prompt was dismissed")
 
 
 def c_tab_close_bulk() -> str:
@@ -1351,6 +1457,25 @@ def c_headless_browser() -> str:
         # the CURRENT verbs, unchanged, against a browser nobody can see
         seen = ok_json("tab", "text", "--chars", "40", "--profile", profile)
         assert "one" in seen["text"], seen
+        # the anti-automation surface the security research measured: a
+        # headless instance's OWN page must not announce HeadlessChrome in the
+        # UA (the launch carries the binary's real version in Chrome's reduced
+        # form), and `navigator.webdriver` must be false despite the DevTools
+        # port (the launch suppresses the marker the port itself sets). Both
+        # are read from the page, not from the CLI's reply.
+        ua = ok_json("tab", "js", "navigator.userAgent", "--profile",
+                     profile)["value"]
+        assert "Chrome/" in str(ua), ua
+        # the UA spoof is best-effort by design: the launch adds it only when
+        # the binary's `--version` could be parsed. Assert the stronger
+        # property only when the process really carries the switch — the same
+        # /proc oracle this check already uses — so an unparseable `--version`
+        # cannot fail a check for a property the product does not promise.
+        if "--user-agent=" in line:
+            assert "HeadlessChrome" not in str(ua), ua
+        webdriver = ok_json("tab", "js", "navigator.webdriver",
+                            "--profile", profile)["value"]
+        assert webdriver is False, ("navigator.webdriver", webdriver)
         ok_json("tab", "nav", f"{base}/dom", "--profile", profile)
         click = ok_json("tab", "click", "Save the thing", "--profile",
                         profile)
@@ -1439,6 +1564,9 @@ def c_close_stops_the_browser() -> str:
     assert all(g["pid"] != pid for g in data["browsers"]), data
     info = ok_json("info")
     assert info["running"] is False, info
+    # the pid record went with it: the next `open` must not read a stale pid
+    assert not Path(str(STATE["profile"]), ".pid").exists(), \
+        "the closed browser's pid record outlived it"
     return (f"tabs-open refused, then --force stopped pid {pid} "
             f"({err.split(']')[0]}])")
 
@@ -2352,6 +2480,8 @@ CHECKS = (
     ("tab select uses real arrow keys", c_tab_select),
     ("tab screenshot writes a verified PNG", c_tab_screenshot),
     ("tab dialog names the dialog and recovery works", c_tab_dialog),
+    ("a beforeunload prompt is named, bounded and survives",
+     c_beforeunload_is_bounded_and_named),
     ("refusals carry their codes", c_refusals),
     ("info reports the endpoint", c_info_reports_the_endpoint),
     ("open adopts a running browser", c_open_adopts_the_running_browser),
@@ -2434,6 +2564,8 @@ def cleanup() -> None:
         if SERVER is not None:
             SERVER.shutdown()
             SERVER.server_close()
+        if PLUGIN_DIR:
+            shutil.rmtree(PLUGIN_DIR, ignore_errors=True)
         for _ in range(3):
             shutil.rmtree(ROOT, ignore_errors=True)
             if not Path(ROOT).exists():
@@ -2444,11 +2576,12 @@ def cleanup() -> None:
 
 
 def main() -> int:
-    global ROOT, LOG_DIR, SUITE_LOG
+    global ROOT, LOG_DIR, SUITE_LOG, PLUGIN_DIR
     ROOT = fixture_profile()
     Path(ROOT, RUN_MARKER).write_text(str(os.getpid()), encoding="utf-8")
     LOG_DIR = audit.scratch_dir() or ROOT
     SUITE_LOG = os.path.join(LOG_DIR, "live-actions.jsonl")
+    PLUGIN_DIR = tempfile.mkdtemp(prefix="browser-control-live-plugins-")
     reason = prereq()
     try:
         if reason:

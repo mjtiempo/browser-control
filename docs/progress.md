@@ -1288,6 +1288,133 @@ reported, not hidden; 5 named results, `landed_on` the site's own
 `/search?q=…`) and `xiaomi 18 pro max release date` (30 chars, 86.1 measured,
 3 results).
 
+### 5.33 The research round — challenging browser operations, and the suite's other half
+
+Three delegated research lanes (deepseek provider, `deepseek-flash`) and one
+delegated test review, all written to `research/`: `cdp-hard-operations.md`
+(dialogs/OOPIF/shadow DOM/uploads/downloads/nav races/trusted input/PNG
+oracle, 91 cited URLs), `flake-and-client-testing.md` (actionability, polling,
+hermetic tiers, quota and process hygiene, 88 URLs, primary sources fetched),
+`security-and-lifecycle.md` (DevTools exposure, rebinding, `navigator.webdriver`
+measured on this host's Chrome 153, `/proc` identity, 0700/0600 discipline,
+58 URLs), and `current-tests-review.md` (the read-only review of both suites).
+
+What the review found, and what is now tested:
+
+* **P0 — the refusal half of "verify, or refuse".** Every mutation verb was
+pinned on SUCCESS only; the branch where the read-back says no was reached by
+no check. New `t_mutation_readbacks_refuse_when_the_page_says_no` scripts the
+page's own probes and drives `insert`/`type` (`insert-not-verified`,
+`type-not-verified`), `check` (`check-not-verified`), `hover`
+(`hover-not-verified`), `upload` (`upload-not-verified`), `media play`
+(`media-not-verified`), `ambiguous-element` and `no-match` — asserting the
+real input WAS dispatched before the refusal.
+* **P0 — a refused screenshot writes nothing.** New
+`t_screenshot_refusals_write_nothing`: geometry mismatch, non-PNG bytes, a
+non-finite dpr and an undecodable base64 each refuse with the target path
+absent; the matching header writes the file and the reply equals its bytes.
+* **P0 — a partial seed never says verified.** New
+`t_seed_refuses_a_partial_copy`: an unreadable source directory refuses
+`seed-not-verified`, and the manifest oracle (`seedtree.missing`) names a file
+that did not land and one that landed the wrong size.
+* **The lifecycle and form verb refusals.** New
+`t_lifecycle_readbacks_refuse_when_the_page_says_no` (`nav-not-verified`,
+`reload-not-verified`, `activate-not-verified`, `nav-failed`),
+`t_scroll_and_viewport_refusals` (`scroll-not-verified`, `no-viewport`),
+`t_dialog_verdicts_are_three_state` (`open: null` + `verified: false` when the
+tab cannot answer, `dialog-not-verified`, `no-dialog`),
+`t_select_and_ambiguous_option` (`ambiguous-option`, `not-a-select`),
+`t_close_survivor_is_a_refusal` (`close-tab-not-verified`).
+* **A skip is not a pass (hermetic too).** `t_page_expressions_compile` used to
+print a note and return normally when `node` is absent, which `check()`
+counted as PASS. The suite now records SKIP and pays for it in the exit
+status, exactly as the battery always did.
+* **`cdp.evaluate_until` had no test.** New
+`t_evaluate_until_retries_a_silent_sample` drives the fake websocket peer so a
+dialog parks the renderer mid-poll: the sample is swallowed and retried on the
+same connection (`samples == 2`), and an already-parked session refuses
+`blocked`.
+* **Plugin specs fail closed.** New `t_plugin_specs_fail_closed`: no PLUGIN
+dict, no name, no actions, a non-verb name, no `run`, no classes, an unknown
+class, and two plugins colliding with each other — plus the enforcing half
+(the classless action is not on the surface) and the plugin usage line in
+`--help`.
+* **The attach file is an authorization.** New
+`t_attachment_store_fails_closed`: a malformed `attached.json` reads as "nothing
+is attached" (never a holdover grant), record round-trip and drop-by-pid, and
+a leftover `.new` scratch file refuses `attach-failed` without replacing the
+records.
+* **`write_atomic`'s own refusals.** New
+`t_write_atomic_refuses_a_leftover_temp`: a planted symlink and a real
+leftover `.part` file each refuse `write-failed`, and neither the victim nor
+the leftover moves.
+* **`_tab_count`'s positive half.** A verified row with two tabs sums to 2;
+the stranger row is the zero case (the old check passed on a constant 0).
+* **The seed walk's bookkeeping.** New
+`t_seedtree_walk_counts_what_it_skips`: `links`, `special`, `unreadable` and
+the `ours` filter that keeps a fresh profile from refusing `profile-exists`.
+* **`poll` is monotonic.** New `t_poll_runs_on_a_monotonic_clock`: the wall
+clock is stepped back an hour and the budget still expires on time.
+* **The CDP input shapes.** New `t_input_dispatch_shapes`: `insert` sends ONE
+`Input.insertText` and zero key events; `press enter` sends keyDown (with
+`text`) then keyUp (without); `press arrowleft` sends `rawKeyDown` with no
+text; `click` sends the moved → pressed → released triad at one point with
+`buttons`/`clickCount`, and `upload` binds the element by **objectId**.
+* **The anti-bot launch surface.** `t_launch_flags` now also pins
+`--disable-blink-features=AutomationControlled`, no `--enable-automation` and
+no `--remote-allow-origins`; the transport check asserts the frame set contains
+no `Runtime.enable`/`Console.enable`/`Debugger.enable` (the documented
+side-channel); the lock file is 0600.
+
+A real defect in the suite was found on the way: `t_http_read_never_uses_a_proxy`
+set `http_proxy` to its fake server and restored only the keys that had been
+there before, so the dead proxy outlived the check — and the first check that
+opened a websocket afterwards (`t_evaluate_until_…`) failed `ECONNREFUSED`
+against it. The leak is fixed, and it is the reason the suite's later outbound
+connections are now honest.
+
+The battery gained the same treatment where the oracles are real: `env()` drops
+the host's `BROWSER_CONTROL_ALLOW`/`DENY` and pins
+`BROWSER_CONTROL_PLUGIN_PATH` to an empty directory (the hermetic suite always
+did; a host with a session policy made write checks fail spuriously), its
+`http_json` oracle uses a proxy-free opener, `open` reads the `.pid` record
+back from disk and requires it gone after `close`, and the headless check now
+reads the page's OWN `navigator.userAgent` (no `HeadlessChrome`) and
+`navigator.webdriver` (false despite the DevTools port) — the anti-automation
+contract the security research measured.
+
+A second, independent review pass (delegated on `deepseek-flash`, over the
+diff itself) then found and closed a further set: the monotonic-clock check
+could not fail for the reason it named (it now arms `time.time` to raise), the
+redundant no-`Runtime.enable` loop was folded into the exact frame-list
+assertion, `insert`'s refusal is now driven through the VERB and not only its
+reply builder, dead scaffolding in three scripted checks was removed, two
+checks remove their temp roots and SKIP under root (where `chmod 000` proves
+nothing), and the six refusal codes still never produced — `eval-timeout`,
+`browser-not-stopped`, `profile-unusable`, `reset-failed`,
+`reset-not-verified`, `seed-failed` — are now driven by their real paths (the
+new `t_the_remaining_refusal_codes`). The battery's `env()` also drops the
+host's `http_proxy` family (the transport resolves proxies via
+`getproxies()`, so a host proxy would divert every websocket verb), and its
+headless UA assertion is now gated on the process really carrying
+`--user-agent=` (the launch is best-effort when `--version` cannot be parsed).
+
+A genuinely hard operation from the CDP research joined the battery:
+`c_beforeunload_is_bounded_and_named` arms a real `beforeunload` (a trusted
+click), proves `tab nav` refuses `nav-failed` within its grace naming the
+dialog and never hangs, and then watches the blocked move LAND once the
+one-shot client detaches — on its own tab, so the battery's shared fixture is
+never parked.
+
+*Done when* every review P0 and every named refusal code has a check, the
+research's input-shape and anti-bot contracts are pinned, and both suites are
+green.
+
+Evidence: 119 hermetic checks green (17 new), pyright 0, `ruff check .` 0, and
+the live battery **62 passed, 0 failed, 0 skipped** (additions above, run
+twice against google-chrome-stable 153.0.8010.52 on a throwaway root; the
+beforeunload check was stable in a separate measurement too).
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -1371,8 +1498,8 @@ plugin tier's business.
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser (75 checks)
-python3 tests/live_test.py            # the battery, needs a browser (60 checks)
+python3 tests/test_unit.py            # hermetic, no browser (119 checks)
+python3 tests/live_test.py            # the battery, needs a browser (62 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com
 browser-control-cli tab list
