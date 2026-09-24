@@ -5554,12 +5554,14 @@ def t_x_plugin_loads_more_on_scroll() -> None:
 
 
 def t_google_plugin_offline() -> None:
-    """The Google plugin TYPES the query — it never builds a query URL.
+    """The Google plugin TYPES the query and PAGES by clicking — no query URL.
 
     The input path is the whole point of the plugin: `nav` may only ever see
-    Google's HOMEPAGE, the query goes through `type_text` at the 90 WPM
-    cadence (12 / wpm seconds), and the submit is a real `Enter`. The
-    extraction is stubbed exactly like the X plugin's, so the record shape is
+    Google's HOMEPAGE — even when `--cap` needs a second page, which arrives
+    by clicking the site's own Next control; the query goes through
+    `type_text` at the 90 WPM cadence (12 / wpm seconds), and the submit is a
+    real `Enter`. The extraction is stubbed exactly like the X plugin's, so
+    the record shape, the merge, and the `loading`/`selectors` reports are
     checked without a browser. The `plugin_api` import is LOCAL on purpose:
     importing it at module scope would bind the real verbs before the X
     plugin's own check patches them.
@@ -5569,8 +5571,31 @@ def t_google_plugin_offline() -> None:
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
     os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
-    calls: dict[str, list] = {"nav": [], "focus": [], "type": [], "press": []}
-    state = {"verified": True}
+    calls: dict[str, list] = {"nav": [], "focus": [], "type": [], "press": [],
+                              "scroll": [], "click": []}
+    state = {"verified": True, "served": 0, "missing": ()}
+    # two SERPs the fake serves in order — page 2 repeats nothing, so the
+    # merge has something to merge and the `page` stamps differ
+    pages = (
+        {"url": "https://www.google.com/search?q=araghchi+speaking",
+         "matches": [
+             {"title": "First", "url": "https://a.example/1",
+              "snippet": "one"},
+             {"title": None, "url": None, "snippet": None},
+             {"title": "Dup", "url": "https://a.example/1",
+              "snippet": "again"},
+             {"title": "Second", "url": "https://b.example/2",
+              "snippet": "two"}]},
+        {"url": "https://www.google.com/search?q=araghchi+speaking&start=10",
+         "matches": [
+             {"title": "Third", "url": "https://c.example/3",
+              "snippet": "three"}]},
+    )
+
+    def fresh() -> None:
+        for key in calls:
+            calls[key].clear()
+        state.update({"verified": True, "served": 0, "missing": ()})
 
     def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
         calls["nav"].append((url, tab))
@@ -5579,6 +5604,9 @@ def t_google_plugin_offline() -> None:
     def fake_wait(mode: str, selector: str | None = None,
                   expr: str | None = None, timeout: float = 0.0,
                   idle_ms: int = 0, tab: str = "", browser: str = "") -> dict:
+        if selector in state["missing"]:
+            raise plugin_api.ControlError(plugin_api.errors.ERR_NO_MATCH,
+                                          f"no element matches {selector!r}")
         return {"ok": True}
 
     def fake_focus(text: str | None = None, selector: str | None = None,
@@ -5598,29 +5626,39 @@ def t_google_plugin_offline() -> None:
         calls["press"].append(key)
         return {"ok": True}
 
+    def fake_scroll(by: int | None = None, edge: str | None = None,
+                    text: str | None = None, selector: str | None = None,
+                    index: int | None = None, at: str | None = None,
+                    tab: str = "", browser: str = "") -> dict:
+        calls["scroll"].append(selector)
+        return {"ok": True}
+
+    def fake_click(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, tab: str = "",
+                   browser: str = "", at: str | None = None) -> dict:
+        calls["click"].append(selector)
+        return {"ok": True, "clicked": True, "changed": True}
+
     def fake_extract(each: str = "", fields: list | None = None, cap: int = 0,
                      chars: int = 0, visible: bool = False, unique: str = "",
                      tab: str = "", browser: str = "") -> dict:
-        return {"ok": True, "truncated": False,
-                "url": "https://www.google.com/search?q=araghchi+speaking",
-                "matches": [
-                    {"title": "First", "url": "https://a.example/1",
-                     "snippet": "one"},
-                    {"title": None, "url": None, "snippet": None},
-                    {"title": "Dup", "url": "https://a.example/1",
-                     "snippet": "again"},
-                    {"title": "Second", "url": "https://b.example/2",
-                     "snippet": "two"}]}
+        page = pages[min(state["served"], len(pages) - 1)]
+        state["served"] += 1
+        return {"ok": True, "truncated": False, "url": page["url"],
+                "matches": page["matches"]}
 
     patched = {"nav": fake_nav, "wait": fake_wait, "focus": fake_focus,
                "type_text": fake_type, "press": fake_press,
-               "extract": fake_extract}
+               "extract": fake_extract, "scroll": fake_scroll,
+               "click": fake_click}
     real = {name: getattr(plugin_api, name) for name in patched}
     for name, fn in patched.items():
         setattr(plugin_api, name, fn)
     try:
+        # page ONE alone answers the shape semantics: rows with no name are
+        # dropped, duplicates collapse within the page, nothing is clicked
         rc, out, err = run_cli(["google", "search", "araghchi speaking",
-                                "--cap", "5"])
+                                "--cap", "2"])
         assert rc == 0, (rc, err)
         data = json.loads(out)
         # the ONE navigation is the homepage: no query ever rides a URL
@@ -5636,10 +5674,69 @@ def t_google_plugin_offline() -> None:
         # rows with no name are dropped, duplicates collapse, order holds
         assert data["count"] == 2, data
         assert [r["title"] for r in data["results"]] == ["First", "Second"], data
+        assert [r["page"] for r in data["results"]] == [1, 1], data
         assert data["landed_on"].startswith("https://www.google.com/"), data
+        assert data["selectors"] == {"search_box": 'textarea[name="q"]',
+                                     "results": "#search div.MjjYud:has(h3)",
+                                     "matched": True}, data
+        assert data["loading"] == {"pages": 1, "clicks": 0, "max_pages": 3,
+                                   "stop": "cap"}, data
+        assert data["truncated"] is False, data
+        assert calls["click"] == [] and calls["scroll"] == [], calls
+
+        # `--cap` is a TARGET: the second page arrives by clicking the site's
+        # own Next — never a built `&start=` URL
+        fresh()
+        rc, out, err = run_cli(["google", "search", "q", "--cap", "3"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert [url for url, _tab in calls["nav"]] == [
+            "https://www.google.com/"], calls["nav"]
+        assert calls["scroll"] == ["a#pnnext"], calls
+        assert calls["click"] == ["a#pnnext"], calls
+        assert [r["title"] for r in data["results"]] == [
+            "First", "Second", "Third"], data
+        assert [r["page"] for r in data["results"]] == [1, 1, 2], data
+        assert data["loading"] == {"pages": 2, "clicks": 1, "max_pages": 3,
+                                   "stop": "cap"}, data
+        assert data["truncated"] is False, data
+
+        # a page with no Next control ends the paging honestly
+        fresh()
+        state["missing"] = ("a#pnnext", 'a[aria-label="Next page"]')
+        rc, out, err = run_cli(["google", "search", "q", "--cap", "5"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert data["count"] == 2, data
+        assert data["loading"] == {"pages": 1, "clicks": 0, "max_pages": 3,
+                                   "stop": "no-next"}, data
+        assert data["truncated"] is False, data
+        assert calls["click"] == [], calls
+
+        # ...and the budget ends it without pretending the cap was reached
+        fresh()
+        rc, out, err = run_cli(["google", "search", "q", "--cap", "5",
+                                "--max-pages", "1"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert data["loading"] == {"pages": 1, "clicks": 0, "max_pages": 1,
+                                   "stop": "max-pages"}, data
+        assert data["truncated"] is True, data
+
+        # the selector map is ORDERED: a missing first candidate falls through
+        # to the next, and the reply names the one extraction ran with
+        fresh()
+        state["missing"] = ("#search div.MjjYud:has(h3)",)
+        rc, out, err = run_cli(["google", "search", "q", "--cap", "2"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert data["selectors"]["results"] == "div.g:has(h3)", data
+        assert data["count"] == 2, data
+
         # --wpm moves the cadence
-        calls["type"].clear()
-        rc, out, err = run_cli(["google", "search", "q", "--wpm", "120"])
+        fresh()
+        rc, out, err = run_cli(["google", "search", "q", "--wpm", "120",
+                                "--cap", "2"])
         assert rc == 0, (rc, err)
         assert calls["type"] == [("q", 0.1)], calls
         assert json.loads(out)["typing"]["wpm"] == 120, out
@@ -5651,8 +5748,12 @@ def t_google_plugin_offline() -> None:
                  "google search: one TEXT at most, got 2"),
                 (["google", "search", "q", "--wpm", "0"],
                  "--wpm must be at least 1, got 0"),
+                (["google", "search", "q", "--max-pages", "0"],
+                 "--max-pages must be at least 1, got 0"),
                 (["google", "search", "q", "--cap", "nope"],
-                 "--cap needs a number, got 'nope'")):
+                 "--cap needs a number, got 'nope'"),
+                (["google", "search", "q", "--max-pages", "nope"],
+                 "--max-pages needs a number, got 'nope'")):
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
             assert phrase in err, (argv, err)
@@ -5660,7 +5761,7 @@ def t_google_plugin_offline() -> None:
         rc, _out, err = run_cli(["--deny", "write", "google", "search", "q"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
         # a field that did NOT take the text is refused, never submitted
-        calls["press"].clear()
+        fresh()
         state["verified"] = False
         rc, _out, err = run_cli(["google", "search", "q"])
         assert rc == 2 and "ERR[type-not-verified]" in err, (rc, err)

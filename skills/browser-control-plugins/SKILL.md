@@ -45,22 +45,31 @@ BROWSER_CONTROL_PLUGIN_PATH=/home/mark/Documents/pidev/mark-browser-control/plug
 
 ```bash
 BROWSER_CONTROL_PLUGIN_PATH=/home/mark/Documents/pidev/mark-browser-control/plugins \
-browser-control-cli google search "araghchi speaking in UN" --cap 5 --wpm 90
+browser-control-cli google search "araghchi speaking in UN" --cap 20 --wpm 90
 ```
 
 The query goes into Google's own search box as real per-character key events at
 a human cadence, then Enter. This is what a site's handlers (autocomplete,
-consent, bot checks) actually see — no `/search?q=` URL is ever constructed.
+consent, bot checks) actually see — no `/search?q=` URL is ever constructed,
+and further pages arrive by CLICKING the site's own Next control, never a
+built `&start=` URL.
 
-- Usage: `google search QUERY [--cap N] [--wpm N] [--tab SPEC]`
+- Usage: `google search QUERY [--cap N] [--wpm N] [--max-pages N] [--tab SPEC]`
 - `--cap` default 10, max 50; `--wpm` default 90, max 600 (5 chars per word).
+- `--cap` is a TARGET: when page one yields fewer, the plugin clicks Next,
+  waits for the render to really swap, and merges by URL until the target is
+  met, no Next is left, or `--max-pages` (default 3, max 10) runs out.
 - Reply: `query`, `entry` (the homepage), `typing` (`chars`, `wpm`,
-  `measured_wpm`, `elapsed_s`, `verified`), `landed_on` (the address the SITE
-  put in the bar after submit), `count`, `truncated`,
-  `results[{title, url, snippet}]`, `note`.
-- Classes `read`+`write` (it navigates and types), so `--deny write google
-  search …` refuses `not-allowed`. Zero results can be the site changing its
-  DOM, a consent wall, or a challenge — read `landed_on`.
+  `measured_wpm`, `elapsed_s`, `verified`), `landed_on` (the FIRST address the
+  SITE put in the bar after submit), `count`, `truncated`,
+  `results[{title, url, snippet, page}]`, `loading` (`pages`, `clicks`,
+  `max_pages`, `stop` = `cap` | `no-next` | `max-pages` | `no-growth` |
+  `click-failed`), `selectors` (`search_box`, `results`, `matched`), `note`.
+- Classes `read`+`write` (it navigates, types and clicks), so `--deny write
+  google search …` refuses `not-allowed`. Zero results can be the site changing
+  its DOM, a consent wall, or a challenge — `selectors.matched` says whether
+  the map found a result container at all, and `landed_on` says where the
+  submit ended up.
 
 ## `page read` — a list of URLs, ONE call
 

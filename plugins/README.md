@@ -122,12 +122,21 @@ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
 * `--wpm N` moves the cadence (`N` words a minute, 5 characters to a word, so
   `12 / N` seconds between keystrokes); `measured_wpm` reports what the whole
   type actually took, CDP round trips included.
-* The result container asks only for cards that HAVE a heading
-  (`#search div.MjjYud:has(h3)`), so `--cap N` counts results rather than the
-  panels around them.
-* The selector map at the top of the file (`textarea[name="q"]`,
-  `#search div.MjjYud:has(h3)`, `h3`, `a@href`, `div.VwiC3b,
-  div[data-sncf]`) is the part that breaks when Google changes its DOM.
+* `--cap N` is a TARGET, not a slice of page one: the plugin clicks the site's
+  own Next control (never a built `&start=` URL), waits for the render to
+  really swap, and merges by URL until the target is met, no Next is left, or
+  the `--max-pages N` budget (default 3, max 10) runs out. The `loading` block
+  says how many `pages`/`clicks` that took and which `stop` cause ended it
+  (`cap`, `no-next`, `max-pages`, `no-growth`, `click-failed`); every result
+  row carries the 1-based `page` it came from.
+* The selector map is ORDERED candidates, each asking only for cards that HAVE
+  a heading (`:has(h3)`), so counts are results rather than the panels around
+  them. The first candidate the page renders — `#search div.MjjYud:has(h3)`,
+  then `div.g:has(h3)`, then `div[data-snc]:has(h3)`; likewise
+  `textarea[name="q"]` then `input[name="q"]` — is the one extraction runs
+  with, and the reply's `selectors` block names it. A zero-result reply can
+  therefore say whether the map found nothing (`matched: false`) or the page
+  really showed none.
 
 It declares `read`+`write` (it navigates for writes and types into the page),
 so `--deny write google search …` refuses it like any built-in.

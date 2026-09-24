@@ -49,17 +49,29 @@ then Enter. No query URL is ever built:
 
 ```console
 $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
-    google search "araghchi speaking in UN" --cap 5
+    google search "araghchi speaking in UN" --cap 20
 {"ok": true, "entry": "https://www.google.com/",
  "typing": {"chars": 23, "wpm": 90, "measured_wpm": 85.4, "verified": true},
- "count": 5, "results": [{"title": "…", "url": "…", "snippet": "…"}, …]}
+ "count": 20, "loading": {"pages": 3, "clicks": 2, "max_pages": 3,
+ "stop": "cap"}, "selectors": {"results": "#search div.MjjYud:has(h3)",
+ "matched": true}, "results": [{"title": "…", "url": "…",
+ "snippet": "…", "page": 1}, …]}
 ```
 
-- Usage: `google search QUERY [--cap N] [--wpm N] [--tab SPEC]`.
+- Usage: `google search QUERY [--cap N] [--wpm N] [--max-pages N] [--tab SPEC]`.
 - `--wpm N` moves the cadence; `measured_wpm` reports what the whole type
   actually took, CDP round trips included.
-- `landed_on` is the `/search?q=…` address the SITE put in the bar after the
-  submit — the query went into the page's own field first, which is what a
+- `--cap N` is a TARGET, not a slice of page one: the plugin clicks the site's
+  own Next control (never a built `&start=` URL), waits for the render to
+  really swap, and merges what comes back by URL. `--max-pages N` (default 3,
+  max 10) bounds the paging; the `loading` block reports `pages`, `clicks` and
+  the `stop` cause (`cap`, `no-next`, `max-pages`, `no-growth`,
+  `click-failed`), and every result carries the 1-based `page` it came from.
+- The selector map is ordered candidates: the first the page renders is the
+  one extraction runs with, and `selectors` names it — so a zero-result reply
+  distinguishes a DOM change (`matched: false`) from a page that showed none.
+- `landed_on` is the FIRST `/search?q=…` address the SITE put in the bar after
+  the submit — the query went into the page's own field first, which is what a
   person does and what a site's handlers see.
 
 ## Shipped: `page read` — a list of URLs in one call
