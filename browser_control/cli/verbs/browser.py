@@ -128,10 +128,21 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
              "websockets": getattr(cdp_rpc.websockets, "__version__", "unknown"),
              "profile_root": browser_lib.root(),
              "action_log": audit.LOG.path() or "off",
+             # the exposure a caller cannot otherwise see: CDP has no auth,
+             # and loopback is not a per-user boundary — so a managed browser
+             # on a shared machine is reachable by any local process (a
+             # review flagged that this was written only in a code comment)
+             "cdp_exposure": ("loopback tcp, unauthenticated — any local "
+                              "process (any uid) can reach the CDP port"),
              "verbs": sorted(registry.HANDLERS),
              "capabilities": {
                  "classes": list(capabilities.CLASSES),
                  "by_class": capabilities.by_class(),
+                 # the plugin verbs whose classes the PLUGIN declared: the
+                 # gate enforces them, but nothing verified them, and saying
+                 # so here keeps the report from reading as if it had (a
+                 # review flagged it)
+                 "plugin_declared": capabilities.plugin_declared(),
                  # asked from the SAME function the hermetic test uses, so a
                  # verb added without a class shows up in this reply instead of
                  # being quietly missing from a table nobody re-reads

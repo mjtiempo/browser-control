@@ -609,7 +609,7 @@ reads and `tab wait --for js` runs caller code:
 | class | means | how many |
 | --- | --- | --- |
 | `read` | reads state; /proc and loopback CDP only | 11 |
-| `write` | changes the page, the browser, or this CLI's authorization | 26 |
+| `write` | changes the page, the browser, or this CLI's authorization | 27 |
 | `code` | runs caller-supplied code: `tab js`, `tab wait --for js` | 2 |
 | `file` | touches a path the CALLER named: `tab screenshot`, `tab upload` | 2 |
 | `egress` | would reach the network — nothing yet; the plugin tier will | 0 |
@@ -864,11 +864,11 @@ Three decisions worth recording:
   must not quietly allow what it was written to stop.
 * **`selftest` is never gated.** It is the verb that reports the policy, and a
   gate that blocks its own explanation is a trap.
-* **The MODE decides.** `tab wait --for js` is code while `tab wait` reads,
-  `tab dialog accept` writes while `state` reads — so the gate resolves the
-  action from argv, and `tab dialog` with no mode maps to `state` (otherwise a
-  READ would be refused as unclassified). No policy set means no gate, which is
-  what every call did before one existed.
+* **The MODE decides.** `tab wait --for js` is code+write while `tab wait`
+  reads, `tab dialog accept` writes while `state` reads — so the gate resolves
+  the action from argv, and `tab dialog` with no mode maps to `state`
+  (otherwise a READ would be refused as unclassified). No policy set means no
+  gate, which is what every call did before one existed.
 
 **Four warts, all of them places the tool claimed more than it knew:**
 
@@ -1293,7 +1293,9 @@ reported, not hidden; 5 named results, `landed_on` the site's own
 ### 5.33 The research round — challenging browser operations, and the suite's other half
 
 Three delegated research lanes (deepseek provider, `deepseek-flash`) and one
-delegated test review, all written to `research/`: `cdp-hard-operations.md`
+delegated test review, written to `research/` and since folded into the fixes
+below (the directory was cleaned up once its findings landed):
+`cdp-hard-operations.md`
 (dialogs/OOPIF/shadow DOM/uploads/downloads/nav races/trusted input/PNG
 oracle, 91 cited URLs), `flake-and-client-testing.md` (actionability, polling,
 hermetic tiers, quota and process hygiene, 88 URLs, primary sources fetched),

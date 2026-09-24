@@ -2,8 +2,9 @@
 
 Adapters for the verbs, registered in `registry.HANDLERS`; `main` parses
 `--browser`, dispatches, prints the reply as one JSON object on stdout, and
-maps a refusal to `ERR[code]: message` on stderr with exit 2. Nothing else
-prints, and no caller-producible input can produce a traceback.
+maps a refusal to `ERR[code]: message` on stderr with exit 2. The reply is the
+only thing on stdout — the no-verb path prints the usage text to stderr — and
+no caller-producible input can produce a traceback.
 """
 from __future__ import annotations
 
@@ -391,7 +392,16 @@ def _run_invocation(args: list[str]) -> int:
     registry.PLUGINS.reset(plugins_lib.PluginSet.load(
         reserved=set(registry.HANDLERS) | {"help"}))
     capabilities.set_plugins(registry.PLUGINS.classes())
-    if args and args[0] in ("-h", "--help", "help"):
+    # help is a VERB and also `-h`/`--help`, and the global flags may appear
+    # anywhere — so the token is looked for after they are stripped too. The
+    # argv[0]-only test made `--browser chrome --help` an `unknown-command`,
+    # contradicting the flag grammar the usage text states (a review flagged
+    # it). A bad global flag is left for the real parse below to refuse.
+    rest_for_help: list[str] = []
+    with contextlib.suppress(ControlError):
+        rest_for_help = _flags(args)[0]
+    if (args and args[0] in ("-h", "--help", "help")) or \
+            (rest_for_help and rest_for_help[0] in ("-h", "--help", "help")):
         print(USAGE)
         for usage in registry.PLUGINS.usages():
             print(f"  {usage}")

@@ -66,6 +66,19 @@ is in [Refusal codes](refusals.md).
 - **Every drive is checked against the kernel.** The port comes from a file;
   the process holding the listening socket is verified first, and anything
   else refuses `cdp-not-local` with nothing sent to it.
+- **Only this CLI's own root is touchable.** `BROWSER_CONTROL_ROOT` moves
+  the managed root; `reset --force` and `seed --force` recursively delete
+  under it, so a profile directory under a MOVED root is wiped only when this
+  CLI created it — `open`/`profile seed` drop a `.browser-control.profile`
+  marker, and a directory without one refuses `not-managed`. (Under the
+  default root, profiles are this tool's own by construction.)
+- **The DevTools endpoint is loopback TCP and carries NO authentication.**
+  The browser listens on `127.0.0.1` with an ephemeral port, and CDP has no
+  token: any local process — including a different user on this machine,
+  because loopback is not a per-user boundary — can find the port
+  (`/proc/net/tcp`) and drive the browser, session cookies included. `selftest`
+  reports this as `cdp_exposure`. Treat a running managed browser on a shared
+  machine the way you would treat any process holding your sessions.
 - **`tab js` and `tab wait --for js` run code you supply** — the declared
   escape hatch, and a write. The reply is the page's OWN value: a string that
   parses as JSON is still that string (this CLI's own probes decode, because
@@ -82,7 +95,7 @@ check or a reviewer does not have to hardcode a verb list:
 
 | class | means |
 | --- | --- |
-| `read` | state only — `/proc` and loopback CDP |
+| `read` | state and page CONTENT — `/proc`, loopback CDP, and the rendered page of every drivable browser |
 | `write` | the page, the browser, or this CLI's authorization |
 | `code` | runs caller-supplied code: `tab js`, `tab wait --for js` |
 | `file` | a path the CALLER named: `screenshot`, `upload` |
@@ -99,7 +112,8 @@ browser-control-cli selftest | jq '.capabilities.by_class'
 
 Two notes on the policy inputs, so a deny never *looks* wider than it is:
 `--deny egress` is accepted but currently names no action — nothing carries
-that class yet; and `tab wait --for js` is classified `code` alone, so
-`--deny write` does not stop it (`--deny code` stops both escape hatches).
+that class yet; and `tab wait --for js` carries `code`+`write`, so either
+`--deny write` or `--deny code` stops it exactly as it stops `tab js`.
 `selftest` is never gated — a gate that blocked its own explanation would be a
-trap.
+trap. Plugin verbs report their classes under `plugin_declared`: those are
+the plugin's OWN declarations, not something this tool verified.

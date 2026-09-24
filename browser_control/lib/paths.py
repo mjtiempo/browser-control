@@ -18,8 +18,11 @@ LOCK_DIR = ".locks"
 LOCK_NAME_LIMIT = 40        # the readable tail of a lock file name
 
 __all__ = ["DEFAULT_ROOT", "LOCK_DIR", "LOCK_FILE", "LOCK_NAME_LIMIT",
-           "PID_FILE", "ROOT_ENV", "ensure_root", "expand", "is_managed",
-           "lock_path", "norm", "pid_file", "profile_dir", "root"]
+           "MARKER", "PID_FILE", "ROOT_ENV", "ensure_root", "expand",
+           "is_managed", "lock_path", "mark", "marked", "norm",
+           "pid_file", "profile_dir", "root"]
+
+MARKER = ".browser-control.profile"
 
 
 def expand(path: object) -> str:
@@ -55,8 +58,45 @@ def ensure_root() -> str:
     leaf of its own call, so it is always the intended 0700 (a review flagged
     the 0755 root).
     """
-    os.makedirs(root(), mode=0o700, exist_ok=True)
-    return root()
+    path = root()
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except OSError:
+        # the caller's refusal (it names the verb and the path): re-raise the
+        # filesystem error unchanged rather than turning it into a different
+        # exception type here
+        raise
+    return path
+
+
+def mark(profile: object) -> None:
+    """Mark a directory as one THIS CLI created (best-effort).
+
+    `reset --force` and `seed --force` recursively delete under the managed
+    root, and the root itself is caller-chosen when `BROWSER_CONTROL_ROOT` is
+    set: "everything under the root is ours" is a declaration, not proof. The
+    marker is the proof the wipe guard can check (a review found the
+    arbitrary-delete path a caller-chosen root opens).
+    """
+    try:
+        with open(os.path.join(str(profile), MARKER), "w",
+                  encoding="utf-8") as handle:
+            handle.write("browser-control\n")
+    except OSError:
+        pass
+
+
+def marked(profile: object) -> bool:
+    """Did this CLI create that directory?
+
+    A profile under the DEFAULT root is trusted without a marker: profiles
+    created before the marker existed are still this CLI's own, and the
+    default root is not caller-chosen. A root moved with
+    `BROWSER_CONTROL_ROOT` gets no such trust — the marker is required there.
+    """
+    if root() == expand(DEFAULT_ROOT):
+        return True
+    return os.path.isfile(os.path.join(str(profile), MARKER))
 
 
 def profile_dir(binary_path: str) -> str:

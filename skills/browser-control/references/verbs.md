@@ -7,9 +7,11 @@ stderr with exit 2. `browser-control-cli --help` prints the same surface.
 ## Global flags
 
 - `--browser NAME` — the browser to drive (open/close/tab) or to narrow
-  (info/tab list). A binary name (`google-chrome-stable`) or a managed profile
-  name. Default: a live managed browser, else the first Chromium-family binary
-  on PATH.
+  (`info`, `tab list`, and the instance verbs `profile logins`/`profile seed`/
+  `profile reset`). `profile info` refuses it: its report covers every managed
+  profile, so the flag cannot narrow it. A binary name
+  (`google-chrome-stable`) or a managed profile name. Default: a live managed
+  browser, else the first Chromium-family binary on PATH.
 - `--profile DIR` — the INSTANCE: a profile directory under the root. This is
   how two instances of ONE browser (two logins, two sessions) are addressed, on
   every verb.
@@ -76,7 +78,9 @@ The browser this CLI would drive and its endpoint.
 Make a browser this CLI did NOT start writable — **tab writes only** (`close`
 never stops an attached browser). Verification is the browser's own command
 line naming the profile (`--user-data-dir=<profile>`); a browser started on its
-vendor default profile cannot be verified and refuses (`attach-failed`).
+vendor default profile cannot be verified and refuses `cdp-not-local`. (An
+`attach-failed` is a different failure: the attachment record could not be
+written.)
 
 `attach --list` shows every attachment and whether it is still up. `--profile`
 cannot combine with `--list`.

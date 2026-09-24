@@ -86,15 +86,18 @@ def output_path(path: str) -> str:
 def write_atomic(target: str, data: bytes, force: bool) -> None:
     """Write the PNG; refuse to clobber unless `force`.
 
-    Without `force` the open is EXCLUSIVE, so "it did not exist" is the
-    kernel's answer rather than a check that can lose a race. With `force` the
-    bytes land on a temporary name and are renamed into place, so a failed
-    write never replaces a good file.
+    The file is 0600 like every other file this tool writes: a screenshot is
+    the rendered page of a profile that is often SEEDED with the user's real
+    logins, so it is not a file to publish under the umask default (a review
+    flagged the 0644). Without `force` the open is EXCLUSIVE, so "it did not
+    exist" is the kernel's answer rather than a check that can lose a race.
+    With `force` the bytes land on a temporary name and are renamed into
+    place, so a failed write never replaces a good file.
     """
     if not force:
         try:
             handle = os.open(target,
-                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             fail(ERR_FILE_EXISTS,
                  f"tab screenshot: {target} already exists — pass --force to "
@@ -120,7 +123,7 @@ def write_atomic(target: str, data: bytes, force: bool) -> None:
         # pointed at (a review flagged CWE-377). A leftover temp is refused,
         # not silently adopted.
         handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                         | os.O_NOFOLLOW, 0o644)
+                         | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
         fail(ERR_WRITE_FAILED,
              f"tab screenshot: a leftover temporary file is in the way "

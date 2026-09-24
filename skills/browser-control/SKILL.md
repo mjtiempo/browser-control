@@ -227,8 +227,8 @@ browser-control-cli --allow read tab text
 ```
 
 - `tab js` carries `write`+`code` (either `--deny write` or `--deny code`
-  stops it); `tab wait --for js` carries `code` alone (only `--deny code`
-  stops it).
+  stops it); `tab wait --for js` carries `code`+`write` too, so either deny
+  stops it.
 - `tab extract` is `read` only — a `--deny code` session can still extract.
 - `tab screenshot` is `read`+`file`; `tab upload` and `profile seed` are
   `write`+`file`.

@@ -168,18 +168,6 @@ class Endpoint:
                          if data.get("tabs") is not None else None),
                    reason=str(data.get("reason") or ""))
 
-    def as_reply(self) -> dict:
-        """The endpoint keys, in the order the wire format carries them."""
-        out: dict = {"port": self.port, "reachable": self.reachable,
-                     "verified": self.verified}
-        if self.listener is not None:
-            out["listener"] = dict(self.listener)
-        if self.tabs is not None:
-            out["tabs"] = self.tabs
-        if self.reason:
-            out["reason"] = self.reason
-        return out
-
 
 @dataclass(frozen=True)
 class BrowserRow:
@@ -206,13 +194,6 @@ class BrowserRow:
                    headless=bool(row.get("headless")),
                    endpoint=Endpoint.from_dict(endpoint_of(row)))
 
-    def as_reply(self) -> dict:
-        """The row as the wire format carries it (endpoint included)."""
-        return {"pid": self.pid, "exe": self.exe, "path": self.path,
-                "profile": self.profile, "profile_from": self.profile_from,
-                "managed": self.managed, "attached": self.attached,
-                "headless": self.headless, "cdp": self.endpoint.as_reply()}
-
     def as_brief(self) -> dict:
         """The row small enough to ride along in a tab reply."""
         return {"pid": self.pid, "exe": self.exe, "profile": self.profile,
@@ -225,11 +206,6 @@ class BrowserRow:
                 "profile": self.profile, "profile_from": self.profile_from,
                 "managed": self.managed, "attached": self.attached,
                 "headless": self.headless}
-
-    @property
-    def may_write(self) -> bool:
-        """May this CLI write into this browser?"""
-        return bool(self.managed or self.attached)
 
 
 def _who(rows: list[dict]) -> str:

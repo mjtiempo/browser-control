@@ -122,6 +122,8 @@ def cmd_tab_check(rest: list[str], browser: str) -> dict:
     rest, uncheck = _switch(rest, "--uncheck")
     needle = _needle(rest, "tab check")
     if (needle is None) == (selector is None):
+        if not needle and not selector:
+            fail(ERR_BAD_ARGS, "tab check: give TEXT or --selector CSS")
         fail(ERR_BAD_ARGS, "tab check: give TEXT or --selector CSS, not both")
     return dom.check(needle, selector=selector,
                      index=_opt_int(index, "tab check --index"),
@@ -135,6 +137,8 @@ def cmd_tab_select(rest: list[str], browser: str) -> dict:
     rest, value = _pop(rest, "--value", "tab select")
     needle = _needle(rest, "tab select")
     if (needle is None) == (selector is None):
+        if not needle and not selector:
+            fail(ERR_BAD_ARGS, "tab select: give TEXT or --selector CSS")
         fail(ERR_BAD_ARGS, "tab select: give TEXT or --selector CSS, not both")
     if value is None:
         fail(ERR_BAD_ARGS,
@@ -222,6 +226,8 @@ def cmd_tab_find(rest: list[str], browser: str) -> dict:
     rest, cap = _pop(rest, "--cap", "tab find")
     needle = _needle(rest, "tab find")
     if (needle is None) == (selector is None):
+        if not needle and not selector:
+            fail(ERR_BAD_ARGS, "tab find: give TEXT or --selector CSS")
         fail(ERR_BAD_ARGS, "tab find: give TEXT or --selector CSS, not both")
     return dom.find(needle, selector=selector,
                     cap=_int(cap, "tab find --cap") if cap is not None
@@ -295,6 +301,8 @@ def cmd_tab_focus(rest: list[str], browser: str) -> dict:
     rest, index = _pop(rest, "--index", "tab focus")
     needle = _needle(rest, "tab focus")
     if (needle is None) == (selector is None):
+        if not needle and not selector:
+            fail(ERR_BAD_ARGS, "tab focus: give TEXT or --selector CSS")
         fail(ERR_BAD_ARGS, "tab focus: give TEXT or --selector CSS, not both")
     return dom.focus(needle, selector=selector,
                      index=_opt_int(index, "tab focus --index"),

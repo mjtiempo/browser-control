@@ -209,14 +209,18 @@ FILES_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
 
 SCROLL_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
   const el = document.elementFromPoint(__X__, __Y__);
-  let nested = null;
+  const nested = [];
   for (let n = el; n; n = n.parentElement) {
-    // the document scroller is reported as `document`, not as a nested one:
-    // html/body carry the page's own scrollTop
+    // EVERY scrolled ancestor on the chain, both axes: the wheel chains past
+    // an exhausted inner scroller to an outer one, and a page can map it to
+    // scrollLeft — reporting only the first scroller's scrollTop read both as
+    // "nothing moved" (a review flagged it). Bounded so the probe stays a
+    // probe; the document scroller is reported as `document` separately.
     if (n !== document.documentElement && n !== document.body &&
         (n.scrollTop || n.scrollLeft)) {
-      nested = [describe(n), Math.round(n.scrollTop)];
-      break;
+      nested.push([describe(n), Math.round(n.scrollTop),
+                   Math.round(n.scrollLeft)]);
+      if (nested.length >= 4) break;
     }
   }
   const doc = document.documentElement;

@@ -115,10 +115,6 @@ class PluginSet:
         """The capability classes of every installed action, by verb."""
         return {verb: action.classes for verb, action in self.actions.items()}
 
-    def verb_names(self) -> list[str]:
-        """Every installed plugin verb."""
-        return list(self.actions)
-
     def usages(self) -> list[str]:
         """The usage line of every installed action."""
         return [action.usage for action in self.actions.values()]

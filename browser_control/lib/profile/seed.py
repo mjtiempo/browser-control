@@ -23,6 +23,7 @@ from browser_control.lib import (
 from browser_control.lib.browser import root
 from browser_control.lib.errors import (
     ERR_BAD_ARGS,
+    ERR_NOT_MANAGED,
     ERR_PROFILE_EXISTS,
     ERR_RESET_FAILED,
     ERR_RESET_NOT_VERIFIED,
@@ -33,8 +34,11 @@ from browser_control.lib.instance import (
     Instance,
 )
 from browser_control.lib.paths import (
+    MARKER,
     expand,
     lock_path,
+    mark,
+    marked,
     pid_file,
 )
 from browser_control.lib.profile.stores import (
@@ -145,6 +149,17 @@ def seed(source: str = "", profile: str = "", browser: str = "",
         # counted FIRST, because the reply has to say what was LOST, not only
         # what arrived.
         wipe = _tree(target, count_skips=True) if existing and force else None
+        if wipe is not None and not dry and not marked(target):
+            # a root moved with BROWSER_CONTROL_ROOT is caller-chosen: the
+            # recursive wipe refuses a directory this CLI cannot prove it
+            # created (a review found `seed --force` could delete anything
+            # under such a root). The marker is written by `open`/`seed`.
+            fail(ERR_NOT_MANAGED,
+                 f"{target} was not created by this CLI (no {MARKER} marker) "
+                 "and the managed root is not the default one — refusing to "
+                 "recursively delete a directory this tool cannot prove is "
+                 "its own. Remove it yourself, or create the profile with "
+                 "`open`/`profile seed`")
         detached = False
         if wipe is not None and not dry:
             detached = browser_lib.is_attached(target)
@@ -178,6 +193,9 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                 fail(ERR_SEED_NOT_VERIFIED,
                      f"{len(absent)} file(s) did not land in {dest}: "
                      + ", ".join(absent[:4]))
+            # what landed is THIS CLI's own profile now, whatever root it sits
+            # under: the marker is what a later `--force` wipe checks
+            mark(target)
     wiped = wipe if not dry else None    # the facts of a wipe that HAPPENED
     reply = {"ok": True, "from": src, "profile": target,
              "profile_dir": dest, "dry": bool(dry),

@@ -93,7 +93,10 @@ def _poll_media(session: cdp.Session, mode: str, before: dict,
     only make the caller wait for it.
     """
     def probe() -> dict:
-        got = session.evaluate(MEDIA_STATE_EXPR)
+        # bound the probe by the budget the verb ADVERTISES: the session's
+        # 15s default otherwise let `tab media play` take ~20s against its
+        # own 5s deadline (a review flagged it)
+        got = session.evaluate(MEDIA_STATE_EXPR, timeout=timeout)
         return got if isinstance(got, dict) else {}
 
     def done(state: dict) -> bool:

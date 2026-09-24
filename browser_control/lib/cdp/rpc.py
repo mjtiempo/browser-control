@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -109,6 +110,27 @@ def _value_of(result: dict, raw: bool = False) -> Any:
                    or "page JS exception")
         fail(ERR_JS_ERROR, f"Runtime.evaluate: {foreign(text)}")
     value = (result.get("result") or {}).get("value")
+    if value is None:
+        # CDP carries NaN/±Infinity/-0 in `unserializableValue`, not `value`.
+        # Reading only `value` reported them as null — indistinguishable from
+        # `undefined` — from the one verb whose promise is the page's OWN
+        # value (a review flagged it). The four documented spellings parse
+        # with float(); a non-finite one stays the protocol's own token so
+        # stdout is still valid JSON (json.dumps would print a bare NaN).
+        special = (result.get("result") or {}).get("unserializableValue")
+        if isinstance(special, str):
+            try:
+                parsed = float(special)
+            except ValueError:
+                value = special
+            else:
+                if math.isfinite(parsed):
+                    value = parsed
+                else:
+                    # the protocol's own token, returned BEFORE the JSON
+                    # decode below: `json.loads("NaN")` would accept it back
+                    # as a float, which is the one thing this must not do
+                    return special
     try:
         # A string's cap is about the TEXT the page produced, not its JSON
         # escaping: `json.dumps` expands each non-ASCII character to a

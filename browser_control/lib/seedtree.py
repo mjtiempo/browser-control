@@ -136,6 +136,15 @@ def copy_verified(source: str, target: str, dry: bool, *,
     while stack:
         here, there = stack.pop()
         try:
+            # the destination's PARENT first, as a leaf: `makedirs(there)`
+            # applies `mode` to the leaf only and creates intermediates at the
+            # umask default, so a single-profile source (`<target>/Default`)
+            # left `<target>` at 0755 while `launch` creates the same
+            # directory as a leaf 0700 (a review flagged it). The root is
+            # already 0700 above, so every intermediate made here is ours.
+            parent = os.path.dirname(there)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
             os.makedirs(there, mode=0o700, exist_ok=True)
         except OSError as e:
             fail(ERR_SEED_FAILED, f"cannot create {there}: {e}")

@@ -21,9 +21,11 @@ suite rather than a user's call.
 and `--flag=VALUE`, and the value-less flag — so a plugin parses its own
 arguments the way the built-ins do instead of hand-rolling the loop. `pop`
 names the verb in its refusal the same way the CLI does. `text_arg`,
-`int_arg` and `float_arg` are the positional and numeric readers beside them,
-so "one TEXT at most", "TEXT is required" and "needs a number" are the same
-refusals a built-in verb gives.
+`int_arg`, `float_arg` and `tab_arg` are the positional, numeric and tab-spec
+readers beside them, so "one TEXT at most", "TEXT is required", "needs a
+number" and "`--tab` needs a SPEC" are the same refusals a built-in verb
+gives — including the empty `--tab ""` that a plugin must not read as "no
+spec".
 
 Everything is re-exported from where it already lived, so nothing moves and no
 plugin that imports `lib` directly breaks. The readers come from
@@ -38,6 +40,7 @@ from browser_control.lib.argv import (
     _int as int_arg,
     _pop as pop,
     _switch as switch,
+    _tab_arg as tab_arg,
     _text_arg as text_arg,
 )
 from browser_control.lib.browser import nav
@@ -55,4 +58,4 @@ from browser_control.lib.plugins import PLUGIN_API
 
 __all__ = ["ControlError", "PLUGIN_API", "click", "errors", "extract",
            "fail", "float_arg", "focus", "int_arg", "nav", "pop", "press",
-           "scroll", "switch", "text_arg", "type_text", "wait"]
+           "scroll", "switch", "tab_arg", "text_arg", "type_text", "wait"]

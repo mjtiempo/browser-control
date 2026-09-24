@@ -210,22 +210,28 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
              + (f" (--index {index} is past the end)" if index else "")
              + _pkg._frames_note(row, tab_row))
     session.call("DOM.scrollIntoViewIfNeeded", {"nodeId": node_id})
-    # prove it: the SAME matcher now finds it inside the viewport
-    def visible_in(data: dict) -> list[dict]:
+    # prove it: the SAME index (not "any match") is the one that must be
+    # inside the viewport — accepting any in-viewport match reported an
+    # already-visible earlier element as the one revealed (a review found the
+    # false proof, the family's one job being that the proof is true)
+    def indexed_in_viewport(data: dict) -> bool:
         rows = _pkg._well_formed(data.get("matches") or [], ("tag", "box"))
-        return [row for row in rows if row.get("in_viewport")]
+        i = as_int(index) if index is not None else 0
+        return 0 <= i < len(rows) and bool(rows[i].get("in_viewport"))
 
     _attempts, found = poll(
         lambda: _pkg._matches_in(session, needle, css, FIND_CAP),
         timeout=SCROLL_MOVE_S, interval=POLL_FAST,
-        accept=lambda data: bool(visible_in(data)))
+        accept=indexed_in_viewport)
     rows = _pkg._well_formed(found.get("matches") or [], ("tag", "box"))
-    inside = [row for row in rows if row.get("in_viewport")]
-    if not inside:
+    i = as_int(index) if index is not None else 0
+    if not (0 <= i < len(rows)) or not rows[i].get("in_viewport"):
         fail(ERR_SCROLL_NOT_VERIFIED,
-             f"{needle or css!r} is still outside the viewport after "
+             f"{needle or css!r}"
+             + (f" at --index {index}" if index is not None else "")
+             + " is still outside the viewport after "
              "DOM.scrollIntoViewIfNeeded — the element may be inside a "
              "container that cannot scroll it into view")
-    return {"ok": True, "revealed": True, "element": _pkg._element(inside[0]),
+    return {"ok": True, "revealed": True, "element": _pkg._element(rows[i]),
             "scroll": found.get("scroll"), "tab": f"id:{tab_row['id']}",
             "browser": browser_lib.brief(row)}

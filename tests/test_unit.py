@@ -1798,6 +1798,13 @@ def t_selftest() -> None:
     for verb in ("open", "close", "list", "info", "tab", "selftest"):
         assert verb in data["verbs"], data["verbs"]
     assert data["version"] and data["python"], data
+    # the exposure a caller cannot otherwise see (a review flagged that the
+    # loopback-CDP fact lived only in a code comment), and the plugin actions
+    # whose classes are the PLUGIN's own declaration rather than a verified
+    # table
+    assert "unauthenticated" in data["cdp_exposure"], data["cdp_exposure"]
+    assert data["capabilities"]["plugin_declared"] == [], \
+        data["capabilities"]["plugin_declared"]
     # the one thing selftest must FAIL on: without websockets no verb can
     # speak CDP, and an install that cannot reach a browser should say so at
     # once rather than at the first `tabs`
@@ -1978,7 +1985,7 @@ def t_capability_surface() -> None:
     assert capabilities.ACTIONS["tab dialog state"] == ("read",)
     assert capabilities.ACTIONS["tab dialog accept"] == ("write",)
     assert capabilities.ACTIONS["tab wait"] == ("read",)
-    assert capabilities.ACTIONS["tab wait --for js"] == ("code",)
+    assert capabilities.ACTIONS["tab wait --for js"] == ("code", "write")
     assert capabilities.ACTIONS["selftest"] == ("read",)
     # and the reply a caller gets is the table the library declares
     rc, out, err = run_cli(["selftest"])
@@ -2170,6 +2177,12 @@ def t_policy_gate() -> None:
         assert _may(_gate("read,write"), "tab upload")[0] is False   # write+file
         # a deny-list: any one class is enough to block
         blocked, why = _may(_gate(deny="code"), "tab wait --for js")
+        assert blocked is False and "denied" in why, why
+        # ...and `--deny write` blocks it too: the mode resolves the tab as a
+        # WRITE (`_resolve(..., for_write=True)`) and runs caller JS, so a
+        # policy that shuts page mutation must not leave this door open while
+        # `tab js` is shut (a review found the class was code-only)
+        blocked, why = _may(_gate(deny="write"), "tab wait --for js")
         assert blocked is False and "denied" in why, why
         assert _may(_gate(deny="code"), "tab wait")[0] is True
         # `*` means every class; an unknown class is REFUSED, not ignored
@@ -3874,6 +3887,9 @@ def t_the_remaining_refusal_codes() -> None:
         victim = os.path.join(root, "victim")
         os.makedirs(victim)
         Path(victim, "Cookies").write_text("login", encoding="utf-8")
+        # the wipe guard requires proof this CLI made the profile (the marker);
+        # this check is about the FAILURES AFTER that guard, so mark it
+        paths_lib.mark(victim)
         real_rmtree = shutil.rmtree
 
         def cannot_remove(path: str, *a: object, **k: object) -> None:
@@ -4339,11 +4355,12 @@ def t_census_survives_a_dying_endpoint() -> None:
         assert by_pid[22]["cdp"]["tabs"] is None, by_pid[22]
         assert by_pid[22]["cdp"]["verified"] is True, by_pid[22]
         assert "stopped answering" in by_pid[22]["cdp"]["reason"], by_pid[22]
-        # a `None` count is not a claim of absence: the projection drops the
-        # key rather than reporting a number nobody read
+        # a `None` count is not a claim of absence: the LIVE projection is the
+        # one that carries the row, reporting `tabs: null` with the reason; the
+        # dead `Endpoint.as_reply` that dropped the key is gone (a review found
+        # the two projections had already diverged)
         endpoint = browser.Endpoint.from_dict(by_pid[22]["cdp"])
         assert endpoint.tabs is None, endpoint
-        assert "tabs" not in endpoint.as_reply(), endpoint.as_reply()
         assert browser.Endpoint.from_dict(by_pid[11]["cdp"]).tabs == 1
         assert browser._endpoint_details(by_pid[22])["tabs"] is None
         # and the verb that reports the machine answers with the rows it saw
@@ -4516,6 +4533,11 @@ def t_seed_lands_where_chrome_reads() -> None:
         assert Path(target, "Default", "Cookies").read_text() == "cookie"
         assert not os.path.exists(os.path.join(target, "Cookies")), \
             "a profile file landed in the instance root, where Chrome ignores it"
+        # the seed marks the profile as one THIS CLI created: a later
+        # `--force` wipe under an env-moved root checks it (a review found the
+        # caller-chosen root made the recursive delete unprovable)
+        assert paths_lib.marked(target), target
+        assert Path(target, paths_lib.MARKER).is_file(), target
 
         # a whole USER-DATA directory -> the instance root (its Default/ travels)
         data_src = os.path.join(root, "src-data")
@@ -4783,6 +4805,12 @@ def t_reset_guard_counts_skipped_content() -> None:
         os.makedirs(os.path.join(target, "Cache"))
         Path(target, "Cache", "data").write_bytes(b"x" * 4096)
         refusal(lambda: profile_lib.reset(profile=target), "profile-exists")
+        # an env-moved root with no marker is not proof this CLI created the
+        # directory: the recursive wipe refuses (a review found reset --force
+        # could delete anything under a caller-chosen root)
+        refusal(lambda: profile_lib.reset(profile=target, force=True),
+                "not-managed")
+        paths_lib.mark(target)
         reply = profile_lib.reset(profile=target, force=True)
         assert reply["files"] >= 1 and reply["bytes_freed"] >= 4096, reply
     finally:
@@ -4928,6 +4956,9 @@ def t_audit_modes_caps_redirect_and_symlink() -> None:
         # the destination a profile-dir source now lands in
         planted = os.path.join(target, "Default", "Cookies")
         os.symlink(victim, planted)
+        # the wipe guard requires proof this CLI made the profile; this check
+        # is about the wipe destroying the planted link, so mark it
+        paths_lib.mark(target)
         keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         try:
@@ -5814,7 +5845,7 @@ def t_focus_nodes_go_through_one_helper() -> None:
                                    "Node is not focusable (code -32000)")
             return {}
 
-        def evaluate(self, expression: str) -> dict:
+        def evaluate(self, expression: str, timeout: float = 0.0) -> dict:
             # the probe `select` reads before it focusses: already selected it
             # would return early, so this is one option away from the target
             return {"is_select": True, "matched": 1, "target": 1,
@@ -6053,6 +6084,251 @@ def t_launch_resolves_the_mode() -> None:
         lifecycle_lib._running_headless = real                    # type: ignore[assignment]
 
 
+def t_plugin_tab_flag_refuses_an_empty_spec() -> None:
+    """`--tab ""` is refused by the plugin seam exactly as by the core.
+
+    The plugins read `--tab` with their own `pop(...)` + `tab or ""`, so the
+    core's refusal (`cli/argv._tab_flag`) did not apply and an empty spec
+    reached `one_tab`, which reads it as "the only page tab" — a WRITE into a
+    tab nobody named (a review found it). `plugin_api.tab_arg` is the shared
+    reader now, so the same argv cannot mean two things one layer apart.
+    """
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    assert "tab_arg" in plugin_api.__all__, plugin_api.__all__
+    assert plugin_api.tab_arg is argv_lib._tab_arg
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    try:
+        for argv in (["x", "search", "q", "--tab", ""],
+                     ["google", "search", "q", "--tab", ""],
+                     ["x", "search", "q", "--tab", "   "]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert "--tab needs a SPEC" in err, (argv, err)
+    finally:
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_selector_zero_is_refused() -> None:
+    """`--port 0` / `--pid 0` are refused, not read as "no selector".
+
+    `Selector.given` filters falsy values, so a zero was indistinguishable
+    from an absent flag: `close --port 0` stopped the MANAGED browser, and
+    `close --profile DIR --port 0` silently dropped the --port (a review
+    found it). The refusal happens in argv, before any browser is touched.
+    """
+    for argv in (["close", "--port", "0"], ["close", "--pid", "0"],
+                 ["attach", "--port", "0"], ["detach", "--pid", "0"],
+                 ["detach", "--all", "--port", "0"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+        assert "must be 1 or more" in err, (argv, err)
+
+
+def t_help_after_global_flags() -> None:
+    """`--browser NAME --help` prints the surface, not `unknown-command`.
+
+    The help token was read only at argv[0], while the flag grammar says the
+    global flags may appear anywhere (a review found the contradiction).
+    """
+    for argv in (["--browser", "chrome", "--help"], ["help"],
+                 ["--profile", os.path.join(tempfile.gettempdir(), "x"),
+                  "help"]):
+        rc, out, _err = run_cli(argv)
+        assert rc == 0 and "browser-control-cli" in out, (argv, rc, out[:80])
+
+
+def t_close_of_the_only_tab_reads_exit_as_gone() -> None:
+    """A port file that outlives the browser is not proof of life.
+
+    Measured: `DevToolsActivePort` survives a graceful exit AND a SIGKILL.
+    `_require_tab_list_readable` gated "the browser exited" on the FILE, so
+    `tab close` on the only tab refused `close-tab-not-verified` after its
+    own success (a review found it). Liveness is the kernel's listener table.
+    """
+    with tempfile.TemporaryDirectory() as profile:
+        # a port nobody holds: bound then closed, the way the ownership check
+        # proves a free port (no browser is involved)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            free = int(probe.getsockname()[1])
+        assert cdp.listener_of(free) == {}, free
+        Path(profile, cdp.PORT_FILE).write_text(f"{free}\n")
+
+        def unreachable(path: str) -> list[dict]:
+            raise ControlError("cdp-unreachable", "the endpoint did not answer")
+
+        real = browser._rows
+        browser._rows = unreachable                   # type: ignore[assignment]
+        try:
+            # gone: no listener on the port the file still names
+            assert readback_lib._wait_ids_gone(profile, ["A"],
+                                               timeout=0.1) == []
+        finally:
+            browser._rows = real                      # type: ignore[assignment]
+
+
+def t_stop_refuses_when_the_tab_count_is_unreadable() -> None:
+    """`None` is not zero: an unreadable tab list refuses the stop.
+
+    `_page_count` is documented tri-state ("None is not zero"), but `stop`
+    tested `if tabs and not force` — silence skipped the guard and the browser
+    was SIGTERMed with its tabs (a review found it).
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        target = os.path.join(root, "managed")
+        os.makedirs(target)
+        originals = (lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+                     lifecycle_lib._page_count,
+                     lifecycle_lib.pid_on_profile)
+        lifecycle_lib.managed_profile = (lambda browser="": target)  # type: ignore[assignment]
+        lifecycle_lib.pid_of = lambda profile: 4321        # type: ignore[assignment]
+        lifecycle_lib._page_count = lambda profile: None   # type: ignore[assignment]
+        lifecycle_lib.pid_on_profile = (                   # type: ignore[assignment]
+            lambda pid, profile: True)
+        try:
+            refusal(lambda: lifecycle_lib.stop(), "tabs-open")
+        finally:
+            (lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+             lifecycle_lib._page_count,
+             lifecycle_lib.pid_on_profile) = originals     # type: ignore[assignment]
+    finally:
+        _restore_root(keep_root)
+
+
+def t_empty_profile_endpoint_never_verifies() -> None:
+    """A browser that names no profile cannot be verified, ever.
+
+    `_judge` skipped the cmdline check when `profile` was empty (`if profile
+    and ...`), so a bare Chromium exe name verified — and `attach` treats
+    `verified` as the gate for granting tab writes (a review found it).
+    """
+    real = cdp.listener_of
+    cdp.listener_of = lambda port: {                       # type: ignore[assignment]
+        "pid": 777, "exe": "google-chrome-stable",
+        "cmd": "google-chrome-stable"}
+    try:
+        verdict = browser.endpoint_owner("", 9223)
+        assert verdict["verified"] is False, verdict
+        assert "names no profile" in verdict["reason"], verdict
+    finally:
+        cdp.listener_of = real                             # type: ignore[assignment]
+
+
+def t_screenshot_is_0600() -> None:
+    """A screenshot is not world-readable: 0600 like the audit log."""
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "shot.png")
+        images_lib.write_atomic(target, b"\x89PNG\r\n\x1a\n", force=False)
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        assert mode == 0o600, oct(mode)
+
+
+def t_bidi_controls_are_flattened() -> None:
+    """A hostile title cannot reorder or disguise a refusal with bidi text."""
+    from browser_control.lib import text as text_lib  # noqa: PLC0415
+
+    spoof = "safe\u202egnp.exe\u202c"
+    assert "\u202e" not in text_lib.foreign(spoof), repr(text_lib.foreign(spoof))
+    for ch in ("\u200b", "\u200f", "\u202a", "\u2066"):
+        assert ch not in text_lib.foreign(f"a{ch}b"), repr(ch)
+
+
+def t_js_reports_unserializable_values() -> None:
+    """`tab js` reports NaN/Infinity as their own token, not as null.
+
+    CDP carries non-finite numbers in `unserializableValue`; reading only
+    `value` reported them as null, indistinguishable from `undefined` (a
+    review found it). A non-finite token stays a string so stdout is still
+    valid JSON; `-0` is a number.
+    """
+    assert cdp_rpc._value_of(
+        {"result": {"type": "number", "unserializableValue": "NaN"}}
+    ) == "NaN"
+    assert cdp_rpc._value_of(
+        {"result": {"unserializableValue": "Infinity"}}) == "Infinity"
+    negative_zero = cdp_rpc._value_of(
+        {"result": {"unserializableValue": "-0"}})
+    assert math.copysign(1.0, negative_zero) == -1.0, negative_zero
+    assert cdp_rpc._value_of({"result": {"type": "undefined"}}) is None
+
+
+def t_query_neither_given_names_the_real_mistake() -> None:
+    """The "not both" message is for BOTH given; NEITHER gets its own."""
+    rc, _out, err = run_cli(["tab", "find"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    assert "give TEXT or --selector CSS" in err and "not both" not in err, err
+    rc, _out, err = run_cli(["tab", "find", "x", "--selector", "a"])
+    assert rc == 2 and "not both" in err, (rc, err)
+
+
+def t_find_cap_floor_is_refused() -> None:
+    """`find`/`text` refuse a below-range cap like extract/logins/plugins."""
+    for argv in (["tab", "find", "x", "--cap", "0"],
+                 ["tab", "text", "--chars", "0"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+        assert "must be at least 1" in err, (argv, err)
+
+
+def t_scroll_index_proves_the_indexed_element() -> None:
+    """`scroll --index N` refuses unless THAT index is in view.
+
+    The read-back accepted any in-viewport match and reported it as the one
+    revealed — a false proof, in the family whose one job is that the proof is
+    true (a review found it).
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    hidden = _matches_data(_element_row(name="a", in_viewport=True),
+                           _element_row(name="b", in_viewport=False))
+    revealed = _matches_data(_element_row(name="a", in_viewport=True),
+                             _element_row(name="b", in_viewport=True))
+    state = {"data": hidden}
+    page = _ScriptedPage(lambda expression: state["data"])
+    real_node = dom._node_of
+    dom._node_of = lambda session, expression: 7          # type: ignore[assignment]
+    try:
+        with _capped_poll(scroll_lib):
+            refusal(lambda: scroll_lib._reveal(page, row, tab_row, "li", None,
+                                               1, {}),
+                    "scroll-not-verified")
+            state["data"] = revealed
+            got = scroll_lib._reveal(page, row, tab_row, "li", None, 1, {})
+            assert got["element"]["name"] == "b", got
+    finally:
+        dom._node_of = real_node                           # type: ignore[assignment]
+
+
+def t_seed_destination_parent_is_0700() -> None:
+    """A seeded instance directory is 0700 even as a makedirs intermediate.
+
+    The single-profile shape (`<instance>/Default`) left `<instance>` at the
+    umask default 0755 while `launch` creates it as a leaf 0700 (a review
+    found it).
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        source = os.path.join(root, "src-profile")
+        os.makedirs(source)
+        Path(source, "Cookies").write_text("cookie", encoding="utf-8")
+        target = os.path.join(root, "instance")
+        profile_lib.seed(source=source, profile=target, force=True)
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        assert mode == 0o700, oct(mode)
+    finally:
+        _restore_root(keep_root)
+
+
 def main() -> int:
     global SUITE_LOG
     # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
@@ -6251,6 +6527,28 @@ def main() -> int:
          t_unknown_flag_is_reported_first),
         ("selftest proves the install", t_selftest),
         ("pid liveness", t_pid_alive),
+        ("the plugin --tab seam refuses an empty spec",
+         t_plugin_tab_flag_refuses_an_empty_spec),
+        ("a zero selector is refused, not dropped",
+         t_selector_zero_is_refused),
+        ("help works after the global flags", t_help_after_global_flags),
+        ("a surviving port file is not proof of life",
+         t_close_of_the_only_tab_reads_exit_as_gone),
+        ("an unreadable tab count refuses the stop",
+         t_stop_refuses_when_the_tab_count_is_unreadable),
+        ("an empty profile never verifies",
+         t_empty_profile_endpoint_never_verifies),
+        ("a screenshot is 0600", t_screenshot_is_0600),
+        ("bidi controls are flattened", t_bidi_controls_are_flattened),
+        ("js reports NaN/Infinity, not null",
+         t_js_reports_unserializable_values),
+        ("neither TEXT nor --selector names the real mistake",
+         t_query_neither_given_names_the_real_mistake),
+        ("find/text refuse a below-range cap", t_find_cap_floor_is_refused),
+        ("scroll --index proves the indexed element",
+         t_scroll_index_proves_the_indexed_element),
+        ("a seeded instance directory is 0700",
+         t_seed_destination_parent_is_0700),
     ):
         check(name, fn)
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed, {len(SKIP)} skipped")

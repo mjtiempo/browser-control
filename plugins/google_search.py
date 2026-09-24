@@ -36,6 +36,7 @@ from browser_control.plugin_api import (
     fail,
     int_arg,
     pop,
+    tab_arg,
     text_arg,
 )
 
@@ -97,8 +98,7 @@ def run(rest: list[str], browser: str) -> dict:
     args = args[1:]
     args, cap = pop(args, "--cap", "google search")
     args, wpm_flag = pop(args, "--wpm", "google search")
-    args, tab = pop(args, "--tab", "google search")
-    tab = tab or ""
+    args, tab = tab_arg(args, "google search")
     # the positional rule is the CORE's (`text_arg`): a flag where the query
     # goes, a missing query or a repeated one refuses with the same message a
     # built-in verb gives, rather than a shape only this plugin speaks

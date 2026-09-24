@@ -44,6 +44,13 @@ TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 
 FIND_CAP = 10               # elements `find` returns (and click/scroll scan)
 
+# and the most it will scan at all: each match carries its geometry, and the
+# page answers with one JSON document capped at 64k by the CDP layer, so a
+# larger `--cap` refused `result-too-large` telling the caller to "narrow the
+# expression" they never wrote (a review flagged it). Sized to stay under
+# that cap; a caller that needs more reads with `tab extract`/`tab text`.
+FIND_MAX_MATCHES = 100
+
 EXTRACT_CAP = 10            # records `extract` returns by default
 
 EXTRACT_MAX_MATCHES = 500   # and the most it will return at all
@@ -68,6 +75,12 @@ def _query_args(text: str | None, selector: str | None,
     needle = str(text or "").strip()
     css = str(selector or "").strip()
     if bool(needle) == bool(css):
+        # NEITHER given is a different mistake from BOTH given: one message
+        # ("not both") sent the caller looking for a conflict that did not
+        # exist, against the promise that every refusal names its cause (a
+        # review flagged it)
+        if not needle:
+            fail(ERR_BAD_ARGS, f"{verb}: give TEXT or --selector CSS")
         fail(ERR_BAD_ARGS, f"{verb}: give TEXT or --selector CSS, not both")
     return needle, css
 
@@ -347,6 +360,11 @@ def extract(each: str = "", fields: list[str] | None = None,
     with page.session() as session:
         data = session.evaluate(
             fill(EXTRACT_EXPR, schema=json.dumps(schema)))
+        # the frame census rides the session already open, exactly as find and
+        # text attach it: without it a framed page answered `count: 0` with no
+        # hint, the one shape that reads as "there is nothing there" (a review
+        # found extract omitted the helper its sibling reads carry)
+        frames_here = _pkg._frame_summary(row, tab_row, session)
     data = data if isinstance(data, dict) else {}
     raw = _extract_records(data.get("matches"), names)
     records = raw
@@ -365,6 +383,8 @@ def extract(each: str = "", fields: list[str] | None = None,
                   "truncated": (bool(data.get("truncated"))
                                 or len(records) < len(raw)),
                   "matches": records})
+    if frames_here:
+        reply["frames"] = frames_here
     return _pkg._with_frame(reply)
 
 def find(text: str | None = None, selector: str | None = None,
@@ -379,7 +399,10 @@ def find(text: str | None = None, selector: str | None = None,
     it exists and scroll to it.
     """
     needle, css = _query_args(text, selector, "tab find")
-    limit = max(1, as_int(cap, FIND_CAP))
+    limit = as_int(cap, FIND_CAP)
+    if limit < 1:
+        fail(ERR_BAD_ARGS, "tab find: --cap must be at least 1")
+    limit = min(limit, FIND_MAX_MATCHES)
     page = _pkg.Tab.open(tab, browser, for_write=False)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
@@ -422,7 +445,10 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
     how a caller sees what it did not get).
     """
     css = str(selector or "").strip()
-    limit = max(1, min(TEXT_CAP, as_int(chars, TEXT_CAP)))
+    limit = as_int(chars, TEXT_CAP)
+    if limit < 1:
+        fail(ERR_BAD_ARGS, "tab text: --chars must be at least 1")
+    limit = min(limit, TEXT_CAP)
     page = _pkg.Tab.open(tab, browser, for_write=False)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:

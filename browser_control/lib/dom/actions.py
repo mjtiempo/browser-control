@@ -305,7 +305,8 @@ def hover(text: str | None = None, selector: str | None = None,
 def _check_state(session: cdp.Session, needle: str, css: str,
                  index: int | None) -> dict:
     """The control's own checked/disabled facts, read from the page."""
-    probe = session.evaluate(_pkg._match_args(CHECK_READ, needle, css, index))
+    probe = session.evaluate(_pkg._match_args(CHECK_READ, needle, css, index),
+                             timeout=CHECK_TIMEOUT_S)
     return probe if isinstance(probe, dict) else {}
 
 def _checkable(probe: dict, element: dict) -> None:
@@ -368,7 +369,7 @@ def _select_probe(session: cdp.Session, needle: str, css: str,
     """Which option a value names, and what the control holds (see the SQL)."""
     expression = _pkg._match_args(SELECT_PROBE, needle, css, index,
                                   value=json.dumps(str(value)))
-    probe = session.evaluate(expression)
+    probe = session.evaluate(expression, timeout=CHECK_TIMEOUT_S)
     return probe if isinstance(probe, dict) else {}
 
 def _focus_node(session: cdp.Session, needle: str, css: str, index: int | None,

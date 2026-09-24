@@ -28,7 +28,9 @@ from browser_control.lib.instance import (
     Instance,
 )
 from browser_control.lib.paths import (
+    MARKER,
     lock_path,
+    marked,
     pid_file,
 )
 from browser_control.lib.profile.trees import (
@@ -78,6 +80,17 @@ def reset(profile: str = "", browser: str = "", force: bool = False) -> dict:
                  f"{target} holds {facts['files']} file(s), {facts['bytes']} "
                  "bytes — `profile reset --force` wipes it, logins included; "
                  "`profile info` shows it first")
+        if force and not marked(target):
+            # a root moved with BROWSER_CONTROL_ROOT is caller-chosen, so the
+            # recursive wipe refuses a directory this CLI cannot prove it
+            # created (a review found `reset --force` could delete anything
+            # under such a root). The marker is written by `open`/`seed`.
+            fail(ERR_NOT_MANAGED,
+                 f"{target} was not created by this CLI (no {MARKER} marker) "
+                 "and the managed root is not the default one — refusing to "
+                 "recursively delete a directory this tool cannot prove is "
+                 "its own. Remove it yourself, or create the profile with "
+                 "`open`/`profile seed`")
         detached = browser_lib.is_attached(target)
         if detached:
             # the root lock is already held here (instance_locks): the store's

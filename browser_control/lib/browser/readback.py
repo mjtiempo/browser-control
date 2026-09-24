@@ -99,12 +99,18 @@ def _wait_url(profile: str, url: str,
 def _require_tab_list_readable(profile: str, error: ControlError) -> None:
     """Refuse to read "the list could not be read" as "the ids are gone".
 
-    Only an unreachable endpoint with no port file at all is the browser
-    having exited. A timeout, a malformed `/json` or an oversized body refuses
-    instead of claiming absence — the same class of bug `_tabs_or_fail` was
-    fixed for (a review flagged it).
+    Only an unreachable endpoint whose port has NO holder is the browser
+    having exited. The port FILE is not proof of life: measured on this
+    host's Chrome, `DevToolsActivePort` survives a graceful exit AND a
+    SIGKILL, so gating this on the file's existence made the "browser
+    exited" branch unreachable — `tab close` on the ONLY tab refused
+    `close-tab-not-verified` after its own success (a review found it). The
+    kernel's listener table is the honest answer. A timeout, a malformed
+    `/json`, an oversized body, or a port still held by something else
+    refuses instead of claiming absence.
     """
-    if error.code != "cdp-unreachable" or cdp.port_of(profile):
+    port = cdp.port_of(profile)
+    if error.code != "cdp-unreachable" or (port and cdp.listener_of(port)):
         fail(ERR_CLOSE_TAB_NOT_VERIFIED,
              f"the tab list could not be read back after the close: "
              f"{error.message}")

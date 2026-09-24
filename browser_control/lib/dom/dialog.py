@@ -8,6 +8,7 @@ from __future__ import annotations
 from browser_control.lib import (
     browser as browser_lib,
 )
+from browser_control.lib import audit
 from browser_control.lib import dom as _pkg
 from browser_control.lib.dom.scripts import (
     DIALOG_AWAKE,
@@ -103,6 +104,11 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
     # accept | dismiss: NO Page.enable first — a dialog that is already up
     # cannot be announced any more, and enabling is exactly what blocks on a
     # parked tab, while the handling command answers regardless
+    if text is not None:
+        # the answer to a prompt is a PROVEN secret, fail-closed like a
+        # password field: the audit writer replaces it wherever it appears in
+        # the argv with a length, so it never rides into the log in cleartext
+        audit.LOG.mark_secret(str(text))
     params: dict = {"accept": name == "accept"}
     if text is not None:
         params["promptText"] = str(text)
@@ -131,10 +137,15 @@ def dialog(mode: str = "state", text: str | None = None, tab: str = "",
              f"within {DIALOG_CLEAR_S:g}s — a page can open another dialog "
              "immediately (see `tab dialog state`), or a script is spinning")
     return {"ok": True, "handled": True, "accepted": name == "accept",
-            "verified": True, "prompt_text": text if text is not None else None,
+            "verified": True,
+            # the ANSWER is not echoed: it is a proven secret, and the audit
+            # line keeps its length, not its text (a review flagged the
+            # cleartext echo). The dialog's own text was never in the reply.
+            "prompt_chars": len(str(text)) if text is not None else None,
             "note": ("the browser answered the dialog and the tab answers "
-                     "again; the dialog's own text is not in this reply — it "
-                     "opened before this connection, and Chromium announces a "
-                     "dialog only once"),
+                     "again; neither the dialog's own text nor the prompt "
+                     "answer is in this reply — the dialog opened before "
+                     "this connection and Chromium announces it only once, "
+                     "and the answer is a proven secret"),
             "tab": f"id:{tab_row['id']}",
             "browser": browser_lib.brief(row)}

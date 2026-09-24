@@ -79,7 +79,7 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "tab text": ("read",),
     "tab extract": ("read",),
     "tab wait": ("read",),
-    "tab wait --for js": ("code",),
+    "tab wait --for js": ("code", "write"),
     "tab js": ("code", "write"),
     # profiles
     "profile info": ("read",),
@@ -139,7 +139,11 @@ class Surface:
         """The surface the other way round: which actions hold each class.
 
         Plugin-declared actions are included: a caller asking "what can run
-        under `--deny code`" should see them too.
+        under `--deny code`" should see them too. They are also listed by
+        `plugin_declared`, because their classes are the PLUGIN's own
+        declaration — enforced, but never verified against what the plugin
+        actually calls (a review flagged that `by_class` alone read as if the
+        tool had checked them).
         """
         grouped: dict[str, list[str]] = {name: [] for name in CLASSES}
         for source in (ACTIONS, self.plugin_actions):
@@ -147,6 +151,10 @@ class Surface:
                 for name in classes:
                     grouped.setdefault(name, []).append(action)
         return grouped
+
+    def plugin_declared(self) -> list[str]:
+        """The actions whose classes are SELF-DECLARED by a plugin."""
+        return sorted(self.plugin_actions)
 
 
 #: The process-wide surface the CLI drives: `main` replaces the plugin side
@@ -173,3 +181,8 @@ def unclassified(handlers: dict,
 def by_class() -> dict[str, list[str]]:
     """`Surface.by_class`, on the process-wide surface."""
     return SURFACE.by_class()
+
+
+def plugin_declared() -> list[str]:
+    """`Surface.plugin_declared`, on the process-wide surface."""
+    return SURFACE.plugin_declared()

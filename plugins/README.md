@@ -47,15 +47,14 @@ hermetic check scans `plugins/` for an unregistered one.
 
 The supported surface is `browser_control.plugin_api` (`fail`,
 `ControlError`, `errors`, `pop`, `switch`, `text_arg`, `int_arg`, `float_arg`,
-`nav`, `wait`, `extract`, `focus`, `type_text`, `press`, `click`, `scroll`,
-`PLUGIN_API`) — import that, not `browser_control.lib` at large. `pop` and
-`switch` are the CLI's OWN argv readers: `rest, cap = pop(rest, "--cap",
-"mysite search")` and `rest, given = switch(rest, "--latest")` parse a plugin's
-arguments the way the built-ins are parsed, missing-value refusal included.
-`browser` for `nav`, `dom` for
-`wait` and the reads, and especially `dom.extract` — the generic extraction
-engine (`--each` + `--field NAME=SELECTOR[@ATTR]`, CSS only, no code) that a
-reader plugin is normally a thin wrapper around. `focus`, `type_text`, `press`,
+`tab_arg`, `nav`, `wait`, `extract`, `focus`, `type_text`, `press`, `click`,
+`scroll`, `PLUGIN_API`) — import that, not `browser_control.lib` at large.
+`pop` and `switch` are the CLI's OWN argv readers: `rest, cap = pop(rest,
+"--cap", "mysite search")` and `rest, given = switch(rest, "--latest")` parse
+a plugin's arguments the way the built-ins are parsed, missing-value refusal
+included. `tab_arg` is the `--tab SPEC` reader beside them: it refuses an
+empty `--tab ""` rather than reading it as "the only page tab", exactly as
+the built-in page verbs do. `focus`, `type_text`, `press`,
 `click` and `scroll` are the drive-it-by-hand verbs: `scroll` sends one real
 wheel event, which is how a lazy or virtualized list (`x_reader.py`) is made
 to render past its first window. The capability classes a

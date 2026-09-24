@@ -93,7 +93,21 @@ class EndpointGuard:
                     "profile_pid": profile_pid,
                     "reason": f"pid {pid} holds the port and is not a "
                               f"Chromium-family browser ({exe or 'unknown'})"}
-        if profile and not pid_on_marker(pid, cmd, profile):
+        if not profile:
+            # fail CLOSED: with no profile to compare against, the cmdline
+            # check below would be SKIPPED and a bare exe name would verify —
+            # which is how a browser started without `--user-data-dir` (no
+            # known default either) could be attached and granted tab writes
+            # on identity it never proved (a review found the check's `if
+            # profile and ...` guard). Nothing names the browser, so nothing
+            # can verify it.
+            return {"verified": False, "pid": pid, "exe": exe,
+                    "profile_pid": profile_pid,
+                    "reason": ("the browser names no profile (it was started "
+                                "without --user-data-dir, and its executable "
+                                "has no known default), so its endpoint "
+                                "cannot be verified")}
+        if not pid_on_marker(pid, cmd, profile):
             return {"verified": False, "pid": pid, "exe": exe,
                     "profile_pid": profile_pid,
                     "reason": f"pid {pid} holds the port, but its own command "

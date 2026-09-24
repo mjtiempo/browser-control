@@ -19,6 +19,7 @@ from browser_control.lib.argv import (  # noqa: F401
     _pop,
     _scan,
     _switch,
+    _tab_arg,
     _text_arg,
     _twice,
 )
@@ -107,6 +108,13 @@ def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
                 fail(ERR_BAD_ARGS, f"{verb}: {arg} needs a value")
             key, value = arg[2:], str(rest[index + 1])
             out[key] = _int(value, f"{verb}: {arg}")
+            if out[key] < 1:
+                # 0 is a number the SELECTOR grammar does not have: it used
+                # to read as "no selector" (`Selector.given` filters falsy),
+                # so `close --port 0` stopped the MANAGED browser and
+                # `--profile DIR --port 0` silently dropped the --port
+                fail(ERR_BAD_ARGS,
+                     f"{verb}: {arg} must be 1 or more, got {value!r}")
             index += 2
             continue
         known = ", ".join(["--port N", "--pid N", "--profile DIR"]
@@ -122,18 +130,12 @@ def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
 def _tab_flag(rest: list[str], verb: str) -> tuple[list[str], str]:
     """`--tab SPEC`, or "" — the tab a page verb acts on.
 
-    `--tab ""` is REFUSED rather than read as "no spec": the flag was given, and
-    an empty spec reaching `_one_tab` means "the only page tab" — a tab nobody
-    named. The library refuses an empty spec, so the CLI must too, or the same
-    argv means two things one layer apart (`tab info ""` refused it while
-    `tab text --tab ""` quietly picked a tab).
+    The rule lives in `lib.argv._tab_arg` so the plugin seam hands plugins the
+    SAME reader: `--tab ""` is refused there, never read as "no spec" — the
+    same argv must not mean two things one layer apart (`tab info ""` refused
+    it while `tab text --tab ""` quietly picked a tab).
     """
-    rest, spec = _pop(rest, "--tab", verb)
-    if spec is not None and not str(spec).strip():
-        fail(ERR_BAD_ARGS,
-             f"{verb}: --tab needs a SPEC (id:<prefix> or a title/url "
-             "substring); leave the flag out to act on the only page tab")
-    return rest, spec or ""
+    return _tab_arg(rest, verb)
 
 def _pop_all(rest: list[str], flag: str,
              verb: str) -> tuple[list[str], list[str]]:

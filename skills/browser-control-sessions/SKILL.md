@@ -98,7 +98,8 @@ To wipe an instance (logins included): `profile reset --force`
 This is the consent step for writing to a browser the CLI did not start. The
 browser must have been started with an explicit `--user-data-dir` (its command
 line is the verification); a vendor-default profile cannot be verified and
-refuses `attach-failed`.
+refuses `cdp-not-local` (`attach-failed` is the attachment record failing to
+write, not a verification failure).
 
 ```bash
 # the user starts their browser with the profile named explicitly, e.g.

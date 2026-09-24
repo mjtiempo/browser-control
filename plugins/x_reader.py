@@ -41,6 +41,7 @@ from browser_control.plugin_api import (
     int_arg,
     pop,
     switch,
+    tab_arg,
     text_arg,
 )
 
@@ -218,8 +219,7 @@ def run(rest: list[str], browser: str) -> dict:
     args, cap = pop(args, "--cap", "x search")
     args, chars = pop(args, "--chars", "x search")
     args, scrolls_flag = pop(args, "--max-scrolls", "x search")
-    args, tab = pop(args, "--tab", "x search")
-    tab = tab or ""
+    args, tab = tab_arg(args, "x search")
     if latest and top:
         fail(errors.ERR_BAD_ARGS,
              "x search: --latest and --top are two sorts — pick one")

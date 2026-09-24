@@ -12,6 +12,7 @@ from __future__ import annotations
 from browser_control.lib import seedtree
 from browser_control.lib.paths import (
     LOCK_FILE,
+    MARKER,
     PID_FILE,
 )
 
@@ -21,7 +22,7 @@ from browser_control.lib.paths import (
 # adds a new login store still gets seeded.
 SEED_SKIP = frozenset({
     "SingletonLock", "SingletonSocket", "SingletonCookie", "Lock File",
-    "DevToolsActivePort", ".pid", ".browser-control.lock",
+    "DevToolsActivePort", ".pid", ".browser-control.lock", MARKER,
     "Cache", "Code Cache", "GPUCache", "ShaderCache", "GrShaderCache",
     "DawnCache", "DawnGraphiteCache", "GraphiteDawnCache", "Media Cache",
     "CacheStorage", "ScriptCache", "Crashpad", "Crash Reports",

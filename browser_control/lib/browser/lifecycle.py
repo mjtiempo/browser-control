@@ -63,6 +63,7 @@ from browser_control.lib.paths import (
     expand,
     is_managed,
     lock_path,
+    mark,
     norm,
     pid_file,
     profile_dir,
@@ -573,6 +574,11 @@ def launch(urls: list[str] | None = None, browser: str = "",
     try:
         ensure_root()
         os.makedirs(profile, mode=0o700, exist_ok=True)
+        # the proof that THIS CLI created the profile: `reset --force` and
+        # `seed --force` wipe recursively under a root the caller can move
+        # with BROWSER_CONTROL_ROOT, so a directory this tool cannot prove
+        # is its own is refused there (a review found the path)
+        mark(profile)
     except OSError as e:
         raise ControlError(ERR_PROFILE_UNUSABLE,
                            f"cannot create {profile}: {e}") from e
@@ -730,6 +736,17 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
             fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} is gone, or no longer runs {target} — "
                  "nothing was signalled")
+        if tabs is None and not force:
+            # None is "the count could not be read", and the tri-state rule
+            # (`_page_count`'s docstring) says that is not zero: SIGTERM with
+            # unproven tabs is exactly the silent tab loss this guard exists
+            # to prevent, so refuse rather than read silence as emptiness (a
+            # review found `if tabs and not force` skipped this)
+            fail(ERR_TABS_OPEN,
+                 f"the page tabs in {target} could not be read (the endpoint "
+                 "did not answer, or is not that browser's) — an unproven "
+                 "count is not a count of zero; pass --force to stop it "
+                 "anyway, or take the tabs first with `tab close ...`")
         if tabs and not force:
             fail(ERR_TABS_OPEN,
                  f"{tabs} page tab(s) are open in {target} and stopping the "

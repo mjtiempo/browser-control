@@ -33,7 +33,7 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 | `profile-exists` | `profile seed` target already exists — pass `--force` (it wipes) or pick another |
 | `not-managed` | a write needs a browser this CLI started/attached — `open`, `attach`, or read with `--tab` |
 | `not-attached` | `detach` found no attachment for that selector — check `attach --list` |
-| `attach-failed` | the browser could not be verified as attachable (its command line does not name the profile) |
+| `attach-failed` | `attach`/`detach` could not write `attached.json` (a leftover `.new` scratch file, or an unwritable path) |
 | `tabs-open` | `close` refused because the browser holds page tabs — `--force` only for a browser YOU opened |
 | `close-tab-not-verified` | the tab was still there after `tab close` |
 | `ambiguous-browser` | `--browser NAME` matched several — use a fuller name |

@@ -99,6 +99,23 @@ def _pop(rest: list[str], flag: str, verb: str) -> tuple[list[str], str | None]:
     rest, values = _scan(rest, (flag,), verb)
     return rest, values[flag][-1] if values[flag] else None
 
+def _tab_arg(rest: list[str], verb: str) -> tuple[list[str], str]:
+    """`--tab SPEC`, or "" — the ONE reader of a tab spec.
+
+    `--tab ""` is REFUSED rather than read as "no spec": the flag was given,
+    and an empty spec reaching `_one_tab` means "the only page tab" — a tab
+    nobody named. The library refuses an empty spec, so the CLI and every
+    plugin must too, or the same argv means two things one layer apart
+    (`tab info ""` refused it while `tab text --tab ""` quietly picked a tab).
+    """
+    rest, spec = _pop(rest, "--tab", verb)
+    if spec is not None and not str(spec).strip():
+        fail(ERR_BAD_ARGS,
+             f"{verb}: --tab needs a SPEC (id:<prefix> or a title/url "
+             "substring); leave the flag out to act on the only page tab")
+    return rest, spec or ""
+
+
 def _switch(rest: list[str], flag: str) -> tuple[list[str], bool]:
     """Pull a VALUE-LESS flag (`--uncheck`, `--full`, `--force`) out of argv."""
     given = any(str(arg) == flag for arg in rest)
