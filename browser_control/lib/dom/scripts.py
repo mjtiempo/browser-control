@@ -415,7 +415,14 @@ EXTRACT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const schema = __SCHEMA__;
   const scan = (root, selector) => {
     const out = [];
+    // `:scope` means the match ITSELF, but querySelectorAll only ever returns
+    // DESCENDANTS — a bare `:scope` (or `:scope.foo`) found nothing at all, so
+    // the root is offered first when the selector can match it. The other
+    // `:scope` forms (`:scope .x`) do not match the root and still come from
+    // the walk below.
+    const usesScope = selector.indexOf(':scope') >= 0;
     const visit = (r) => {
+      if (r === root && usesScope && root.matches(selector)) out.push(root);
       for (const el of r.querySelectorAll(selector)) out.push(el);
       if (r.shadowRoot) visit(r.shadowRoot);
     };

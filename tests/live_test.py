@@ -166,22 +166,22 @@ BEFOREUNLOAD_PAGE = """<!doctype html><meta charset="utf-8"><title>bu</title>
 </script>"""
 EXTRACT_PAGE = """<!doctype html><meta charset="utf-8"><title>extract fixture</title>
 <section id="posts">
-  <article>
+  <article data-post="101">
     <h2><a href="/alice/status/101">Alice</a></h2>
     <time datetime="2026-01-02T03:04:05.000Z">t1</time>
     <p class="body">First post body</p>
   </article>
-  <article>
+  <article data-post="102">
     <h2><a href="/bob/status/102">Bob</a></h2>
     <time datetime="2026-01-02T03:05:06.000Z">t2</time>
     <p class="body">Second post body</p>
   </article>
-  <article>
+  <article data-post="103">
     <h2><a href="/carol/status/103">Carol</a></h2>
     <time datetime="2026-01-02T03:06:07.000Z">t3</time>
     <p class="body">Third post body</p>
   </article>
-  <article hidden>
+  <article data-post="104" hidden>
     <h2><a href="/dave/status/104">Dave</a></h2>
     <time datetime="2026-01-02T03:07:08.000Z">t4</time>
     <p class="body">Hidden post body</p>
@@ -817,6 +817,22 @@ def c_tab_extract() -> str:
     assert data["matches"][0]["time"] == "2026-01-02T03:04:05.000Z", data
     assert data["matches"][0]["url"] == "/alice/status/101", data
     assert data["matches"][2]["text"] == "Third post body", data
+    # `:scope` is the match ITSELF — its own text, and its own attribute.
+    # querySelectorAll only ever returns DESCENDANTS, so `:scope` used to
+    # answer null silently (a live check the old battery never ran).
+    own = ok_json("tab", "extract", "--each", "#posts article",
+                  "--field", "text=:scope",
+                  "--field", "post=:scope@data-post",
+                  "--cap", "5", "--tab", tab)
+    assert own["count"] == 4, own
+    assert own["matches"][0]["post"] == "101", own
+    assert own["matches"][3]["post"] == "104", own
+    assert "First post body" in own["matches"][0]["text"], own
+    # and `:scope OTHER` still means a DESCENDANT of the match, not the match
+    nested = ok_json("tab", "extract", "--each", "#posts article",
+                     "--field", "author=:scope h2 a", "--cap", "1",
+                     "--tab", tab)
+    assert nested["matches"][0]["author"] == "Alice", nested
     visible = ok_json("tab", "extract", "--each", "#posts article",
                       "--field", "text=.body", "--visible", "--cap", "5",
                       "--tab", tab)
@@ -828,7 +844,8 @@ def c_tab_extract() -> str:
     assert small["matches"][0]["text"] == "First", small
     # leave the tab where the DOM checks expect it (this check navigated away)
     ok_json("tab", "nav", f"{base_url()}/dom", "--tab", tab)
-    return "4 articles -> records; --visible skips the hidden one; cap slices"
+    return ("4 articles -> records; `:scope` reads the match's own text and "
+            "attribute; --visible skips the hidden one; cap slices")
 
 
 def c_dom_find_resolves_targets() -> str:
