@@ -39,8 +39,8 @@ $ browser-control-cli tab click "Learn more" && browser-control-cli close --forc
   run two accounts side by side, or attach a browser you started yourself —
   for tab writes only.
 - **One site at a time.** Site plugins add what a page needs: search Google
-  by typing at a human cadence, or read X search results across its recycled
-  timeline.
+  by typing at a human cadence, read X search results across its recycled
+  timeline, or read a whole list of URLs in one call.
 
 ## The Manual
 

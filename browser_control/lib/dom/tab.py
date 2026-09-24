@@ -46,8 +46,20 @@ def _document_ws(port: int, page_target: str) -> str:
     one that forgets it. That gap was real: `tab wait` opens its own connection
     for many samples, and `tab wait --frame 1` evaluated the predicate in the
     top document while its reply said `frame: 1`.
+
+    A SAME-PROCESS frame has no target to attach to. A read that allows one has
+    already resolved it (`Tab.frame`) and recorded that: the session stays the
+    PAGE and the expression is rooted at that frame's document instead
+    (`Tab.root`). Every other verb — each write, and `find`, whose hit test
+    asks the page what is under a point — resolves through `_frame_target` and
+    keeps refusing `frame-not-separate`.
     """
     current = scope_state.current()
+    resolved = current.resolved_frame()
+    if resolved and resolved.get("same_process"):
+        return cdp.target_ws(port, page_target)
+    if resolved and resolved.get("target"):
+        return cdp.target_ws(port, str(resolved["target"]), "iframe")
     if current.frame_wanted:
         target = _pkg._frame_target(port, page_target, current.frame_wanted)
         # WHICH frame that was: an index is the page's live iframe order, so the
@@ -108,16 +120,54 @@ class Tab:
     what keeps the suites' monkeypatches intercepting.
     """
 
-    def __init__(self, row: dict, tab_row: dict) -> None:
+    def __init__(self, row: dict, tab_row: dict,
+                 same_process: bool = False) -> None:
         self.row = row
         self.tab_row = tab_row
+        self.same_process = same_process
+        self._frame: dict | None = None
+        self._scope_read = False
 
     @classmethod
-    def open(cls, tab: str, browser: str, *, for_write: bool) -> Tab:
-        """Resolve the ONE tab this verb acts on, or refuse."""
+    def open(cls, tab: str, browser: str, *, for_write: bool,
+             same_process: bool = False) -> Tab:
+        """Resolve the ONE tab this verb acts on, or refuse.
+
+        `same_process` is the verb's own declaration that it can be answered
+        from a same-process frame's document — the reads rooted through
+        `root` say yes, everything else leaves it false and keeps the refusal.
+        """
         row, tab_row = _pkg._resolve(tab, browser, for_write=for_write)
-        return cls(row, tab_row)
+        return cls(row, tab_row, same_process=same_process)
+
+    def frame(self) -> dict | None:
+        """The `--frame` this verb is scoped to — resolved ONCE per verb.
+
+        Resolved here rather than inside the session factory because the
+        answer differs BY VERB: a read may take a same-process frame's
+        document, a write needs an attachable target and refuses one. Both then
+        read that one resolution back out of the scope, so the document an
+        expression was rooted at and the one the reply names cannot disagree.
+        """
+        if not self._scope_read:
+            self._scope_read = True
+            self._frame = _pkg._frame_scope(
+                self.row, self.tab_row,
+                allow_same_process=self.same_process)
+        return self._frame
 
     def session(self) -> cdp.Session:
         """ONE connection for the whole verb, frame scope included."""
+        self.frame()          # resolve (and refuse) before a connection exists
         return _pkg._session(self.row, self.tab_row)
+
+    def root(self) -> str:
+        """The JS document this verb READS through: page, or same-process frame.
+
+        Pass it as the `__ROOT__` of a read expression
+        (`fill(TEXT_EXPR, …, root=page.root())`). Without one an expression
+        reads the page, which is the only document a session can attach to: a
+        same-process frame's document is reached by ROOTING, not attaching.
+        """
+        frame = self.frame()
+        return _pkg.frame_root(frame)

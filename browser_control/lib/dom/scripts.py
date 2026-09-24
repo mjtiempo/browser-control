@@ -24,9 +24,30 @@ PRELUDE = r"""
     }
     return out;
   };
+  // WHICH document this expression reads: the page itself, or a same-process
+  // FRAME's document. A same-process frame has no CDP target to attach to, so
+  // there is nothing to open a session on — a read of one runs HERE, on the
+  // page, rooted at that frame's `contentDocument`, which is the only way to
+  // read it WITHOUT running caller code. The `typeof` guard is what makes every
+  // expression containing this PRELUDE safe to evaluate with no root passed at
+  // all (a verb that needs no other placeholder evaluates its constant raw): an
+  // undeclared name under `typeof` is the string "undefined", not a
+  // ReferenceError.
+  const R = (typeof __ROOT__ === 'undefined') ? {doc: document, win: window}
+                                              : __ROOT__;
+  // Every top-level iframe the page shows, in the order `tab frames` prints
+  // it: ONE walk, because the index a caller reads there is the index the
+  // root below must resolve to.
+  const frames = () => {
+    const out = [];
+    for (const root of roots(R.doc, [])) {
+      for (const f of root.querySelectorAll('iframe')) out.push(f);
+    }
+    return out;
+  };
   const query = (selector) => {
     const out = [];
-    for (const root of roots(document, [])) {
+    for (const root of roots(R.doc, [])) {
       for (const el of root.querySelectorAll(selector)) out.push(el);
     }
     return out;
@@ -63,7 +84,7 @@ PRELUDE = r"""
   const rendered = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return null;
-    const s = getComputedStyle(el);
+    const s = R.win.getComputedStyle(el);
     if (s.visibility === 'hidden' || s.display === 'none' ||
         s.opacity === '0') return null;
     return r;
@@ -88,6 +109,27 @@ PRELUDE = r"""
             what: hit ? describe(hit) : null};
   };
 """
+
+#: The root a page expression reads through when no frame scope is set: the
+#: page's own document and window. `fill` supplies it for every expression that
+#: carries `__ROOT__`, so a verb that wants a FRAME's document passes that
+#: instead (see `FRAME_DOC`) and every other expression is unchanged.
+PAGE_ROOT = "{doc: document, win: window}"
+
+#: The root of a SAME-PROCESS frame's document, by the index `tab frames`
+#: prints. A same-process frame has no CDP target of its own, so there is no
+#: session to attach to — this is how a read reaches inside one without running
+#: caller code: the expression still runs in the page, rooted at that frame's
+#: `contentDocument`. The walk is `frames()`, the same one the census uses, so
+#: the index here is the index `tab frames` showed.
+FRAME_DOC = ("(() => {" + PRELUDE + r"""
+  const f = frames()[__INDEX__];
+  const doc = f && f.contentDocument;
+  if (!doc) {
+    throw new Error('no same-process document at frame index __INDEX__');
+  }
+  return {doc: doc, win: f.contentWindow};
+})()""")
 
 FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const vw = window.innerWidth, vh = window.innerHeight;
@@ -139,13 +181,13 @@ FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
 
 TEXT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const selector = __SELECTOR__, cap = __CAP__;
-  const base = {url: location.href, title: document.title,
-                ready: document.readyState,
-                visibility: document.visibilityState,
-                viewport: [Math.round(window.innerWidth),
-                           Math.round(window.innerHeight)],
+  const base = {url: R.doc.location.href, title: R.doc.title,
+                ready: R.doc.readyState,
+                visibility: R.doc.visibilityState,
+                viewport: [Math.round(R.win.innerWidth),
+                           Math.round(R.win.innerHeight)],
                 selector: selector || 'body'};
-  const el = selector ? query(selector)[0] : document.body;
+  const el = selector ? query(selector)[0] : R.doc.body;
   if (!el) {
     return Object.assign(base, {found: false, text: '', length: 0,
                                 truncated: false});
@@ -382,12 +424,7 @@ SHOT_METRICS = ("JSON.stringify((() => {" + PRELUDE + r"""
 })())""")
 
 FRAME_CENSUS = ("JSON.stringify((() => {" + PRELUDE + r"""
-  const all = roots(document, []);
-  const frames = [];
-  for (const root of all) {
-    for (const f of root.querySelectorAll('iframe')) frames.push(f);
-  }
-  return frames.map((f, index) => {
+  return frames().map((f, index) => {
     const r = f.getBoundingClientRect();
     let reads = false;
     try { reads = !!f.contentDocument } catch (e) { reads = false }
@@ -484,7 +521,15 @@ def fill(expression: str, **values: Any) -> str:
     A missed placeholder used to ship as a runtime `js-error`; this refuses an
     unknown name (a caller that renamed one side) and a LEFTOVER placeholder (a
     template that grew a new one) at the point of the call.
+
+    `__ROOT__` is the one placeholder a caller does NOT have to pass: every
+    expression reads the PAGE unless a verb roots it at a same-process FRAME's
+    document (`FRAME_DOC`). Defaulting it here means such a verb threads a root
+    only when it has a different one — and the leftover check below still
+    catches a root that was meant to be passed and was not.
     """
+    if "__ROOT__" in expression:
+        values = {**values, "root": values.get("root") or PAGE_ROOT}
     for name, value in values.items():
         token = f"__{name.upper()}__"
         if token not in expression:

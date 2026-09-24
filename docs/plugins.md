@@ -62,6 +62,34 @@ $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
   submit — the query went into the page's own field first, which is what a
   person does and what a site's handlers see.
 
+## Shipped: `page read` — a list of URLs in one call
+
+The loop this replaces is three CLI processes per page (`tab nav` → `tab wait`
+→ `tab text`) plus the shell that carries the URL between them, paid once per
+page when a caller reads a list of them (a SERP, a queue, a set of docs):
+
+```console
+$ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
+    page read https://example.com https://example.org --chars 3000
+{"ok": true, "count": 2, "chars": 3000, "errors": [],
+ "pages": [{"url": "https://example.com", "moved": true,
+            "title": "Example Domain", "length": 129, "truncated": false,
+            "text": "…"}, …]}
+```
+
+- Usage: `page read URL... [--chars N] [--timeout S] [--tab SPEC]`. Each page
+  is the CLI's own `tab text` answer for that URL, `length`/`truncated`
+  included, so the cap is the page's own answer to "was there more".
+- One URL's failure is listed in `errors` (with its refusal code) instead of
+  sinking the call — a caller reading a list wants the rest of it. A call that
+  could read **nothing** refuses with the first error's own code.
+- A page whose words are inside a single **same-process** frame is read from
+  that frame's document and the record NAMES it (`read_frame`), rather than
+  reporting a page that plainly has words as empty; the page's own `frames`
+  census rides along either way.
+- The browser must be running with a drivable tab: `open --headless URL` first
+  (or `attach` to your own).
+
 ## Writing one
 
 The contract, the supported `browser_control.plugin_api` surface, and the

@@ -43,11 +43,13 @@ from browser_control.lib.dom.dialog import (  # noqa: F401
 )
 from browser_control.lib.dom.frames import (  # noqa: F401
     FRAME_VERBS,
+    _frame_scope,
     _frame_summary,
     _frame_target,
     _frames_note,
     frame,
     frame_resolved,
+    frame_root,
     frames,
     frames_of,
     frames_of_rows,

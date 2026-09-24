@@ -355,11 +355,11 @@ def extract(each: str = "", fields: list[str] | None = None,
         fail(ERR_BAD_ARGS,
              f"tab extract: --unique {wanted!r} is not one of the fields "
              f"({', '.join(names)})")
-    page = _pkg.Tab.open(tab, browser, for_write=False)
+    page = _pkg.Tab.open(tab, browser, for_write=False, same_process=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
         data = session.evaluate(
-            fill(EXTRACT_EXPR, schema=json.dumps(schema)))
+            fill(EXTRACT_EXPR, schema=json.dumps(schema), root=page.root()))
         # the frame census rides the session already open, exactly as find and
         # text attach it: without it a framed page answered `count: 0` with no
         # hint, the one shape that reads as "there is nothing there" (a review
@@ -449,11 +449,12 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
     if limit < 1:
         fail(ERR_BAD_ARGS, "tab text: --chars must be at least 1")
     limit = min(limit, TEXT_CAP)
-    page = _pkg.Tab.open(tab, browser, for_write=False)
+    page = _pkg.Tab.open(tab, browser, for_write=False, same_process=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
         data = session.evaluate(
-            fill(TEXT_EXPR, selector=json.dumps(css), cap=str(limit)))
+            fill(TEXT_EXPR, selector=json.dumps(css), cap=str(limit),
+                 root=page.root()))
         frames_here = _pkg._frame_summary(row, tab_row, session)
     if not isinstance(data, dict):
         fail(ERR_CDP_ERROR, "tab text: the page did not answer with an object")

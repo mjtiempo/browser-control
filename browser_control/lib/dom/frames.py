@@ -21,6 +21,9 @@ from browser_control.lib.coerce import (
 )
 from browser_control.lib.dom.scripts import (
     FRAME_CENSUS,
+    FRAME_DOC,
+    PAGE_ROOT,
+    fill,
 )
 from browser_control.lib.errors import (
     ERR_FRAME_AMBIGUOUS,
@@ -92,8 +95,8 @@ def frames_of(port: int, page_target: str,
     review found that after the matcher had learned to pierce them).
     """
     if census is None:
-        census = cdp.evaluate(cdp.target_ws(port, page_target), FRAME_CENSUS) \
-            or []
+        census = cdp.evaluate(cdp.target_ws(port, page_target),
+                              fill(FRAME_CENSUS)) or []
     owned = cdp.frame_targets(port)
     shared: dict[str, int] = {}
     attribution = ""
@@ -160,13 +163,18 @@ def frames_of_rows(row: dict, tab_row: dict) -> dict:
              "separate": None if unattributed
              else sum(1 for r in rows if r["target"]),
              "note": ("this browser does not report which tab owns an iframe "
-                      "target, so `--frame` cannot attribute one to this tab "
-                      "— `tab js` reads a same-process frame, and "
-                      "`tab click --at X,Y` hits one by coordinate"
+                      "target, so the CLI cannot attribute one to this tab "
+                      "and `--frame` cannot reach a SEPARATE frame of it — "
+                      "a same-process frame still reads (`tab text --frame "
+                      "N`, `tab extract --frame N`), `tab js` reads it "
+                      "too, and `tab click --at X,Y` hits one by "
+                      "coordinate"
                       if unattributed else
                       "a cross-origin frame is a target of its own: name it "
                       "with `--frame <url substring|index>` and every verb "
-                      "that acts on a page's content works inside it")}
+                      "that acts on a page's content works inside it; a "
+                      "same-process frame has no target, and `tab text`/"
+                      "`tab extract --frame N` read its document")}
     if not rows:
         reply["note"] = ("this page has no iframes — nothing for `--frame` to "
                           "name")
@@ -174,16 +182,105 @@ def frames_of_rows(row: dict, tab_row: dict) -> dict:
     reply["browser"] = browser_lib.brief(row)
     return reply
 
-def _frame_target(port: int, page_target: str, wanted: str) -> dict:
-    """The frame a `--frame` value names, or a refusal.
+def _frame_scope(row: dict, tab_row: dict, *,
+                 allow_same_process: bool = False) -> dict | None:
+    """The `--frame` a verb is scoped to, resolved — or None when it has none.
+
+    A frame can be reached in two ways, and the difference is not cosmetic:
+
+    * a SEPARATE frame (cross-origin) is a CDP target: the verb attaches to it
+      and every content verb works inside, exactly as the manual says;
+    * a SAME-PROCESS frame has no target at all — its document is one the PAGE
+      can read (`contentDocument`), so a READ is rooted there instead of
+      attaching. That is what `allow_same_process` grants, and it is the only
+      way to read such a frame WITHOUT running caller code: `tab js` used to be
+      the sole door, and `--deny code` closes it.
+
+    `allow_same_process=False` is the answer for the verbs that cannot be
+    rooted — input needs a target, and `find`'s hit test asks the PAGE what is
+    under a point, which inside a frame is the frame element itself.
+    """
+    wanted = scope_state.current().frame_wanted
+    if not wanted:
+        return None
+    port = cdp.port_of(str(row["profile"]))
+    return _frame_scope_of(_pkg.frames_of(port, str(tab_row["id"])), wanted,
+                           allow_same_process=allow_same_process, record=True)
+
+
+def _frame_scope_of(rows: list[dict], wanted: str, *,
+                    allow_same_process: bool,
+                    record: bool = False) -> dict:
+    """The frame `wanted` names, resolved to a document scope — or a refusal.
+
+    The ONE reader of what a frame can and cannot be, so `_frame_target` (which
+    needs an attachable target) and a rooted read cannot drift apart.
+    """
+    found = dict(_frame_row(rows, wanted))
+    index, url = as_int(found["index"]), str(found.get("url") or "")
+    if found.get("same_process") and allow_same_process:
+        if record:
+            scope_state.current().resolve_frame(index, url, "",
+                                                same_process=True)
+        found["kind"] = "same_process"
+        return found
+    if found.get("attribution"):
+        fail(ERR_FRAME_UNATTRIBUTABLE,
+             f"frame [{found['index']}] "
+             f"{foreign(found['url'], 60) or 'srcdoc'} — this browser does "
+             "not report which tab owns an iframe target, so the CLI cannot "
+             "tell this frame from another tab's with the same URL. `tab js` "
+             "reads a same-process frame, `tab click --at X,Y` hits one by "
+             "coordinate, or drive the tab that owns it")
+    if found.get("candidates"):
+        fail(ERR_FRAME_AMBIGUOUS,
+             f"frame [{found['index']}] {foreign(found['url'], 60)} matches "
+             f"{found['candidates']} targets in this browser and it does not "
+             "say which tab owns them — run `tab frames` in the tab you mean "
+             "and name the frame by its index there")
+    if not found["target"]:
+        if found.get("same_process"):
+            fail(ERR_FRAME_NOT_SEPARATE,
+                 f"frame [{found['index']}] "
+                 f"{foreign(found['url'], 60) or 'srcdoc'} shares the page's "
+                 "process (a same-origin or srcdoc frame), so it has no "
+                 "target of its own to attach to: a READ takes its text and "
+                 "records with `--frame` (`tab text`/`tab extract`), and "
+                 "input needs `tab click --at X,Y` by coordinate")
+        fail(ERR_FRAME_NOT_SEPARATE,
+             f"frame [{found['index']}] "
+             f"{foreign(found['url'], 60) or 'srcdoc'} has no target of its "
+             "OWN in this tab: its committed URL differs from the `src` the "
+             "page shows (a redirect), so there is nothing to attach to — "
+             "`tab click --at X,Y` hits it by coordinate")
+    if record:
+        scope_state.current().resolve_frame(index, url, str(found["target"]))
+    found["kind"] = "target"
+    return found
+
+
+
+def frame_root(frame: dict | None) -> str:
+    """The JS document a READ is rooted at, given its resolved `--frame`.
+
+    The page itself, unless that frame shares the page's PROCESS: then there is
+    no session to attach to, and the read runs in the page rooted at that
+    frame's own `contentDocument` (`FRAME_DOC`) instead. Splice it into a read
+    expression as its `__ROOT__`.
+    """
+    if frame is None or frame.get("kind") != "same_process":
+        return PAGE_ROOT
+    return fill(FRAME_DOC, index=str(frame["index"]))
+
+
+def _frame_row(rows: list[dict], wanted: str) -> dict:
+    """The one frame a `--frame` value NAMES, or a refusal.
 
     An integer is the index `tab frames` prints; anything else is a
     case-insensitive substring of the frame's URL. Several matches refuse
     `frame-ambiguous` and name the index to use instead — the rule every other
-    selector follows. A frame that shares the page's PROCESS has no target to
-    drive, and refuses `frame-not-separate` with what to do instead.
+    selector follows.
     """
-    rows = _pkg.frames_of(port, page_target)
     if not rows:
         fail(ERR_NO_FRAME, "this page has no iframes — `tab frames` lists them")
     text_ = str(wanted or "").strip()
@@ -203,31 +300,19 @@ def _frame_target(port: int, page_target: str, wanted: str) -> dict:
         fail(ERR_FRAME_AMBIGUOUS,
              f"{len(hits)} frames match {wanted!r} — pick one by index "
              f"(`--frame 0` … `--frame {len(rows) - 1}`): {where}")
-    found = hits[0]
-    if found.get("attribution"):
-        fail(ERR_FRAME_UNATTRIBUTABLE,
-             f"frame [{found['index']}] "
-             f"{foreign(found['url'], 60) or 'srcdoc'} — this browser does "
-             "not report which tab owns an iframe target, so the CLI cannot "
-             "tell this frame from another tab's with the same URL. `tab js` "
-             "reads a same-process frame, `tab click --at X,Y` hits one by "
-             "coordinate, or drive the tab that owns it")
-    if found.get("candidates"):
-        fail(ERR_FRAME_AMBIGUOUS,
-             f"frame [{found['index']}] {foreign(found['url'], 60)} matches "
-             f"{found['candidates']} targets in this browser and it does not "
-             "say which tab owns them — run `tab frames` in the tab you mean "
-             "and name the frame by its index there")
-    if not found["target"]:
-        fail(ERR_FRAME_NOT_SEPARATE,
-             f"frame [{found['index']}] "
-             f"{foreign(found['url'], 60) or 'srcdoc'} has no target of its "
-             "OWN in this tab: either it shares the page's process (a "
-             "same-origin or srcdoc frame), or its committed URL differs "
-             "from the `src` the page shows (a redirect). `tab js` reads a "
-             "same-process frame, and `tab click --at X,Y` hits either one "
-             "by coordinate")
-    return found
+    return hits[0]
+
+
+def _frame_target(port: int, page_target: str, wanted: str) -> dict:
+    """The frame TARGET a `--frame` value names, or a refusal.
+
+    The form a verb that must ATTACH uses (input, hit testing, `tab js`). A
+    same-process frame has no target of its own and refuses
+    `frame-not-separate`; a READ asks `_frame_scope(... allow_same_process=True)`
+    instead, which roots the expression at that frame's own document.
+    """
+    return _frame_scope_of(_pkg.frames_of(port, page_target), wanted,
+                           allow_same_process=False)
 
 def _frame_summary(row: dict, tab_row: dict,
                    session: cdp.Session | None = None) -> dict:
@@ -254,9 +339,9 @@ def _frame_summary(row: dict, tab_row: dict,
     port = cdp.port_of(str(row["profile"]))
     try:
         if session is not None and not scope_state.current().frame_wanted:
-            census = session.evaluate(FRAME_CENSUS)
+            census = session.evaluate(fill(FRAME_CENSUS))
         else:
-            census = cdp.evaluate(cdp.target_ws(port, page), FRAME_CENSUS)
+            census = cdp.evaluate(cdp.target_ws(port, page), fill(FRAME_CENSUS))
     except ControlError as e:
         return {"error": f"{e.code}: {e.message}", "total": None,
                 "separate": None, "cross_origin": None, "visible": None,

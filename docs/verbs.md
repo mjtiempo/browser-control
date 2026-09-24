@@ -62,7 +62,12 @@ on the command line.
   addressed, on every verb.
 - `--frame VALUE` acts inside one iframe, by an index from `tab frames` or a
   URL substring. A cross-origin frame is a target of its own, so every content
-  verb works inside it. `nav`, `back`, `forward`, `reload`, `list`, `frames`,
+  verb works inside it. A **same-process** frame has no target of its own (a
+  same-origin or `srcdoc` one), so the reads that need none — `tab text`,
+  `tab extract` — take its text through the page itself, and the reply's
+  `frame_resolved.same_process` says that is what answered; input still needs a
+  target (`tab click --at X,Y`), and `find`/writes refuse
+  `frame-not-separate`. `nav`, `back`, `forward`, `reload`, `list`, `frames`,
   `info`, `close` and `activate` act on the tab.
 - `--allow CLASSES` / `--deny CLASSES` gate the call by capability class; see
   [Trust](trust.md) for the classes and the session-wide environment
@@ -83,6 +88,8 @@ on the command line.
   parked renderer, with the dialog named when there is one), `profile-busy`,
   `wait-timeout`.
 - Reads see the top document and open shadow roots; `tab frames` says which
-  frames were skipped, and `--frame` reaches into a cross-origin one.
+  frames were skipped, `--frame` reaches into a cross-origin one, and a
+  same-process frame's text reads with `--frame` too — no `tab js`, so no
+  `code` capability is needed for it.
 
 Every refusal code, grouped by cause, is in [Refusal codes](refusals.md).

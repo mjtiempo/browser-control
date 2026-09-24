@@ -409,7 +409,10 @@ _JS_PLACEHOLDERS = {"__MODE__": '"text"', "__NEEDLE__": '"x"',
                     "__VISIBLE__": "true", "__CAP__": "1",
                     "__VALUE__": '"v"', "__X__": "1", "__Y__": "1",
                     "__EXPR__": "true", "__IDLE_MS__": "100",
-                    "__SCHEMA__": '{"each":"a"}'}
+                    "__SCHEMA__": '{"each":"a"}',
+                    # the root a read is rooted at: the page, or (from a verb
+                    # that takes one) a same-process FRAME's document
+                    "__ROOT__": "{doc: document, win: window}"}
 
 
 def t_expressions_and_shot_rules() -> None:
@@ -1145,6 +1148,11 @@ def t_fill_refuses_leftovers() -> None:
     the refusal is the point of the helper.
     """
     assert dom.fill("a __X__ b", x="1") == "a 1 b"
+    # `__ROOT__` is the one placeholder with a DEFAULT: every expression reads
+    # the PAGE unless a verb roots it at a same-process frame's document
+    assert dom.fill("const R = __ROOT__;") == \
+        "const R = {doc: document, win: window};"
+    assert dom.fill("const R = __ROOT__;", root="(mine)") == "const R = (mine);"
     refusal(lambda: dom.fill("a __X__ b"), "bad-args")          # leftover
     refusal(lambda: dom.fill("a __X__ b", y="1"), "bad-args")   # unknown
     refusal(lambda: dom.fill("no placeholders", x="1"), "bad-args")
@@ -1218,7 +1226,7 @@ def t_a_fractional_page_number_is_a_number() -> None:
     # the SOURCE rounds: the viewport the page sends is two integers, so the
     # parse above is the second line of defence rather than the only one
     assert "viewport: [Math.round(vw), Math.round(vh)]" in dom.FIND_EXPR
-    assert "Math.round(window.innerWidth)" in dom.TEXT_EXPR
+    assert "Math.round(R.win.innerWidth)" in dom.TEXT_EXPR
     assert "iw: Math.round(innerWidth)" in dom.SHOT_METRICS
     assert "dpr: devicePixelRatio" in dom.SHOT_METRICS, \
         "the ratio is deliberately NOT rounded"
@@ -2561,7 +2569,8 @@ def t_frames_bind_to_their_tab() -> None:
     dom.frame("frame.html")
     assert dom.frame_resolved() is None
     scope_lib.current().resolve_frame(0, "u", "AAA")
-    assert dom.frame_resolved() == {"index": 0, "url": "u", "target": "AAA"}
+    assert dom.frame_resolved() == {"index": 0, "url": "u",
+                                  "target": "AAA", "same_process": False}
     assert dom.frame_resolved() is not scope_lib.current().frame_resolved  # COPY
     dom.frame("")
     assert dom.frame_resolved() is None, "the scope was cleared but the frame was not"
@@ -2779,6 +2788,215 @@ def t_click_presses_at_the_proven_point() -> None:
     assert pressed and (pressed[0]["x"], pressed[0]["y"]) == (12, 34), events
     assert reply["point"] == [12, 34], reply
     assert reply["under"] == "button#x", reply
+
+
+def t_same_process_frames_read_without_caller_code() -> None:
+    """A same-process frame is READ through the page — no target, no `tab js`.
+
+    A same-process frame (same-origin or srcdoc) has no CDP target of its own,
+    so there is nothing to attach to: `--frame` refused `frame-not-separate` and
+    pointed at `tab js` — which a `--deny code` policy closes, leaving NO way
+    at all to read such a frame's text. `tab text`/`tab extract` now root the
+    SAME expression at that frame's `contentDocument` instead, and the reply
+    says which document answered. The verbs that cannot be rooted keep the old
+    answer: input needs a target, and `find`'s hit test asks the PAGE what is
+    under a point.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    seen: list[str] = []
+
+    class FakeSession:
+        def __enter__(self) -> FakeSession:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object,
+                     tb: object) -> None:
+            return None
+
+        def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+            seen.append(expression)
+            return {"url": "about:srcdoc", "title": "frame",
+                    "ready": "complete", "visibility": "visible",
+                    "selector": "body", "found": True,
+                    "text": "inside the frame", "length": 16,
+                    "truncated": False}
+
+        def call(self, method: str, params: dict | None = None,
+                 timeout: float = 0.0) -> dict:
+            return {}
+
+    # the live shape: the browser attributes NOTHING (`frame_targets` gave it no
+    # parent), and the frame shares the page's process — the case that refused
+    # `frame-unattributable` while the document was readable all along
+    unattributable = [{"index": 0, "url": "about:srcdoc", "name": "",
+                       "box": [], "visible": True, "same_process": True,
+                       "target": "", "attribution": "unattributable",
+                       "candidates": 0}]
+    # …and the shape where the browser DOES attribute targets to tabs, so the
+    # refusal for a same-process frame is `frame-not-separate` instead
+    attributed = [{**unattributable[0], "attribution": ""}]
+    real = {name: getattr(dom, name) for name in
+            ("_resolve", "_session", "_frame_summary", "frames_of")}
+    real_port = cdp.port_of
+    dom._resolve = lambda tab, browser, for_write: (row, tab_row)  # type: ignore[assignment]
+    dom._session = lambda _row, _tab: FakeSession()  # type: ignore[assignment]
+    dom._frame_summary = lambda *a, **k: {}  # type: ignore[assignment]
+    cdp.port_of = lambda profile: 1234  # type: ignore[assignment]
+    try:
+        dom.frame("0")                    # what the global --frame sets
+        dom.frames_of = lambda port, page, census=None: unattributable  # type: ignore[assignment]
+        reply = dom.text(chars=100)
+        assert reply["text"] == "inside the frame", reply
+        assert seen and "contentDocument" in seen[0], seen[0][-400:]
+        assert "frames()[0]" in seen[0], seen[0][-400:]
+        assert reply["frame"] == "0", reply.get("frame")
+        assert reply["frame_resolved"]["same_process"] is True, reply
+        # the WRITE-shaped verbs are unchanged: `find` asks the page what is
+        # under a point, which inside a frame is the frame element itself
+        refusal(lambda: dom.find(selector="#x"), "frame-unattributable")
+        dom.frames_of = lambda port, page, census=None: attributed  # type: ignore[assignment]
+        refusal(lambda: dom.find(selector="#x"), "frame-not-separate")
+        # …and the read still works where the browser DOES attribute targets
+        seen.clear()
+        assert dom.text(chars=100)["text"] == "inside the frame"
+        assert "contentDocument" in seen[0], seen[0][-400:]
+    finally:
+        dom.frame("")                     # clear: no verb inherits the scope
+        for name, value in real.items():
+            setattr(dom, name, value)
+        cdp.port_of = real_port
+
+
+def t_selftest_answers_the_policy_question() -> None:
+    """`selftest --classes`: what each action may reach, from the gate's table.
+
+    `by_class` answers "what may run under `--deny code`"; a caller WRITING a
+    policy starts from the other side — "what does `tab text` hold" — and used
+    to have to read `lib/capabilities.py` to find out. One table, two views.
+    """
+    rc, out, err = run_cli(["selftest", "--classes"])
+    assert rc == 0 and err == "", (rc, err)
+    data = json.loads(out)
+    assert set(data) == {"ok", "classes"}, data
+    assert data["classes"]["tab text"] == ["read"], data["classes"]["tab text"]
+    assert data["classes"]["tab screenshot"] == ["read", "file"]
+    assert data["classes"]["tab js"] == ["code", "write"]
+    assert data["classes"]["selftest"] == ["read"]
+    for action, classes in capabilities.ACTIONS.items():
+        assert data["classes"][action] == list(classes), action
+    # the install report carries the same map, so the question is answerable
+    # from `selftest` alone too — the two views are one table
+    rc, out, _err = run_cli(["selftest"])
+    assert json.loads(out)["capabilities"]["by_action"] == data["classes"]
+    # a leftover argument is a caller asking for something that does not exist
+    rc, _out, err = run_cli(["selftest", "--classes", "x"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+
+
+def t_page_plugin_offline() -> None:
+    """`page read`: a whole list in ONE call — frames, failures and budgets.
+
+    The loop this replaces is three CLI processes per page plus the shell that
+    carries the URL between them. What is pinned here is what a caller reading
+    a LIST depends on: every URL comes back as a record, a URL that fails is
+    listed in `errors` instead of sinking the call, a page whose words are
+    inside a single same-process frame is read from that frame and NAMED (the
+    scope is set for that read and cleared after it), and a call that could
+    read NOTHING refuses rather than reporting an empty success.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    navs: list[str] = []
+    scopes: list[str] = []
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        navs.append(url)
+        if "dead" in url:
+            raise ControlError("cdp-error", "no such host")
+        return {"ok": True, "moved": True}
+
+    def fake_wait(mode: str, **kw: object) -> dict:
+        return {"ok": True}
+
+    def fake_text(selector: str | None = None, chars: int = 0, tab: str = "",
+                  browser: str = "") -> dict:
+        # the scoped read is the frame's document; without a scope the PAGE
+        # answers — and a framed page answers with no words at all
+        if scopes and scopes[-1]:
+            return {"ok": True, "title": "inner", "url": "about:srcdoc",
+                    "text": "inside the frame", "length": 16,
+                    "truncated": False}
+        if "framed" in navs[-1]:
+            return {"ok": True, "title": "framed", "url": navs[-1],
+                    "text": "", "length": 0, "truncated": False,
+                    "frames": {"total": 1, "separate": None,
+                               "cross_origin": 0, "same_process": 1,
+                               "visible": 1}}
+        return {"ok": True, "title": "plain", "url": navs[-1],
+                "text": "plain words", "length": 11, "truncated": False}
+
+    def fake_frame(wanted: str | None = None) -> str:
+        if wanted is not None:
+            scopes.append(wanted)
+        return scopes[-1] if scopes else ""
+
+    real = {name: getattr(plugin_api, name)
+            for name in ("nav", "wait", "text", "frame")}
+    real_dom_frame = dom.frame
+    plugin_api.nav = fake_nav                        # type: ignore[assignment]
+    plugin_api.wait = fake_wait                      # type: ignore[assignment]
+    plugin_api.text = fake_text                      # type: ignore[assignment]
+    plugin_api.frame = fake_frame                    # type: ignore[assignment]
+    dom.frame = fake_frame                           # type: ignore[assignment]
+    try:
+        rc, out, err = run_cli(["page", "read", "https://plain/",
+                                "https://dead/", "https://framed/"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert navs == ["https://plain/", "https://dead/",
+                        "https://framed/"], navs
+        assert data["count"] == 2, data
+        assert data["errors"] == [{"url": "https://dead/",
+                                   "code": "cdp-error",
+                                   "message": "no such host"}], data
+        plain, framed = data["pages"]
+        assert plain["text"] == "plain words", plain
+        assert plain["moved"] is True and "read_frame" not in plain, plain
+        # the framed page: read from its frame, and the record NAMES it
+        assert framed["text"] == "inside the frame", framed
+        assert framed["read_frame"] == 0, framed
+        assert framed["frames"]["same_process"] == 1, framed
+        # …and the scope was set for that read and cleared straight after (the
+        # leading entry is the CLI clearing the scope at invocation start)
+        assert scopes[-2:] == ["0", ""], scopes
+        # a call that read NOTHING refuses: an empty success is not a read
+        rc, _out, err = run_cli(["page", "read", "https://dead/"])
+        assert rc == 2 and "ERR[cdp-error]" in err, (rc, err)
+        for argv, phrase in (
+                (["page"], "page: the subcommand is required"),
+                (["page", "read"], "page read: needs at least one URL"),
+                (["page", "read", "https://a/", "--depth", "2"],
+                 "unknown option '--depth'"),
+                (["page", "read", "https://a/", "--chars", "0"],
+                 "--chars must be at least 1"),
+                (["page", "read", "https://a/", "--timeout", "0"],
+                 "--timeout must be between"),
+                (["page", "read"] + [f"https://x{i}/" for i in range(21)],
+                 "over the 20")):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
+    finally:
+        for name, value in real.items():
+            setattr(plugin_api, name, value)
+        dom.frame = real_dom_frame                   # type: ignore[assignment]
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
 
 
 def _restore_root(keep: str | None) -> None:
@@ -6391,6 +6609,10 @@ def main() -> int:
         ("the press lands at the proven point", t_click_presses_at_the_proven_point),
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("frames bind to their tab", t_frames_bind_to_their_tab),
+        ("a same-process frame reads without caller code",
+         t_same_process_frames_read_without_caller_code),
+        ("selftest answers the policy question",
+         t_selftest_answers_the_policy_question),
         ("every verb is classified", t_capability_surface),
         ("every refusal code is registered", t_error_codes_are_registered),
         ("input verbs' argv", t_cli_input_grammar),
@@ -6408,6 +6630,7 @@ def main() -> int:
          t_x_plugin_loads_more_on_scroll),
         ("google plugin types, never builds a query URL",
          t_google_plugin_offline),
+        ("page plugin reads a list in one call", t_page_plugin_offline),
         ("the plugin seam hands out the core readers",
          t_plugin_seam_hands_out_the_core_readers),
         ("type delay is validated before any browser",

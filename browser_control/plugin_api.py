@@ -3,7 +3,7 @@
 A plugin is local code running in this process with the CLI's own access; what it
 should reach for is THIS module, not `browser_control.lib` at large. The names
 here are the supported surface (`api: 1`): the refusal type and its code
-vocabulary, the verbs a READ-ONLY plugin needs (`nav`, `wait`, `extract`), and
+vocabulary, the verbs a READ-ONLY plugin needs (`nav`, `wait`, `text`, `extract`), and
 the five a plugin that drives a page the way a person does needs — `focus`,
 `type_text` (real per-character key events, with a `delay_s` for a human
 cadence), `press`, `click`, and `scroll` (one real wheel event — how a lazy or
@@ -48,8 +48,10 @@ from browser_control.lib.dom import (
     click,
     extract,
     focus,
+    frame,
     press,
     scroll,
+    text,
     type_text,
     wait,
 )
@@ -57,5 +59,6 @@ from browser_control.lib.errors import ControlError, fail
 from browser_control.lib.plugins import PLUGIN_API
 
 __all__ = ["ControlError", "PLUGIN_API", "click", "errors", "extract",
-           "fail", "float_arg", "focus", "int_arg", "nav", "pop", "press",
-           "scroll", "switch", "tab_arg", "text_arg", "type_text", "wait"]
+           "fail", "float_arg", "focus", "frame", "int_arg", "nav", "pop",
+           "press", "scroll", "switch", "tab_arg", "text", "text_arg",
+           "type_text", "wait"]

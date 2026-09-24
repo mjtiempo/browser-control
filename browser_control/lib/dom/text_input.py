@@ -29,6 +29,7 @@ from browser_control.lib.dom.result import (
 )
 from browser_control.lib.dom.scripts import (
     TEXT_TARGET_EXPR,
+    fill,
 )
 from browser_control.lib.errors import (
     ERR_BAD_ARGS,
@@ -48,7 +49,7 @@ def _text_target(session: cdp.Session) -> dict:
     judge.
     """
     try:
-        data = session.evaluate(TEXT_TARGET_EXPR)
+        data = session.evaluate(fill(TEXT_TARGET_EXPR))
     except Exception:                                          # noqa: BLE001
         return {"focused": True, "frame": True, "editable": True,
                 "secret": True, "active": None, "length": None,

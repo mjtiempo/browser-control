@@ -62,6 +62,32 @@ consent, bot checks) actually see — no `/search?q=` URL is ever constructed.
   search …` refuses `not-allowed`. Zero results can be the site changing its
   DOM, a consent wall, or a challenge — read `landed_on`.
 
+## `page read` — a list of URLs, ONE call
+
+```bash
+BROWSER_CONTROL_PLUGIN_PATH=/home/mark/Documents/pidev/mark-browser-control/plugins \
+browser-control-cli page read https://example.com https://example.org --chars 3000
+```
+
+The loop this replaces is three CLI processes per page (`tab nav` → `tab wait`
+→ `tab text`) plus the shell that carries the URL between them.
+
+- Usage: `page read URL... [--chars N] [--timeout S] [--tab SPEC]`. Each page
+  is the core's own `tab text` answer for that URL — `length`/`truncated`
+  included, so `--chars` is applied in the page and the reply says what it left
+  behind.
+- A URL that fails is listed in `errors` with its refusal code instead of
+  sinking the rest; a call that could read NOTHING refuses with the first
+  error's own code.
+- A page whose words are inside a single **same-process** frame (census
+  `same_process: 1`) is read from that frame's document and the record NAMES it
+  (`read_frame: 0`), so a framed page does not come back as an empty one. A
+  `wait` that runs out is reported in the record and the page is still read.
+- `--frame` is a GLOBAL flag, so it reaches every read in the call (a
+  same-process frame needs no target to attach to).
+- Classes `read`+`write` (it navigates), so `--deny write page read …` refuses
+  `not-allowed`.
+
 ## `x search` — read-only X results
 
 ```bash

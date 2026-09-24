@@ -44,7 +44,9 @@ The values are the page's own DOM text and attributes — the same oracle as
 selector that stops matching yields `null`, not an error; the selector map is
 the part that breaks when a site changes its DOM. `tab extract` sees the top
 document plus open shadow roots, not iframes; `tab frames` says which frames
-were left out and `--frame` reaches into one.
+were left out, `--frame` reaches into a cross-origin one, and a same-process
+frame's records come through `--frame` as well (its document has no target of
+its own, so the read is rooted there).
 
 For multi-page collection, drive it in a loop: `--cap` higher than one window
 of results, `tab scroll` to load more, and dedupe what comes back. The shipped

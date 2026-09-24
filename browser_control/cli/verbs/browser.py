@@ -110,9 +110,17 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
     verb can speak CDP, and an install that cannot reach a browser should say
     so at once rather than at the first `tabs`. A machine with no browser is
     reported, not failed — the command is installed either way.
+
+    `--classes` answers the POLICY question alone: every action and the classes
+    it may reach (plugins included), with none of the rest of the install
+    report to read past. A caller writing `--allow`/`--deny` needs that table,
+    and it is the same one the gate enforces — not a second copy.
     """
+    rest, classes_only = _switch(rest, "--classes")
     _none(rest, "selftest")
     cdp_session.require_websockets()
+    if classes_only:
+        return {"ok": True, "classes": capabilities.by_action()}
     # the tables, the policy and the plugin set live on `cli.registry`, which
     # this module imports at module level: no deferred import, no reach into
     # `cli.main`'s privates
@@ -138,6 +146,11 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
              "capabilities": {
                  "classes": list(capabilities.CLASSES),
                  "by_class": capabilities.by_class(),
+                 # the same table the gate reads, the other way round: "what may
+                 # `tab text` reach" is the question a `--deny` is written
+                 # against, and answering it from a second list would let the
+                 # two drift (the drift `unclassified` below exists to catch)
+                 "by_action": capabilities.by_action(),
                  # the plugin verbs whose classes the PLUGIN declared: the
                  # gate enforces them, but nothing verified them, and saying
                  # so here keeps the report from reading as if it had (a

@@ -178,7 +178,10 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  attach a file to an <input type=file>
   tab media state|play|pause [--index N] [--tab SPEC]
                                  read or drive the page's video/audio
-  selftest           prove the install: interpreter, websockets, verbs
+  selftest [--classes]
+                     prove the install: interpreter, websockets, verbs;
+                     `--classes` answers the policy question alone (every
+                     action and the classes it may reach)
   help               this text (also `-h` and `--help`), then any plugin
                      actions installed (see `selftest`)
 

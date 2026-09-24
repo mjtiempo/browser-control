@@ -961,10 +961,30 @@ def c_dom_scroll_moves_the_document_and_nested() -> str:
     # viewport is refused (the window is however big the window manager made it,
     # which measured shorter than the fixture assumed)
     ok_json("tab", "scroll", "--selector", "#nested")
-    point = ok_json("tab", "find", "--selector", "#nested")["matches"][0]["point"]
+    found = ok_json("tab", "find", "--selector", "#nested")["matches"][0]
+    point = found["point"]
+    # the wheel must LAND in the scroller, and the reveal's own evidence says
+    # whether it will: `hit` is the page's element-at-point probe. Asserting it
+    # here turns "the window was too short / the reveal left the centre off the
+    # element" into a named cause instead of a mystery further down (the window
+    # is however big the window manager made it, which measured shorter than
+    # the fixture assumed — the reason the reveal is done at all)
+    assert found["hit"] is True, found
+    assert str(found["hit_element"]).split()[0] in ("div#inner", "div#nested"), \
+        found
     nested = ok_json("tab", "scroll", "--by", "240", "--at",
                      f"{point[0]},{point[1]}")
-    assert nested["nested"]["after"][1] == 240, nested
+    # WHICH scroller moved: the reply is one entry per SCROLLED ancestor under
+    # the point, `[describe, scrollTop, scrollLeft]`, because a wheel chains
+    # past an exhausted inner scroller and a page can map it to scrollLeft.
+    # This assertion named the scroller by INDEX (`after[1] == 240`) from when
+    # the field was ONE `[top, left]` pair — so a wheel that did its job and
+    # scrolled the div by exactly 240 raised `IndexError` on the one-entry list
+    # (measured live), which is what made this check fail on a short window
+    # while the wheel was correct. Name the scroller; never index a shape.
+    moved = {entry[0]: entry[1] for entry in nested["nested"]["after"]}
+    assert any(name.startswith("div#nested") and top == 240
+               for name, top in moved.items()), nested
     assert nested["document"]["after"] == nested["document"]["before"], \
         nested                     # the reveal scrolled the page; the wheel did not
     return "a wheel scrolled the document, and one scrolled a nested div"
@@ -1802,9 +1822,19 @@ def c_frames() -> str:
     err = refuses("frame-ambiguous", "tab", "text", "--frame", "localhost",
                   "--chars", "40", "--tab", tid)
     assert "pick one by index" in err and "[1]" in err, err
-    err = refuses("frame-not-separate", "tab", "text", "--frame", "0",
-                  "--chars", "40", "--tab", tid)
-    assert "tab js" in err, err
+    # a SAME-PROCESS frame has no target to attach to, and its document is one
+    # the page can read: a READ is rooted there instead (measured before the
+    # fix: `--deny code` left no way into such a frame at all, because `tab js`
+    # was the only door and that is caller code)
+    same_read = ok_json("tab", "text", "--frame", "0", "--chars", "200",
+                        "--tab", tid)
+    assert "SAME_PROCESS_MARKER" in same_read["text"], same_read
+    assert (same_read.get("frame_resolved") or {}).get(
+        "same_process") is True, same_read
+    # …while a verb that NEEDS a target still refuses, and names the way round
+    err = refuses("frame-not-separate", "tab", "find", "--selector", "p",
+                  "--frame", "0", "--tab", tid)
+    assert "click --at" in err, err
     refuses("no-frame", "tab", "text", "--frame", "no-such-frame",
             "--chars", "40", "--tab", tid)
     # a POINT: real input where a selector cannot reach, and honestly judged.
@@ -1835,8 +1865,9 @@ def c_frames() -> str:
     # dispatch and the point's reach are what this check stands behind; the
     # default-action oracle lives on the DOM page (where it passes) and §5.24
     # records the frames-page anomaly rather than asserting it either way.
-    return ("3 frames (2 separate): named by index and URL, driven inside; a "
-            "point dispatched through to the control")
+    return ("3 frames (2 separate): named by index and URL, driven inside, the "
+            "same-process one read through the page; a point dispatched "
+            "through to the control")
 
 
 def c_close_ignores_a_recycled_pid() -> str:

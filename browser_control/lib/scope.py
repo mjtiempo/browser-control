@@ -49,13 +49,18 @@ class Scope:
             self.frame_resolved = None
         return self.frame_wanted
 
-    def resolve_frame(self, index: int, url: str, target: str) -> None:
-        """Record which frame a session actually attached to.
+    def resolve_frame(self, index: int, url: str, target: str,
+                      *, same_process: bool = False) -> None:
+        """Record which frame a session attached to — or read THROUGH.
 
         An index is the page's live iframe order, so "which document did that
         act in" is not something a caller can infer from their own argument.
+        `same_process` is the frame with no target of its own: nothing was
+        attached to, the read ran in the PAGE and was rooted at that frame's
+        `contentDocument`, and the reply has to say so.
         """
-        self.frame_resolved = {"index": index, "url": url, "target": target}
+        self.frame_resolved = {"index": index, "url": url, "target": target,
+                               "same_process": bool(same_process)}
 
     def resolved_frame(self) -> dict | None:
         """The frame the last session attached to, as a COPY, or None."""

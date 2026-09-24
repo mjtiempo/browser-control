@@ -22,6 +22,7 @@ from browser_control.lib.coerce import (
 )
 from browser_control.lib.dom.scripts import (
     SHOT_METRICS,
+    fill,
 )
 from browser_control.lib.errors import (
     ERR_CDP_ERROR,
@@ -48,7 +49,7 @@ def screenshot(path: str, full: bool = False, force: bool = False,
     page = _pkg.Tab.open(tab, browser, for_write=False)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
-        metrics = session.evaluate(SHOT_METRICS)
+        metrics = session.evaluate(fill(SHOT_METRICS))
         if not isinstance(metrics, dict):
             fail(ERR_CDP_ERROR, "the page did not report its geometry")
         shot = session.call("Page.captureScreenshot",

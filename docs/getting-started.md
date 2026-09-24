@@ -23,11 +23,13 @@ python3 tests/live_test.py      # the live battery: needs a browser
 
 `selftest` is the machine-readable answer to "what is this install":
 interpreter, `websockets` version, profile root, action-log path, the browsers
-it found, the verbs it has, the plugins that loaded, the capability classes,
-and the policy in force. It is the one verb that is never gated.
+it found, the verbs it has, the plugins that loaded, the capability classes
+(both ways round), and the policy in force. It is the one verb that is never
+gated.
 
 ```bash
 browser-control-cli selftest | jq '{ok, browsers, plugins, policy}'
+browser-control-cli selftest --classes   # what every action may reach
 ```
 
 ## First session

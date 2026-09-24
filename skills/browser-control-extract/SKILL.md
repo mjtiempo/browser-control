@@ -167,7 +167,10 @@ browser-control-cli --frame 'checkout' tab text --selector 'h1'
 ```
 
 A cross-origin frame is a target of its own: every content verb (`text`, `find`,
-`extract`, `click`, `screenshot`, …) works inside it with `--frame`. `nav`,
+`extract`, `click`, `screenshot`, …) works inside it with `--frame`. A
+**same-process** frame (`same_process: true`, no target) has its document read
+by `--frame` too — `text`/`extract` are rooted there instead of attaching —
+while `find`/`click` still need a target (`click --at X,Y`). `nav`,
 `back`, `forward`, `reload`, `list`, `frames`, `info`, `close`, `activate` act
 on the tab and ignore frames.
 

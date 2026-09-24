@@ -35,7 +35,8 @@ One verb per process. **stdout**: exactly one JSON object. **stderr**:
 - Extract repeated items into JSON records → `browser-control-extract` skill.
 - Use seeded logins / multiple accounts / attach the user's browser →
   `browser-control-sessions` skill.
-- Site adapters (Google-by-typing, X search) → `browser-control-plugins` skill.
+- Site adapters (Google-by-typing, X search, a list of URLs in one call) →
+  `browser-control-plugins` skill.
 
 Prefer the pi-chrome tools when the task needs the user's live session, a window
 they can watch, or an extension. Use this CLI for isolated, headless, verified
@@ -45,6 +46,7 @@ automation.
 
 ```bash
 browser-control-cli selftest | jq '{ok, python_version, browsers, plugins, plugin_errors, policy}'
+browser-control-cli selftest --classes    # what every action may reach
 ```
 
 `selftest` reports browsers found, loaded plugins, capability classes, and the
@@ -82,7 +84,7 @@ windowed managed browser is up refuses. `close --force` then `open --headless`.
 | `--tab SPEC` | `id:<prefix>` (from `open` / `tab list`), the word `active` (the visible tab), or a title/url substring |
 | `--browser NAME` | executable name or managed profile name; default = the live managed browser, else the first Chromium on PATH |
 | `--profile DIR` | the **instance** (a profile dir under the root); how two instances of one browser — two logins — are told apart |
-| `--frame VALUE` | act inside one iframe: an index from `tab frames`, or a URL substring |
+| `--frame VALUE` | act inside one iframe: an index from `tab frames`, or a URL substring. A cross-origin frame is a target of its own; a SAME-PROCESS one has no target, and reads of it (`tab text`, `tab extract`) are rooted at its document through the page — no `tab js`, no `code` class |
 
 Rules that save a round trip:
 
@@ -293,8 +295,9 @@ The full code vocabulary with meanings is `references/errors.md`.
 - **Every read enables the Page domain** on the tab it reads — the one
   side-effect reads have (that is what makes a suppressed dialog detectable).
 - `tab find`/`tab text` see the top document plus **open shadow roots**;
-  `tab frames` says which frames were skipped, and `--frame` reaches into one
-  (including cross-origin).
+  `tab frames` says which frames were skipped, `--frame` reaches into a
+  cross-origin one, and a same-process frame's text reads with `--frame` too
+  (it is rooted at that frame's document, so it needs no `tab js`).
 - The page owns the DOM oracle: a page can shadow `hit`, `:hover`, geometry, or
   `checked`. Only `/proc`, the PNG header, and CDP errors are page-independent.
 - `tab js` returns the page's **own** value: a string that parses as JSON is

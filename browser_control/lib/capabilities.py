@@ -152,6 +152,21 @@ class Surface:
                     grouped.setdefault(name, []).append(action)
         return grouped
 
+    def by_action(self) -> dict[str, list[str]]:
+        """The surface the RIGHT way round: what each action may reach.
+
+        `by_class` answers "what can run under `--deny code`"; this answers the
+        question a caller writing a policy starts from — "what does `tab text`
+        hold" — from the table itself, never from a second list kept beside it.
+        Plugin-declared actions are included, and their classes are the PLUGIN's
+        own declaration, exactly as in `by_class`.
+        """
+        grouped = {action: list(classes)
+                   for action, classes in ACTIONS.items()}
+        for action, classes in self.plugin_actions.items():
+            grouped[action] = list(classes)
+        return dict(sorted(grouped.items()))
+
     def plugin_declared(self) -> list[str]:
         """The actions whose classes are SELF-DECLARED by a plugin."""
         return sorted(self.plugin_actions)
@@ -186,3 +201,8 @@ def by_class() -> dict[str, list[str]]:
 def plugin_declared() -> list[str]:
     """`Surface.plugin_declared`, on the process-wide surface."""
     return SURFACE.plugin_declared()
+
+
+def by_action() -> dict[str, list[str]]:
+    """`Surface.by_action`, on the process-wide surface."""
+    return SURFACE.by_action()

@@ -158,9 +158,9 @@ def _click_at(row: dict, tab_row: dict, at: str) -> dict:
         data = _pkg._matches_in(session, "", "", 1)     # page facts, no matching
         x, y = _pkg._point(at, _pkg._viewport(data, str(tab_row["id"])),
                     "tab click")
-        before = session.evaluate(STATE_EXPR)
+        before = session.evaluate(fill(STATE_EXPR))
         probe = _at_point_click(session, x, y)
-        after = session.evaluate(STATE_EXPR)
+        after = session.evaluate(fill(STATE_EXPR))
     before = before if isinstance(before, dict) else {}
     after = after if isinstance(after, dict) else {}
     changed = PageState.from_dict(after).changed(PageState.from_dict(before))
@@ -233,7 +233,7 @@ def click(text: str | None = None, selector: str | None = None,
                                                        row, tab_row):
         x, y = aim(element, needle, css)
         click_point(session, x, y)
-        after = session.evaluate(STATE_EXPR)
+        after = session.evaluate(fill(STATE_EXPR))
         # what the point reaches AFTERWARDS: a click legitimately changes the
         # document, so this is information rather than a verdict — but a reply
         # that says `clicked: true` should also say what it can still see there

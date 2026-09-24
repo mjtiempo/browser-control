@@ -46,8 +46,8 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 | `tab-ambiguous` | several tabs match the spec — use `id:<prefix>` or a longer substring |
 | `no-frame` | `--frame VALUE` matched no iframe — run `tab frames` |
 | `frame-ambiguous` | `--frame` matched several frames — use an index or a fuller URL |
-| `frame-not-separate` | that frame shares the page's process; it is already part of the page, no `--frame` needed |
-| `frame-unattributable` | the frame cannot be attributed to a target — run `tab frames` and re-name it |
+| `frame-not-separate` | that frame has no target to attach to: it shares the page's process (a same-origin/`srcdoc` frame), or its committed URL differs from the `src` (a redirect). `tab text`/`tab extract --frame N` read a same-process one; input needs `tab click --at X,Y` |
+| `frame-unattributable` | the browser does not report which tab owns an iframe target, so a SEPARATE frame cannot be reached — a same-process frame still reads (`tab text --frame N`); run `tab frames` and re-name it |
 | `no-viewport` | the page reports a zero viewport (windowless/never shown); nothing can be measured |
 | `no-viewport-target` | no target in the browser has a viewport |
 
@@ -112,4 +112,4 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 
 | code | meaning |
 | --- | --- |
-| `not-allowed` | the capability gate refused this call; `selftest.policy` shows what is in force |
+| `not-allowed` | the capability gate refused this call; `selftest.policy` shows what is in force, and `selftest --classes` prints what every action may reach |

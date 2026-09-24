@@ -96,7 +96,7 @@ def _poll_media(session: cdp.Session, mode: str, before: dict,
         # bound the probe by the budget the verb ADVERTISES: the session's
         # 15s default otherwise let `tab media play` take ~20s against its
         # own 5s deadline (a review flagged it)
-        got = session.evaluate(MEDIA_STATE_EXPR, timeout=timeout)
+        got = session.evaluate(fill(MEDIA_STATE_EXPR), timeout=timeout)
         return got if isinstance(got, dict) else {}
 
     def done(state: dict) -> bool:
@@ -131,7 +131,7 @@ def media(mode: str, index: int | None = None, tab: str = "",
     page = _pkg.Tab.open(tab, browser, for_write=(name != "state"))
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
-        before = session.evaluate(MEDIA_STATE_EXPR)
+        before = session.evaluate(fill(MEDIA_STATE_EXPR))
         before = before if isinstance(before, dict) else {}
         if not before.get("found"):
             fail(ERR_NO_MEDIA,
