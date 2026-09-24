@@ -1,7 +1,7 @@
 # Browser Control
 
-Drive **this machine's** Chromium-family browser over CDP — on a managed
-profile of its own, from a CLI that prints one JSON object and nothing else.
+Drive Chromium-family browser over CDP using a managed
+profile of its own or seed from existing profile.
 
 It is built for callers that cannot look at the screen: an agent, a script, a
 test. Every verb proves what it did. Every refusal names its cause. Nothing is
