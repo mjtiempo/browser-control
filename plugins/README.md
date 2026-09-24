@@ -46,7 +46,8 @@ code with the constant, never a bare string: the vocabulary is closed, and the
 hermetic check scans `plugins/` for an unregistered one.
 
 The supported surface is `browser_control.plugin_api` (`fail`,
-`ControlError`, `errors`, `pop`, `switch`, `nav`, `wait`, `extract`,
+`ControlError`, `errors`, `pop`, `switch`, `text_arg`, `int_arg`, `float_arg`,
+`nav`, `wait`, `extract`, `focus`, `type_text`, `press`, `click`, `scroll`,
 `PLUGIN_API`) — import that, not `browser_control.lib` at large. `pop` and
 `switch` are the CLI's OWN argv readers: `rest, cap = pop(rest, "--cap",
 "mysite search")` and `rest, given = switch(rest, "--latest")` parse a plugin's
@@ -54,7 +55,10 @@ arguments the way the built-ins are parsed, missing-value refusal included.
 `browser` for `nav`, `dom` for
 `wait` and the reads, and especially `dom.extract` — the generic extraction
 engine (`--each` + `--field NAME=SELECTOR[@ATTR]`, CSS only, no code) that a
-reader plugin is normally a thin wrapper around. The capability classes a
+reader plugin is normally a thin wrapper around. `focus`, `type_text`, `press`,
+`click` and `scroll` are the drive-it-by-hand verbs: `scroll` sends one real
+wheel event, which is how a lazy or virtualized list (`x_reader.py`) is made
+to render past its first window. The capability classes a
 plugin declares must come from the closed vocabulary (`read`, `write`, `code`,
 `file`, `egress`), and the gate applies to them exactly as it does to the
 built-ins (`--deny read mysite …` refuses `not-allowed`).
@@ -68,15 +72,26 @@ tool itself.
 
 ## Shipped: `x_reader.py`
 
-Read-only X search, built on `tab extract`:
+Read-only X search, built on `tab extract` — with `--cap` as a TARGET rather
+than a slice of the first render:
 
 ```bash
 BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
-    x search '"Pardon Snowden"' --latest --cap 5
+    x search '"Pardon Snowden"' --latest --cap 20
 ```
 
 * `--latest` is X's "Latest" sort (by date); `--top` is its relevance ranking;
   the default is `--latest`.
+* **`--cap` is a target.** Measured, X keeps only 3–9 articles mounted and
+  recycles the rows as the timeline moves, so one `tab extract` can never
+  answer a 20-post request. The plugin wheels the page (`--max-scrolls`,
+  default 10) and merges by post id until it has `--cap` posts, X stops
+  yielding, or the budget runs out. `--max-scrolls 0` reads only the first
+  render.
+* The reply's `loading` block says what it took (`reads`, `scrolls`) and why
+  it stopped (`stop`: `cap`, `exhausted`, `max-scrolls`, `no-posts`,
+  `scroll-failed`). `truncated` is true whenever loading stopped short, since
+  more posts may exist.
 * `sort` in the reply is what the page's own tab strip reports as selected —
   the adapter's honest answer to "is this sorted by date", since no verb can
   prove a site's ordering.

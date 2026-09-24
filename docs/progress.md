@@ -1424,6 +1424,49 @@ the live battery **62 passed, 0 failed, 0 skipped** (additions above, run
 three times against google-chrome-stable 153.0.8010.52 on a throwaway root;
 the beforeunload check was stable in a separate measurement too).
 
+### 5.34 `x search` loads the timeline — the wheel and the merge are the plugin's job now
+
+A real research run (`x search` for today's bitcoin-price posts) found the
+plugin's own ceiling: X keeps only 3–9 `article` rows mounted and RECYCLES
+them as the timeline moves, so one `tab extract` answered 3 posts for a
+20-post request. The session worked around it by hand — wheel down, extract
+again, append, dedupe by URL — and that loop is now the plugin's:
+
+* **The wheel is on the plugin seam.** `plugin_api.scroll` joins `focus`,
+  `type_text`, `press` and `click` (additive; `api: 1` stays, no existing
+  plugin changes). It is a real wheel event: how a lazy or virtualized list is
+  made to render past its first window. The X plugin still declares
+  `read+write` and still only reads content — the wheel is its only input.
+* **`--cap` is a TARGET.** `_collect` extracts, wheels `SCROLL_PIXELS`, waits
+  `SCROLL_PAUSE_S` for the next window to mount, extracts again and merges by
+  post id, until it has `--cap` posts (`--max-scrolls`, default 10, bounds the
+  work; `0` restores the old first-render behavior). A round that mounts
+  several posts at once is sliced back to the cap, like every other cap.
+* **The stop is named.** The reply's `loading` block reports `reads`,
+  `scrolls`, `max_scrolls` and `stop` (`cap`, `exhausted`, `max-scrolls`,
+  `no-posts`, `scroll-failed`); `truncated` is true whenever loading stopped
+  short, since more posts may exist below. Two empty rounds — each given a
+  retry read after a beat, so a slow mount is not mistaken for the end — say
+  `exhausted` and set `truncated: false`.
+* **Measured on the real site**: `x search "bitcoin price" --latest --cap 20`
+  → exactly 20 unique posts, `stop: cap` (runs took 7.4–8.7 s with 5–6 reads
+  and 4–5 scrolls — X's window size varies run to run, which is exactly why
+  the reply reports them); the same command with `--max-scrolls 0` → the 3
+  rows of the first render. The `:scope` fix from the extraction round also
+  made `sort` real: the page's own tab strip is read instead of always
+  falling back.
+
+New hermetic check `t_x_plugin_loads_more_on_scroll` replays a virtualized,
+overlapping window sequence and pins the cap overshoot, the `exhausted` stop
+and the retry cadence (sleeps recorded, not waited); `t_x_plugin_offline` pins
+`--max-scrolls 0` (the wheel must never be sent) and the two new refusals; the
+seam check now runs `p.scroll is dom.scroll` in a fresh process, so the export
+cannot be lost without a failure.
+
+Evidence: 121 hermetic checks green, pyright 0, `ruff check .` 0, live battery
+**62 passed, 0 failed, 0 skipped**, and the two real X runs above (the
+bitcoin-price search, google-chrome-stable on this host).
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs
@@ -1507,7 +1550,7 @@ plugin tier's business.
 ```bash
 python3 -m pip install .              # console script on PATH (pipx also works)
 # or, from the checkout with no install:  ./browser-control-cli …
-python3 tests/test_unit.py            # hermetic, no browser (120 checks)
+python3 tests/test_unit.py            # hermetic, no browser (121 checks)
 python3 tests/live_test.py            # the battery, needs a browser (62 checks)
 browser-control-cli selftest          # what is installed, what can be driven
 browser-control-cli open https://example.com

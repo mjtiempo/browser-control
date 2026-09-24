@@ -225,17 +225,25 @@ holds. Plugins are Python files loaded from `BROWSER_CONTROL_PLUGIN_PATH`
 `~/.local/share/browser-control/plugins/`. `selftest` lists what loaded and
 what did not; `--help` appends their usage lines.
 
-This repo ships two. `plugins/x_reader.py` is read-only X search:
+This repo ships two. `plugins/x_reader.py` is read-only X search — and
+`--cap` is a TARGET, not a slice of the first render: measured, X keeps only
+3–9 articles mounted and recycles the rows as the timeline moves, so the
+plugin wheels the page and merges what mounts, by post id, until it has enough
+results (bounded by `--max-scrolls`):
 
 ```console
 $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
     x search '"Pardon Snowden"' --latest --cap 5
-{"ok": true, "sort": "latest", "count": 5, "posts": [{"handle": "…", "time": "…", "text": "…"}, …]}
+{"ok": true, "sort": "latest", "count": 5, "truncated": false,
+ "loading": {"reads": 3, "scrolls": 2, "max_scrolls": 10, "stop": "cap"},
+ "posts": [{"handle": "…", "time": "…", "text": "…"}, …]}
 ```
 
 `--latest` is X's "Latest" sort (by date), `--top` its relevance ranking, and
 `sort` reports what the page's own tab strip says is selected — no verb can
-prove a site's ordering.
+prove a site's ordering. `loading.stop` names why the loading ended (`cap`,
+`exhausted`, `max-scrolls`, `no-posts`, `scroll-failed`), and `--max-scrolls 0`
+reads only what the first render holds.
 
 `plugins/google_search.py` searches Google by TYPING: the query goes into the
 site's own search box as real per-character key events at a human cadence

@@ -1732,14 +1732,16 @@ def t_argv_readers_live_in_lib() -> None:
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     code = (
         "import browser_control.plugin_api as p, browser_control.lib.argv as a,"
+        " browser_control.lib.dom as d,"
         " sys; print(p.pop is a._pop, p.switch is a._switch,"
         " p.int_arg is a._int, p.float_arg is a._float,"
-        " p.text_arg is a._text_arg,"
+        " p.text_arg is a._text_arg, p.scroll is d.scroll,"
         " 'browser_control.cli' in sys.modules)")
     proc = subprocess.run([sys.executable, "-c", code], cwd=repo,
                           capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "True True True True True False", proc.stdout
+    assert proc.stdout.strip() == "True True True True True True False", \
+        proc.stdout
 
 
 def t_unknown_flag_is_reported_first() -> None:
@@ -5109,12 +5111,17 @@ def t_plugin_seam_hands_out_the_core_readers() -> None:
 
 
 def t_x_plugin_offline() -> None:
-    """The X plugin builds the Latest URL and maps rows to posts."""
+    """The X plugin builds the Latest URL and maps rows to posts.
+
+    `--max-scrolls 0` pins the no-loading path: the reply must name the
+    budget as the stop, and the wheel must never be sent.
+    """
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
     os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
     navs: list[tuple] = []
     real_nav, real_wait, real_extract = (browser.nav, dom.wait, dom.extract)
+    real_scroll = dom.scroll
 
     def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
         navs.append((url, tab))
@@ -5140,12 +5147,17 @@ def t_x_plugin_offline() -> None:
             {"label": "Latest", "selected": "true"},
             {"label": "Top", "selected": "false"}]}
 
+    def fake_scroll(**kwargs: object) -> dict:
+        raise AssertionError("--max-scrolls 0 must not wheel the page")
+
     browser.nav = fake_nav                        # type: ignore[assignment]
     dom.wait = fake_wait                          # type: ignore[assignment]
     dom.extract = fake_extract                    # type: ignore[assignment]
+    dom.scroll = fake_scroll                      # type: ignore[assignment]
     try:
         rc, out, err = run_cli(["x", "search", '"Pardon Snowden"',
-                                "--latest", "--cap", "5"])
+                                "--latest", "--cap", "5",
+                                "--max-scrolls", "0"])
         assert rc == 0, (rc, err)
         data = json.loads(out)
         assert data["sort"] == "latest", data
@@ -5156,6 +5168,11 @@ def t_x_plugin_offline() -> None:
             "time": "2026-09-20T07:37:24.000Z", "text": "first"}, data
         assert navs and "f=live" in navs[0][0], navs
         assert "Pardon%20Snowden" in navs[0][0], navs
+        assert data["loading"] == {"reads": 1, "scrolls": 0,
+                                   "max_scrolls": 0,
+                                   "stop": "max-scrolls"}, data
+        # the cap was not reached and loading was switched off: more may exist
+        assert data["truncated"] is True, data
         # the refusals are the CORE's readers now (`text_arg`, `int_arg`), so
         # their messages are the ones a built-in verb gives
         for argv, phrase in (
@@ -5167,7 +5184,11 @@ def t_x_plugin_offline() -> None:
                 (["x", "search", "q", "--chars", "0"],
                  "--chars must be at least 1, got 0"),
                 (["x", "search", "q", "--cap", "nope"],
-                 "--cap needs a number, got 'nope'")):
+                 "--cap needs a number, got 'nope'"),
+                (["x", "search", "q", "--max-scrolls", "-1"],
+                 "--max-scrolls must be 0 or more, got -1"),
+                (["x", "search", "q", "--max-scrolls", "nope"],
+                 "--max-scrolls needs a number, got 'nope'")):
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
             assert phrase in err, (argv, err)
@@ -5175,6 +5196,108 @@ def t_x_plugin_offline() -> None:
         browser.nav = real_nav                    # type: ignore[assignment]
         dom.wait = real_wait                      # type: ignore[assignment]
         dom.extract = real_extract                # type: ignore[assignment]
+        dom.scroll = real_scroll                  # type: ignore[assignment]
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_x_plugin_loads_more_on_scroll() -> None:
+    """`--cap` is a TARGET: the plugin wheels X's virtualized timeline.
+
+    Measured on a real search: X keeps 3–9 articles mounted and recycles the
+    rows as the timeline moves, so one extraction cannot answer a 20-post
+    request. The fake below replays exactly that shape — each read sees a
+    WINDOW of the result set, and windows overlap — and the plugin must wheel,
+    merge by post id, and stop for the RIGHT reason: `cap` when it has enough,
+    `exhausted` when two empty rounds (each with its retry read) say X stopped
+    yielding. The loop's cadence is recorded, not waited on: the sleeps are
+    not the subject here.
+    """
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    windows = [
+        [("101", "one"), ("102", "two")],
+        [("102", "two"), ("103", "three")],
+        [("103", "three"), ("104", "four"), ("105", "five")],
+        [("104", "four"), ("105", "five")],
+    ]
+    state = {"window": 0, "scrolls": [], "pauses": []}
+
+    def rows(window: list[tuple]) -> list[dict]:
+        return [{"text": text, "time": "2026-09-23T20:00:00.000Z",
+                 "url": f"/user{post_id[-1]}/status/{post_id}"}
+                for post_id, text in window]
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        state["window"] = 0               # a navigation loads a fresh page
+        return {"ok": True}
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 0.0,
+                  idle_ms: int = 0, tab: str = "", browser: str = "") -> dict:
+        return {"ok": True}
+
+    def fake_extract(each: str = "", fields: list | None = None, cap: int = 0,
+                     chars: int = 0, visible: bool = False, unique: str = "",
+                     tab: str = "", browser: str = "") -> dict:
+        if each == "article":
+            return {"ok": True, "truncated": False,
+                    "matches": rows(windows[state["window"]])}
+        return {"ok": True, "matches": [{"label": "Latest",
+                                          "selected": "true"}]}
+
+    def fake_scroll(by: int | None = None, edge: str | None = None,
+                    text: str | None = None, selector: str | None = None,
+                    index: int | None = None, at: str | None = None,
+                    tab: str = "", browser: str = "") -> dict:
+        state["scrolls"].append(by)
+        state["window"] = min(state["window"] + 1, len(windows) - 1)
+        return {"ok": True, "moved": True}
+
+    patched = {"nav": fake_nav, "wait": fake_wait, "extract": fake_extract,
+               "scroll": fake_scroll}
+    real = {name: getattr(plugin_api, name) for name in patched}
+    real_sleep = time.sleep
+    for name, fn in patched.items():
+        setattr(plugin_api, name, fn)
+    time.sleep = state["pauses"].append          # type: ignore[assignment]
+    try:
+        rc, out, err = run_cli(["x", "search", "q", "--latest",
+                                "--cap", "4"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        # the third window mounts two fresh posts at once, so the round that
+        # reaches the target overshoots it: the reply is still capped at 4
+        assert data["count"] == 4, data
+        assert [p["id"] for p in data["posts"]] == ["101", "102", "103",
+                                                    "104"], data
+        assert data["loading"] == {"reads": 3, "scrolls": 2,
+                                   "max_scrolls": 10, "stop": "cap"}, data
+        assert data["truncated"] is True, data     # more may sit below
+        assert len(state["pauses"]) == 2, state   # one cadence per wheel
+        # an exhausted timeline stops honestly, not at the budget
+        state["scrolls"].clear()
+        state["pauses"].clear()
+        rc, out, err = run_cli(["x", "search", "q", "--latest",
+                                "--cap", "10", "--max-scrolls", "4"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert data["count"] == 5, data
+        assert data["loading"] == {"reads": 7, "scrolls": 4,
+                                   "max_scrolls": 4,
+                                   "stop": "exhausted"}, data
+        assert data["truncated"] is False, data    # X said that was all
+        # 2 growth rounds + 2 empty rounds, each empty one with its retry read
+        assert len(state["pauses"]) == 6, state
+    finally:
+        time.sleep = real_sleep                  # type: ignore[assignment]
+        for name, fn in real.items():
+            setattr(plugin_api, name, fn)
         if keep is None:
             os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
         else:
@@ -6005,6 +6128,8 @@ def main() -> int:
         ("tab extract grammar", t_cli_extract_grammar),
         ("plugins load, dispatch and gate", t_plugin_system),
         ("x plugin maps records offline", t_x_plugin_offline),
+        ("x plugin wheels the timeline for --cap",
+         t_x_plugin_loads_more_on_scroll),
         ("google plugin types, never builds a query URL",
          t_google_plugin_offline),
         ("the plugin seam hands out the core readers",
