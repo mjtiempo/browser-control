@@ -1,10 +1,14 @@
-# Refusal codes (`ERR[code]`)
+# Refusal codes
 
-A refusal is data: `ERR[code]: message` on stderr, exit 2. Branch on `code`.
-The message names the cause and, when known, the fix. This is the complete
-vocabulary; `selftest` shows the policy in force.
+A refusal is data. `browser-control-cli` writes `ERR[code]: message` to
+stderr and exits 2; the message names the cause and, when known, the fix.
+Branch on `code` — it is a closed vocabulary, and every code the tool may
+speak is registered in `browser_control/lib/errors.py`.
 
-## Install / environment
+The codes below are grouped by cause. `selftest | jq .policy` shows the
+capability gate in force, and [Trust](trust.md) explains the classes.
+
+## Install and environment
 
 | code | meaning |
 | --- | --- |
@@ -34,7 +38,7 @@ vocabulary; `selftest` shows the policy in force.
 | `close-tab-not-verified` | the tab was still there after `tab close` |
 | `ambiguous-browser` | `--browser NAME` matched several — use a fuller name |
 
-## Tab / frame addressing
+## Tab and frame addressing
 
 | code | meaning |
 | --- | --- |
@@ -47,11 +51,11 @@ vocabulary; `selftest` shows the policy in force.
 | `no-viewport` | the page reports a zero viewport (windowless/never shown); nothing can be measured |
 | `no-viewport-target` | no target in the browser has a viewport |
 
-## Element / page resolution
+## Element and page resolution
 
 | code | meaning |
 | --- | --- |
-| `no-match` | nothing matched the TEXT/selector/spec — check with `tab text`/`tab find`; for `select`, the message lists the available option labels |
+| `no-match` | nothing matched the TEXT/selector/spec — check with `tab text`/`tab find`; for `select`, the available option labels are listed |
 | `ambiguous-element` | several elements match — add `--index N` or tighten the selector |
 | `ambiguous-option` | several `<option>`s match `--value` — use the exact value, not the label |
 | `not-checkable` | the target is not a checkbox/radio |

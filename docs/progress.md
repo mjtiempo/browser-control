@@ -22,7 +22,8 @@ it and puts one console script on PATH.
 | Path | Owns |
 | --- | --- |
 | `pyproject.toml` | distribution `browser-control`, console script, `websockets`, MIT (SPDX) + `license-files` |
-| `README.md` | the stranger's greeting: the stance, quickstart, the safety contract, capabilities |
+| `README.md` | the pitch and the manual index — the manual itself lives in `docs/` |
+| `docs/` | the manual: `getting-started.md`, `verbs.md`, `extraction.md`, `sessions.md`, `plugins.md`, `trust.md`, `refusals.md` (the reader-facing docs), plus `plan.md` (the design) and `progress.md` (the state of the work) |
 | `LICENSE` | MIT, `Copyright (c) 2026 Mark Tiempo` |
 | `browser-control-cli` | the command as a checkout script (no install needed) |
 | `browser_control/cli/` | the argv adapter: `main.py` (dispatch, the policy gate, the action log), `registry.py` (the `HANDLERS`/`tab`/`profile` tables, `POLICY`, `PLUGINS`), `argv.py`, `verbs/{browser,tab,profile}.py` |
@@ -35,6 +36,7 @@ it and puts one console script on PATH.
 | `tests/test_unit.py` | the hermetic battery — no browser needed |
 | `tests/live_test.py` | the live battery on a throwaway root — skip ≠ pass |
 | `plugins/x_reader.py` | the shipped read-only X search plugin |
+| `skills/` | Agent Skills for the harness: `browser-control` (core + refs), `browser-control-extract`, `browser-control-sessions`, `browser-control-plugins` |
 
 The surface is a noun and its verb: `tab` owns everything about a page tab,
 the other verbs own the browser.
