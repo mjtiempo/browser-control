@@ -16,9 +16,6 @@ from browser_control.lib import (
     browser as browser_lib,
 )
 from browser_control.lib import dom as _pkg
-from browser_control.lib.coerce import (
-    as_int,
-)
 from browser_control.lib.dom.keys import (
     KEYS,
     key_event,
@@ -37,6 +34,9 @@ from browser_control.lib.errors import (
     ERR_NO_FOCUS,
     ERR_TYPE_NOT_VERIFIED,
     fail,
+)
+from browser_control.lib.text import (
+    foreign,
 )
 
 TYPE_PAUSE_S = 0.008        # between keystrokes: the page's handlers need air
@@ -62,28 +62,77 @@ def _is_secret(probe: dict) -> bool:
     """Is the focused field a password (or one this page cannot tell us about)?
 
     Pure, so the policy is testable without a browser: unreadable, a frame, or
-    a `type=password` attribute all mean YES.
+    a `type=password` attribute all mean YES — and so does any focus the probe
+    reports as `secret` (it sets that for a value it cannot read, the same
+    fail-closed rule).
     """
     return bool(probe.get("secret") or probe.get("frame")
                 or probe.get("unreadable"))
 
+def _length_delta(before: dict, after: dict) -> int | None:
+    """How many characters the focused field gained, or None if unreadable."""
+    first, second = before.get("length"), after.get("length")
+    if isinstance(first, int) and isinstance(second, int):
+        return second - first
+    return None
+
 def _text_verdict(before: dict, after: dict, chars: int) -> Verdict:
     """(verified, why) for a text verb.
 
-    True  — the field is readable and its text grew: the text landed.
-    False — the field is readable and did NOT change: it did not land.
-    None  — the oracle cannot judge (a frame, a canvas, an unreadable value,
-            or a focus that moved): an unclear oracle is not proof of absence.
+    True  — the field is readable and its text grew by EVERY character asked
+            for: the text landed.
+    False — the probe PROVES there was nowhere for the text to go: this focus
+            takes no text at all (nothing, the body, or the document element
+            with nothing editable in it, is focused).
+    None  — the oracle cannot judge: a frame, a canvas, an unreadable value, a
+            focus that moved, a PARTIAL landing, a SHRINK that is not a
+            shortfall, or a length that did not move at all. An unclear oracle
+            is not proof of absence, and it is not proof of arrival either: a
+            field that took 2 of 10 characters (a `maxlength`, an input filter)
+            is exactly the overclaim this tri-state exists to prevent, so it is
+            reported as unclear and NAMED rather than certified (a review
+            measured `verified: true, chars: 10` on a `<input maxlength=4>`).
+
+    A length that did NOT change is not proof the text missed: `Input.insertText`
+    and per-character typing REPLACE the current selection, so a masked or
+    fixed-length field can take every character and end the same length, and a
+    SHRINK is text that landed OVER a selection — the old branch refused both
+    while saying "did not change" about a field that went from 5 to 3 (a review
+    measured it).
+
+    The ORDER is part of the answer. A focus that MOVED is judged first: a write
+    into a real field that then blurred to an empty focus may have landed, and
+    "the focus takes no text" would be a claim the probe cannot support. What
+    `False` means is narrower — the probe measured a focus that takes no text —
+    so it stays the one PROVEN no-op, which is why the refusal codes that name
+    it are still raised.
     """
-    if after.get("frame") or before.get("frame") \
-            or after.get("length") is None:
-        return Verdict(None, "the focused field is not readable from this document")
     if after.get("target") != before.get("target"):
         return Verdict(None, "the focus moved while the text was being written")
-    grew = as_int(after.get("length")) - as_int(before.get("length"))
-    if grew > 0:
+    if after.get("editable") is False or before.get("editable") is False:
+        return Verdict(False, "the focus takes no text — nothing, the body, or "
+                              "the document element with nothing editable in "
+                              "it is focused")
+    if after.get("frame") or before.get("frame") \
+            or after.get("length") is None:
+        return Verdict(None, "the focused element is not readable from this "
+                             "document (a frame, a canvas, or an element with "
+                             "no readable value)")
+    grew = _length_delta(before, after)
+    if grew is None:
+        return Verdict(None, "the focused element's text is not readable")
+    if grew >= chars:
         return Verdict(True, f"the field grew by {grew} character(s) for {chars}")
-    return Verdict(False, "the focused field did not change")
+    if grew > 0:
+        return Verdict(None,
+                       f"only {grew} of {chars} character(s) landed — the "
+                       "field may be capped (maxlength) or filtering input")
+    if grew < 0:
+        return Verdict(None,
+                       f"the field went from {before.get('length')} to "
+                       f"{after.get('length')} characters — the text may have "
+                       "REPLACED a selection; the oracle cannot tell")
+    return Verdict(None, "the length did not change")
 
 def press(key: str, tab: str = "", browser: str = "") -> dict:
     """`tab press`: one key event at the DOM focus (CDP `Input`).
@@ -115,28 +164,44 @@ def press(key: str, tab: str = "", browser: str = "") -> dict:
             "tab": f"id:{tab_row['id']}", "browser": browser_lib.brief(row)}
 
 def _preflight(session: cdp.Session, text: str, verb: str) -> dict:
-    """Refuse a text write with nowhere to go; mark a PROVEN secret.
+    """Refuse a text write with NOWHERE to go; mark a secret, or a focus we
+    cannot vouch for.
 
-    `Input.insertText` into no focus is a silent no-op, and a click target that
-    takes no text is the same trap one step further — both are refusals that
-    name the fix rather than writes nobody can see.
+    An EMPTY focus (nothing, the body, the document element) is the one place
+    the input provably lands nowhere, and that is what refuses. Every other
+    real focus takes it: a frame's active element, a canvas, or an element the
+    page drives with its own key handlers holds no readable `value`, and the
+    read-back says `verified: false` for exactly that (`length: null`) rather
+    than calling it "takes no text" — what cannot be read is the focus's TYPE,
+    and the secret rule below fails closed on it.
+
+    The probe's own `editable` is the second way in, and it is the PROBE's
+    answer, not this verb's: a document left editable as a whole (`designMode`,
+    or an editable `<body>`) focuses the body, so a probe that measured that
+    focus as editable is accepted even though its active element is the body.
+    Refusing it here would re-add the `no-focus` the probe is the authority on
+    (a review found the probe measuring an editable body and this verb refusing
+    it anyway).
     """
     before = _text_target(session)
-    if not before.get("focused"):
+    if not before.get("focused") and not before.get("editable"):
         fail(ERR_NO_FOCUS,
              f"{verb}: nothing is focused, so there is nowhere to put the text "
              "— run `tab focus TEXT` first")
-    if not before.get("editable"):
-        fail(ERR_NO_FOCUS,
-             f"{verb}: the focus is on {before.get('active')!r}, which takes "
-             "no text — run `tab focus TEXT` first")
     if _is_secret(before):
         audit.LOG.mark_secret(text)   # fail closed: a secret, or unreadable
     return before
 
 def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
                 text: str, rung: str) -> dict:
-    """The reply `insert` and `type` share, from the read-back verdict."""
+    """The reply `insert` and `type` share, from the read-back verdict.
+
+    `inserted` is the raw DELTA the field reported (None when the oracle could
+    not read a length at all): a PARTIAL landing, a SHRINK over a selection and
+    a length that did not move are all UNCLEAR verdicts, so this is how a caller
+    still sees what the field actually did. Only a verdict the probe PROVED
+    fails (`_text_verdict` says which), and it names the rung's own code.
+    """
     verified, why = _text_verdict(before, after, len(text))
     if verified is not None and not verified:
         # the rung names the code: both are REGISTERED in errors.CODES, so a
@@ -144,9 +209,10 @@ def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
         # vocabulary check)
         code = (ERR_INSERT_NOT_VERIFIED if rung == "insert"
                 else ERR_TYPE_NOT_VERIFIED)
-        fail(code, f"{why}: {before.get('active')!r} did not take the "
-                   f"{len(text)} character(s)")
+        fail(code, f"{why}: {foreign(before.get('active'), 60)!r} did not take "
+                   f"the {len(text)} character(s)")
     reply = {"ok": True, "verb": rung, "chars": len(text),
+             "inserted": _length_delta(before, after),
              "active": after.get("active") or before.get("active"),
              "verified": bool(verified),
              "length_before": before.get("length"),

@@ -27,6 +27,7 @@ from browser_control.lib import (
     plugins as plugins_lib,
     policy as policy_lib,
 )
+from browser_control.lib.argv import _head_of
 from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
@@ -151,9 +152,12 @@ def action_of(verb: str, rest: list[str], *,
 
     "" means "this call declares no action" — a subcommand nobody has — and the
     gate then stays out of the way, so the caller sees the verb's own
-    `bad-args` rather than `not-allowed` for a typo.
+    `bad-args` rather than `not-allowed` for a typo. The head is read by
+    `lib.argv._head_of`, the same reader the dispatcher uses: a leading bare
+    `--` means everything after it is positional, so `tab -- list` is the URL
+    path (`tab`), not the `tab list` subcommand.
     """
-    head = str(rest[0]) if rest else ""
+    head = _head_of(rest)
     if verb == "tab":
         if head not in tab_subcommands:
             return verb              # a URL: the URL path, which is `tab`

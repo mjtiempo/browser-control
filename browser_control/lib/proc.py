@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import os
+import stat
 import subprocess
 
 from browser_control.lib.errors import (
@@ -38,6 +39,10 @@ BROWSER_EXES = ("chrome", "chromium", "chromium-browser", "google-chrome",
 # exists for nothing else, so a row for one of these reports `headless: true`
 # however its command line is spelled.
 HEADLESS_EXES = ("chrome-headless-shell", "headless_shell")
+
+# A pid record is ONE small decimal number (`record_pid` writes nothing else),
+# so anything bigger at that path is not this CLI's record.
+PID_FILE_CAP = 64
 
 __all__ = ["BROWSER_EXES", "HEADLESS_EXES", "cmdline_value", "exe_name",
            "exe_path", "find_pid", "is_headless_cmd", "listener_of",
@@ -215,6 +220,34 @@ def pid_on_profile(pid: int, profile: str) -> bool:
                for found, _exe, cmd in main_processes())
 
 
+def _small_file(path: str, cap: int) -> bytes:
+    """At most `cap` bytes of a REGULAR file this process did not write.
+
+    The same rule `cdp.endpoint` applies to `DevToolsActivePort`, spelled here
+    because the two readers sit in different layers (a transport module and
+    the process module must not import each other) and a pid file is chosen by
+    whoever wrote the profile. `O_NOFOLLOW` refuses a symlink, `O_NONBLOCK`
+    keeps a reader-less FIFO from blocking the OPEN — `open()` on one waits for
+    a writer, before any read — and the `fstat` refuses anything that is not a
+    small regular file. `b""` is "no record", which is what the caller wants;
+    a refusal would turn a degraded `close` into an error.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return b""
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > cap:
+            return b""
+        return os.read(fd, cap)
+    except OSError:
+        return b""
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 def pid_of(profile: str) -> int:
     """The pid recorded for this profile, or the one running on it now.
 
@@ -222,12 +255,16 @@ def pid_of(profile: str) -> int:
     profile's browser: the record is a hint, and a stale one plus a recycled
     pid would otherwise aim `stop` at an unrelated process. `find_pid` is the
     fallback, and it refuses to hand back a renderer or a stranger.
+
+    The record is read like any file another process may have written
+    (`_small_file`): a FIFO, a symlink or a device at the pid path is "no
+    record", not a hung CLI — the profile directory is exactly the place a
+    stranger can plant one.
     """
-    pid = 0
+    raw = _small_file(pid_file(profile), PID_FILE_CAP)
     try:
-        with open(pid_file(profile)) as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
+        pid = int(raw.strip())
+    except ValueError:
         pid = 0
     if pid and pid_alive(pid) and pid_on_profile(pid, profile):
         return pid

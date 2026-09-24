@@ -10,9 +10,15 @@ file inside the wiped tree was deleted mid-hold and re-created by the next
 `open` as a fresh inode — mutual exclusion was believed, not held.
 
 Contention is waited on and then refused `profile-busy` (naming the pid and
-verb the holder wrote); a filesystem that cannot lock at all comes back as a
-warning the caller REPORTS, never a silent no-op. The ordering invariant lives
-in `instance_locks`, not in a comment: root lock, then profile lock.
+verb the holder wrote). A lock that cannot be TAKEN at all — the path cannot be
+opened (a directory or a symlink planted there, a permission the caller does
+not have), or the filesystem cannot `flock` (ENOLCK) — is refused
+`profile-unusable`, naming the path and the OS error. It is never a warning the
+caller runs through: a guard whose failure mode is "proceed anyway" is no guard,
+and two `open`s on one profile is the corruption this module exists to prevent
+(a review measured the fail-open: a lock path pre-created as a directory, or a
+filesystem without `flock`, let both callers through). The ordering invariant
+lives in `instance_locks`, not in a comment: root lock, then profile lock.
 """
 from __future__ import annotations
 
@@ -26,6 +32,7 @@ from typing import Any
 
 from browser_control.lib.errors import (
     ERR_PROFILE_BUSY,
+    ERR_PROFILE_UNUSABLE,
     fail,
 )
 from browser_control.lib.paths import (
@@ -39,7 +46,15 @@ __all__ = ["LOCK_WAIT_S", "LockState", "instance_locks", "profile_lock"]
 
 @dataclass
 class LockState:
-    """What one flock attempt produced: held, or a warning to report."""
+    """What one flock produced: held, with at most a warning to report.
+
+    Every state this module YIELDS is `held: True`: a lock that cannot be taken
+    refuses (see `profile_lock`) instead of coming back `held: False`, so no
+    caller can read "not held" as "proceed". `warning` stays for the one
+    held-but-imperfect case — a holder line that could not be written, so a
+    later contention refusal has to say "no details" — and for the callers that
+    already read it.
+    """
 
     held: bool
     warning: str = ""
@@ -66,21 +81,32 @@ def _lock_holder(handle: Any) -> str:
     return f"pid {parts[0]} since {stamp}{verb}"
 
 
-def _hold(handle: Any, verb: str) -> None:
-    """Say who holds it, and since when, so a refusal can name them."""
-    with contextlib.suppress(OSError):
+def _hold(handle: Any, path: str, verb: str) -> str:
+    """Say who holds it, and since when, so a refusal can name them.
+
+    Returns "" when the holder line is written, or a warning when it is not.
+    The lock IS held either way — mutual exclusion does not depend on the
+    file's contents — so a write that fails here is reported, never raised; the
+    cost is that a later contention refusal can only say "no details", which is
+    what the caller is told now.
+    """
+    try:
         handle.seek(0)
         handle.truncate()
         handle.write(f"{os.getpid()}\t{time.strftime('%Y-%m-%dT%H:%M:%S')}\t"
                      f"{verb}\n")
         handle.flush()
+    except OSError as e:
+        return (f"{path} is held by this call, but its holder line could not "
+                f"be written ({e})")
+    return ""
 
 
 def _contention(error: OSError) -> bool:
     """Is that flock failure someone else holding the lock?
 
     The difference decides what happens next: contention is worth waiting for,
-    while a filesystem that cannot lock at all has to be reported instead.
+    while a filesystem that cannot lock at all is refused `profile-unusable`.
     """
     return error.errno in (errno.EACCES, errno.EAGAIN)
 
@@ -99,16 +125,16 @@ def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
     """Take the lock, or say why not: "" when taken, else a warning.
 
     Contention is waited on and then refused `profile-busy` (naming the pid
-    and verb the holder wrote); a filesystem that cannot lock at all comes back
-    as a warning, which the caller REPORTS rather than failing the verb — a
-    guard that silently does nothing would be worse than none.
+    and verb the holder wrote). Anything else is a lock the filesystem will not
+    GIVE — `flock` on a filesystem without it answers ENOLCK/ENOTSUP — and that
+    refuses `profile-unusable`: it used to come back as a warning the caller
+    reported while it ran UNLOCKED, which is the one outcome a lock exists to
+    prevent. The warning returned here is `_hold`'s: held, holder line missing.
     """
     deadline = time.monotonic() + wait
     while True:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            _hold(handle, verb)
-            return ""
         except OSError as e:
             if _contention(e):
                 if _expired(deadline):
@@ -119,16 +145,25 @@ def _acquire(handle: Any, path: str, verb: str, wait: float) -> str:
                          "Wait for that call, then run this again")
                 time.sleep(0.15)
                 continue
-            return f"{path} cannot be locked ({e})"
+            fail(ERR_PROFILE_UNUSABLE,
+                 f"{path} cannot be locked ({e}) — this filesystem will not "
+                 "hold the profile lock, so nothing was opened, closed, "
+                 "seeded or wiped here")
+        return _hold(handle, path, verb)
 
 
 @contextlib.contextmanager
 def profile_lock(path: str, verb: str, wait: float = LOCK_WAIT_S):  # noqa: ANN201
-    """Hold `path` while a check-then-act runs, or refuse `profile-busy`.
+    """Hold `path` while a check-then-act runs, or REFUSE — never fail open.
 
-    Yields `LockState`: `held: False` is the filesystem-cannot-lock case,
-    which the caller proceeds through and reports. Contention never reaches
-    the caller as a warning — it waits, then refuses.
+    Yields `LockState(held=True)`, carrying a warning only when the holder line
+    could not be written. Everything else refuses: contention after the wait is
+    `profile-busy` (naming the holder), and a lock that cannot be opened or
+    taken at all is `profile-unusable`, naming this path and the OS error and
+    saying the profile cannot be locked. `held: False` is never yielded: the
+    caller that proceeded through it ran its check-then-act unlocked, so a lock
+    path pre-created as a directory or symlink, or a filesystem without
+    `flock`, put two browsers on one profile (a review measured it).
 
     `flock` rather than an `O_EXCL` file precisely for the stale case: the
     kernel drops it when the holder exits, crashes or is killed, so there is
@@ -149,12 +184,14 @@ def profile_lock(path: str, verb: str, wait: float = LOCK_WAIT_S):  # noqa: ANN2
             if fd >= 0:
                 with contextlib.suppress(OSError):
                     os.close(fd)
-            yield LockState(held=False,
-                            warning=f"could not open a lock at {path}: {e}")
-            return
+            fail(ERR_PROFILE_UNUSABLE,
+                 f"cannot open a lock at {path} ({e}) — the profile cannot be "
+                 "locked, so this call refuses instead of running without a "
+                 "lock; remove whatever is in the way (a directory or a symlink "
+                 "at that path), or use a filesystem that can hold a lock")
         warning = _acquire(handle, path, verb, wait)
         try:
-            yield LockState(held=not warning, warning=warning)
+            yield LockState(held=True, warning=warning)
         finally:
             with contextlib.suppress(OSError):
                 fcntl.flock(handle, fcntl.LOCK_UN)

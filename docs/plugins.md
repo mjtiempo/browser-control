@@ -7,6 +7,19 @@ holds. Plugins are Python files loaded from `BROWSER_CONTROL_PLUGIN_PATH`
 `~/.local/share/browser-control/plugins/`. `selftest` lists what loaded and
 what did not; `--help` appends their usage lines.
 
+Every entry on that path must be an **absolute** path (or start with `~`). A
+relative entry is REFUSED and reported in `selftest`'s `plugin_errors` — it
+would import from whatever the current directory happens to hold, with the
+CLI's own credentials and its access to the browser, so `plugins` in a shell rc
+would run an untrusted tree's code on every invocation:
+
+```console
+$ BROWSER_CONTROL_PLUGIN_PATH=plugins browser-control-cli selftest \
+    | jq '.plugin_errors'
+["plugins: a RELATIVE plugin directory is refused — 'plugins' would import
+  from '/wherever/you/are/plugins', …; name an absolute path or `~/…`"]
+```
+
 ```bash
 BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli selftest \
   | jq '{plugins, plugin_errors}'
@@ -66,10 +79,16 @@ $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
   really swap, and merges what comes back by URL. `--max-pages N` (default 3,
   max 10) bounds the paging; the `loading` block reports `pages`, `clicks` and
   the `stop` cause (`cap`, `no-next`, `max-pages`, `no-growth`,
-  `click-failed`), and every result carries the 1-based `page` it came from.
+  `click-failed`, `wait-failed`), and every result carries the 1-based `page`
+  it came from. Only a `wait-timeout` from the Next control is read as "there
+  is no next page" (`stop: "no-next"`); any other refusal stops the paging as
+  `wait-failed`, names it in `loading.wait_error`, and sets `truncated` —
+  a closed tab was never the end of the list.
 - The selector map is ordered candidates: the first the page renders is the
   one extraction runs with, and `selectors` names it — so a zero-result reply
   distinguishes a DOM change (`matched: false`) from a page that showed none.
+  `selectors.next`/`next_matched` answer the same question about the
+  pagination control.
 - `landed_on` is the FIRST `/search?q=…` address the SITE put in the bar after
   the submit — the query went into the page's own field first, which is what a
   person does and what a site's handlers see.
@@ -98,9 +117,20 @@ $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
 - A page whose words are inside a single **same-process** frame is read from
   that frame's document and the record NAMES it (`read_frame`), rather than
   reporting a page that plainly has words as empty; the page's own `frames`
-  census rides along either way.
+  census rides along either way. That read is automatic — no `--frame` needed.
+- The action declares `"frames": True`, so the global `--frame` applies to it
+  as it does to the content verbs (`page read URL --frame 0`); the reply then
+  carries `frame`/`frame_resolved`, and the verb saves and restores the scope
+  around its own single-frame read instead of clearing the caller's.
+- `--chars`/`--timeout` given an EMPTY value are refused (`needs a number`),
+  like every other value-carrying flag in the tool, and an empty URL is passed
+  to the url policy rather than dropped from the list.
 - The browser must be running with a drivable tab: `open --headless URL` first
   (or `attach` to your own).
+
+Both shipped site verbs declare `egress` as well as `read`/`write`: they hand
+URLs to the browser, so `--deny egress` refuses them. The class vocabulary and
+the rest of the gate are in [Trust](trust.md).
 
 ## Writing one
 

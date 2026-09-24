@@ -6,6 +6,7 @@ answer; nothing here changes the page.
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any
 
@@ -16,6 +17,12 @@ from browser_control.lib import (
     cdp,
 )
 from browser_control.lib import dom as _pkg
+from browser_control.lib.browser.machine import (
+    row_port,
+)
+from browser_control.lib.cdp.rpc import (
+    UNDEFINED,
+)
 from browser_control.lib.coerce import (
     as_int,
     as_ints,
@@ -39,6 +46,9 @@ from browser_control.lib.errors import (
     ERR_WAIT_TIMEOUT,
     fail,
 )
+from browser_control.lib.text import (
+    foreign,
+)
 
 TEXT_CAP = 40_000           # chars `text` returns (the PAGE truncates)
 
@@ -55,11 +65,45 @@ EXTRACT_CAP = 10            # records `extract` returns by default
 
 EXTRACT_MAX_MATCHES = 500   # and the most it will return at all
 
+#: The most `--field` flags ONE extraction may name. Every field is a selector
+#: walk per record, and a record's JSON is `#fields × --chars`, so an unbounded
+#: field list is an unbounded row — one that used to ride over the whole-reply
+#: budget and blow the CDP transport cap (a review found it). 32 is far past
+#: any table this verb is for.
+EXTRACT_MAX_FIELDS = 32
+
 EXTRACT_FIELD_CHARS = 1_000  # chars kept of ONE field (sliced IN the page)
 
 EXTRACT_FIELD_MAX = 20_000  # and the most one field may keep
 
 EXTRACT_TOTAL_CHARS = 20_000  # field text across the whole reply, page-side
+
+#: THE TRANSPORT RULE this module's reads follow: an expression that bounds its
+#: OWN answer IN THE PAGE — `--cap`, `--chars`, the extraction budget, and the
+#: reply-base fields a page supplies (`title`/`url`, sliced in the page by
+#: `scripts.py`) — is evaluated with `cap=None`. `None` is the one spelling of
+#: "no post-transfer size refusal", and it is what the page-bounded reads need:
+#: JSON escaping inflates the wire value far past the text the page produced
+#: (`\uXXXX` is six wire characters for one character of text), so the finite
+#: cap refused `result-too-large` over an expression the caller never wrote (a
+#: review measured a 2 MB `document.title` riding out through the reply base
+#: once the cap was lifted without the page-side slice).
+#:
+#: Every read that is NOT page-bounded keeps the transport's default 64 k cap:
+#: `tab js` is the caller's OWN expression, and a probe's answer is the page's,
+#: so for those the size refusal is the only thing between a page and this
+#: tool's reply (`rpc.TRANSPORT_CAP`, 16 MiB, is the backstop under both).
+#: The rule is applied at every call site below, and at `upload`'s candidate
+#: scan in `actions.py` — one rule, not a judgement per verb.
+#:
+#: What the page's bound actually covers: the reply base (`title` ≤ 300, `url`
+#: ≤ 2000, sliced by `scripts.py`) and every field an expression slices
+#: (`--chars`, a row's text, the extraction budget). A match ROW still carries
+#: the page's own attributes (`href`, `aria-label`) and `describe()`'s `#id`,
+#: so a page with megabyte-long attributes can still make a large reply — the
+#: 16 MiB frame cap is what refuses that, and slicing those fields belongs to
+#: `scripts.py`, not here.
+PAGE_BOUNDED_CAP = None
 
 WAIT_POLL_S = 0.4           # how often a `wait` samples
 
@@ -85,18 +129,27 @@ def _query_args(text: str | None, selector: str | None,
     return needle, css
 
 def _matches_in(session: cdp.Session, needle: str, css: str, cap: int) -> dict:
-    """The page's answer to the shared matcher (see `FIND_EXPR`)."""
+    """The page's answer to the shared matcher (see `FIND_EXPR`).
+
+    `PAGE_BOUNDED_CAP` on the way out (the transport rule above): every caller
+    of this matcher bounds the reply IN THE PAGE — `__CAP__` caps the rows, and
+    the reply base's `title`/`url` are sliced there too — so the transport's
+    post-transfer size refusal has nothing left to catch: it only fired when
+    JSON escaping inflated a page-capped answer, refusing `result-too-large`
+    over an expression the caller never wrote (a review found it).
+    """
     expression = fill(
         FIND_EXPR, mode=json.dumps("selector" if css else "text"),
         needle=json.dumps(needle.lower()), selector=json.dumps(css),
         cap=str(cap))
-    data = session.evaluate(expression)
+    data = session.evaluate(expression, cap=PAGE_BOUNDED_CAP)
     if not isinstance(data, dict):
         fail(ERR_CDP_ERROR, "the page did not answer with an object")
     return data
 
 def _pick(data: dict, needle: str, css: str, index: int | None,
-          row: dict | None = None, tab_row: dict | None = None) -> dict:
+          row: dict | None = None, tab_row: dict | None = None,
+          rendered: bool = True) -> dict:
     """The ONE element a click or a reveal acts on.
 
     Several matches is not a choice this tool makes for the caller: it refuses
@@ -105,6 +158,12 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
     exactly the claim that must not be made loosely. The caller passes the
     resolution it already holds, and the census runs only when a refusal is
     actually being built.
+
+    `rendered` says whether the SCAN behind `data` filtered for what the page
+    actually draws: the shared matcher does, `upload`'s candidate scan does not
+    (a hidden file input is the normal case), so the no-match sentence must not
+    claim a filter that was never applied (a review found the claim on a scan
+    that has none).
     """
     rows = _pkg._well_formed(data.get("matches") or [], ("tag", "box", "point"))
     if not rows:
@@ -112,9 +171,11 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
         hint = (f" — {offscreen} candidate(s) are rendered but NOT in the "
                 "viewport: `tab scroll TEXT` brings one into view"
                 if offscreen else "")
+        what = ("no rendered element matches" if rendered
+                else "no element matches")
         fail(ERR_NO_MATCH,
-             f"no rendered element matches {needle or css!r} on "
-             f"{str(data.get('title'))!r}{hint}"
+             f"{what} {needle or css!r} on "
+             f"{foreign(data.get('title'), 60)!r}{hint}"
              + _pkg._frames_note(row, tab_row))
     if index is None:
         if len(rows) > 1:
@@ -126,6 +187,22 @@ def _pick(data: dict, needle: str, css: str, index: int | None,
                  + _pkg._frames_note(row, tab_row))
         index = 0
     if not 0 <= index < len(rows):
+        # say how many the page HAS as well as how many this scan resolved: a
+        # count that contradicts what `tab find --cap` just printed is how a
+        # caller was told "10 element(s) match" about a 50-match page (a review
+        # flagged it), and a capped scan must not read as "there is no more".
+        # The wording stays VERB-NEUTRAL — "N element(s)", never "N rendered
+        # element(s)" and never a claim about the viewport: `upload` picks
+        # through `CANDIDATES_EXPR`, whose scan has no rendered/visibility
+        # filter at all, so a message promising one described a filter that was
+        # never applied (a review found it)
+        total = as_int(data.get("total"), len(rows))
+        if total > len(rows):
+            fail(ERR_BAD_ARGS,
+                 f"--index {index} is out of range: this scan resolved "
+                 f"{len(rows)} element(s) of the {total} that match "
+                 f"(cap {as_int(data.get('cap'), len(rows))}) — narrow the "
+                 "selector to name one")
         fail(ERR_BAD_ARGS,
              f"--index {index} is out of range: {len(rows)} element(s) match")
     return rows[index]
@@ -176,6 +253,16 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
     an object or array expression itself, so `({a: 1})` answers an object
     while `JSON.stringify({a: 1})` answers its string (a review measured the
     ambiguity: `localStorage.getItem('k')` holding "null" answered null).
+
+    This read is NOT page-bounded — the expression is the caller's own and the
+    page was never asked to bound its answer — so it keeps the transport's
+    default cap (the rule is stated with `PAGE_BOUNDED_CAP` above). The page's
+    `undefined` is its OWN value and is reported as such: `rpc._value_of`
+    answers the `UNDEFINED` sentinel for it, and a sentinel that is not JSON
+    would break the one-object reply, so it rides as `value: null` PLUS
+    `value_type: "undefined"` — every other value keeps today's exact shape
+    (`{"value": value}`), and `null` stays `{"value": null}` (a review found
+    the two indistinguishable).
     """
     expr = str(expression or "").strip()
     if not expr:
@@ -184,9 +271,39 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
         value = session.evaluate(expr, raw=True)
-    return {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
-            "verified": False, "note": "evaluated, not interpreted",
-            "browser": browser_lib.brief(row)}
+    reply = {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
+             "verified": False, "note": "evaluated, not interpreted",
+             "browser": browser_lib.brief(row)}
+    if value is UNDEFINED:
+        reply["value"] = None
+        reply["value_type"] = "undefined"
+    return reply
+
+def _idle_window(value: object) -> int:
+    """`--idle-ms` as a window of whole milliseconds, judged as the CALLER
+    spelled it.
+
+    The window is validated BEFORE `as_int`, which truncates toward zero:
+    `-0.5` and `-1e-9` became 0, and the idle predicate is `now - responseEnd <
+    __IDLE_MS__` — a negative window is never true, so `--for idle` passed on
+    its FIRST sample over a page that was still loading (a review found it);
+    a non-numeric value quietly became the 500 ms default instead of a
+    refusal. `0` is a real window ("no quiet period at all") and stays valid.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        fail(ERR_BAD_ARGS, _idle_offence(value))
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        fail(ERR_BAD_ARGS, _idle_offence(value))
+    if not math.isfinite(number) or number < 0:
+        fail(ERR_BAD_ARGS, _idle_offence(value))
+    return int(number)
+
+def _idle_offence(value: object) -> str:
+    """The one refusal `_idle_window` makes, naming the caller's own value."""
+    return ("tab wait: --idle-ms is a window in milliseconds, so it must be a "
+            f"number 0 or more, got {foreign(value, 60)!r}")
 
 def wait(mode: str, selector: str | None = None, expr: str | None = None,
          timeout: float = WAIT_DEFAULT_S, idle_ms: int = IDLE_DEFAULT_MS,
@@ -218,6 +335,10 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     if not 0 < seconds < 3600 or seconds != seconds:
         fail(ERR_BAD_ARGS,
              f"tab wait: --timeout must be finite and positive, got {timeout!r}")
+    # a NEGATIVE idle window INVERTS the predicate (`now - ended < -N` is never
+    # true, so `--for idle` passed on its first sample), which is the opposite
+    # of what the caller asked for — a refusal, never a silent meaning
+    idle = _idle_window(idle_ms)
     row, tab_row = _pkg._resolve(tab, browser, for_write=(name == "js"))
     profile, target_id = str(row["profile"]), str(tab_row["id"])
     template = WAIT_EXPRS[name]
@@ -227,11 +348,16 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     if "__EXPR__" in template:
         values["expr"] = str(expr or "false")
     if "__IDLE_MS__" in template:
-        values["idle_ms"] = str(as_int(idle_ms, IDLE_DEFAULT_MS))
+        values["idle_ms"] = str(idle)
     expression = fill(template, **values)
-    started = time.time()
+    # MONOTONIC, like the deadline it is measured against: a wall-clock step
+    # mid-wait made `waited_s` disagree with the budget that was enforced
+    # (`lib/poll.py` documents why the deadline is monotonic — a review found
+    # this reply still reading `time.time()`)
+    started = time.monotonic()
     value, samples = cdp.evaluate_until(
-        _pkg._document_ws(cdp.port_of(profile), target_id), expression, bool,
+        _pkg._document_ws(row_port(row) or as_int(cdp.port_of(profile)),
+                          target_id), expression, bool,
         seconds, WAIT_POLL_S)
     if value == "thenable":
         # measured: `Boolean(promise)` is TRUE the moment the promise is made,
@@ -248,7 +374,8 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
              f"tab wait --for {name}"
              + (f" {what!r}" if what else "")
              + f" did not pass within {seconds:g}s ({samples} samples)")
-    return {"ok": True, "for": name, "waited_s": round(time.time() - started, 1),
+    return {"ok": True, "for": name,
+            "waited_s": round(time.monotonic() - started, 1),
             "samples": samples, "tab": f"id:{target_id}",
             "browser": browser_lib.brief(row)}
 
@@ -295,6 +422,11 @@ def _extract_schema(each: str, fields: list[str], cap: int = EXTRACT_CAP,
              "item (e.g. --each article)")
     if not fields:
         fail(ERR_BAD_ARGS, f"{verb}: at least one --field NAME=SPEC is required")
+    if len(fields) > EXTRACT_MAX_FIELDS:
+        fail(ERR_BAD_ARGS,
+             f"{verb}: {len(fields)} --field flags is more than this verb "
+             f"takes (max {EXTRACT_MAX_FIELDS}) — one record carries every "
+             "field, so the row is `fields × --chars`")
     parsed: dict[str, dict] = {}
     for spec in fields:
         name, field = _extract_field(spec, verb)
@@ -358,8 +490,14 @@ def extract(each: str = "", fields: list[str] | None = None,
     page = _pkg.Tab.open(tab, browser, for_write=False, same_process=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
+        # `PAGE_BOUNDED_CAP` (the transport rule above): the whole reply is
+        # budgeted IN THE PAGE (`--chars`, the schema's `budget`, and the
+        # reply base's `url`/`title`, sliced by `scripts.py`), so the
+        # transport's size refusal has nothing to add — it only fired when
+        # JSON escaping inflated a page-bounded answer (a review found it)
         data = session.evaluate(
-            fill(EXTRACT_EXPR, schema=json.dumps(schema), root=page.root()))
+            fill(EXTRACT_EXPR, schema=json.dumps(schema), root=page.root()),
+            cap=PAGE_BOUNDED_CAP)
         # the frame census rides the session already open, exactly as find and
         # text attach it: without it a framed page answered `count: 0` with no
         # hint, the one shape that reads as "there is nothing there" (a review
@@ -420,9 +558,13 @@ def find(text: str | None = None, selector: str | None = None,
                                      ("tag", "box"))]
     if not matches:
         offscreen = as_int(data.get("offscreen"))
+        # the page's own words ride into the refusal, so they are flattened and
+        # capped like every sibling: a 2 MB `document.title` made a 2 000 000
+        # character stderr line (a review found it)
         fail(ERR_NO_MATCH,
              f"no rendered element matches {needle or css!r} on "
-             f"{str(data.get('title'))!r} (readyState {data.get('ready')!r}, "
+             f"{foreign(data.get('title'), 60)!r} (readyState "
+             f"{foreign(data.get('ready'), 20)!r}, "
              f"{as_int(data.get('total'))} candidate(s)"
              + (f", {offscreen} offscreen" if offscreen else "") + ")"
              + _pkg._frames_note(row, tab_row))
@@ -452,9 +594,13 @@ def text(selector: str | None = None, chars: int = TEXT_CAP, tab: str = "",
     page = _pkg.Tab.open(tab, browser, for_write=False, same_process=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
+        # `PAGE_BOUNDED_CAP` (the transport rule above): `--chars` truncates IN
+        # THE PAGE and so does the reply base's `title`, so the reply is
+        # already bounded by the caller's own number — the transport cap only
+        # refused pages whose text is escape-dense (a review found it)
         data = session.evaluate(
             fill(TEXT_EXPR, selector=json.dumps(css), cap=str(limit),
-                 root=page.root()))
+                 root=page.root()), cap=PAGE_BOUNDED_CAP)
         frames_here = _pkg._frame_summary(row, tab_row, session)
     if not isinstance(data, dict):
         fail(ERR_CDP_ERROR, "tab text: the page did not answer with an object")

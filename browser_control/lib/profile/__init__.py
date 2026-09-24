@@ -22,10 +22,15 @@ Three rules, and they are the reason this is not one `shutil.copytree` call:
    is refused `not-managed`: reading a source profile is a copy, but *wiping*
    something outside the root would be destroying somebody's real browser. The
    root is the boundary, exactly as it is for writes.
-3. **What landed is read back.** Every file the source has (minus the skips) is
-   checked for in the target, by size; a mismatch refuses `seed-not-verified`
-   instead of reporting a login that is not there. `--dry` counts first, so the
-   caller can see the weight before agreeing to it with `--force`.
+3. **What landed is read back.** Every file the copy walked is checked for in
+   the target against the size it was COPIED at — the walk's manifest, never a
+   fresh stat of a source that may be a running browser rewriting it; a
+   mismatch refuses `seed-not-verified` instead of reporting a login that is
+   not there, and a source file whose size moved under the copy is the reported
+   fact `changed`. A store that is a symlink, or that resolves outside this
+   CLI's root, is reported rather than read. `--dry` counts first and says
+   `would_refuse`, so the caller can see the weight — and what the real call
+   would do — before agreeing to it with `--force`.
 
 Seeding copies between profiles OF THE SAME MACHINE AND USER, which is what
 makes it work at all: Chrome encrypts cookies and passwords with a key the OS
@@ -62,6 +67,7 @@ from browser_control.lib.profile.seed import (  # noqa: F401
 from browser_control.lib.profile.stores import (  # noqa: F401
     DEFAULT_SITES,
     logins,
+    profile_links,
 )
 from browser_control.lib.profile.trees import (
     _tree,
@@ -79,6 +85,13 @@ def info(profile: str = "") -> dict:
     the name `open` keys it by. A scoped path outside the root is refused
     `not-managed` rather than walked: an unbounded walk of a caller-named tree
     was a review finding, and the verb is about the profiles this CLI manages.
+
+    Every SYMLINK at the top of the profile rides in `links` (name, path, what
+    it resolves to, the store markers behind it): the walk counts links and
+    weighs nothing behind them, so a `Default` that is a link to a store-bearing
+    directory reported as "0 files, 0 bytes" — a census that cannot tell a
+    planted link from an empty profile. Nothing behind a link is read or named;
+    the fact that it is there is the finding.
     """
     wanted = str(profile or "").strip() or scope()
     if wanted:
@@ -99,6 +112,7 @@ def info(profile: str = "") -> dict:
             "attached": inst.attached,
             "bytes": facts["bytes"],
             "files": facts["files"],
+            "links": profile_links(path),
             "modified": (time.strftime(
                 "%Y-%m-%dT%H:%M:%S",
                 time.localtime(os.path.getmtime(path)))

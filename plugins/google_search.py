@@ -19,13 +19,23 @@ fewer, the plugin clicks the site's own Next control — the control a person
 clicks, never a `&start=` URL — waits for the render to really swap, and merges
 what comes back, by URL, until `--cap` results are read, no Next control is
 left, the `--max-pages` budget runs out, or a click fails to move the page.
-The reply's `loading` block says which of those stopped it.
+The reply's `loading` block says which of those stopped it (`cap`, `max-pages`,
+`no-next`, `no-growth`, `click-failed`), and `loading.wait_error` is the refusal
+that stopped a page turn for a reason that is NOT "there is no next page" (a
+tab that closed, a browser that went away — `stop: "wait-failed"`); either of
+the last three sets `truncated`, because the list is then not all there was.
+
+Absence and failure are different answers: only `wait-timeout` — the refusal
+`dom.wait` raises when a predicate never became true — is read as "the control
+is not there". Every other refusal is re-raised or recorded, never folded into
+`no-next`: a closed tab used to be reported as the honest end of the list.
 
 The selector map below is the part that breaks when Google's DOM changes, so it
 is kept in one place at the top — as ORDERED candidates: the first selector the
 page renders is the one extraction runs with, and the reply's `selectors` block
 names it. A zero-result reply can therefore say whether the map found nothing
-(`matched: false`) or the page really showed none.
+(`matched: false`) or the page really showed none, and `next`/`next_matched`
+answer the same question about the pagination control.
 
 Install: copy this file into ``~/.local/share/browser-control/plugins/`` (or
 any directory in ``BROWSER_CONTROL_PLUGIN_PATH``).
@@ -89,23 +99,45 @@ def _delay(wpm: int) -> float:
     return 12.0 / wpm
 
 
+def _wait_element(selector: str, timeout: float, tab: str,
+                  browser: str) -> bool:
+    """Did the page render `selector` within `timeout` seconds?
+
+    ONLY `wait-timeout` may answer "no": that is the refusal `dom.wait` raises
+    when the predicate never became true. Every other refusal — a tab that was
+    closed, a browser that went away, a malformed selector — is RE-RAISED,
+    because reading those as "the page has nothing there" is how a pagination
+    failure used to be reported as the honest end of the list.
+    """
+    try:
+        plugin_api.wait("element", selector=selector, timeout=timeout,
+                        tab=tab, browser=browser)
+    except ControlError as e:
+        if e.code != errors.ERR_WAIT_TIMEOUT:
+            raise
+        return False
+    return True
+
+
 def _rendered(candidates: tuple[str, ...], full_s: float, probe_s: float,
-              tab: str, browser: str) -> str:
-    """The FIRST candidate the page renders — `""` when none of them do.
+              tab: str, browser: str) -> tuple[str, bool]:
+    """`(selector, matched)` — the FIRST candidate the page renders.
 
     Ordered means ordered: the caller extracts with the ONE selector this
     returns, never a merged pool (a CSS comma list is a document-order union,
     not a fallback chain). The first candidate gets the full deadline — the
     ordinary, slow-render path — and a fallback gets `probe_s`, because by the
     time the page has missed the first, the rest of that budget is spent.
+
+    `("", False)` means NONE of them rendered in time — a genuine absence, the
+    only thing a timeout proves. Any other refusal propagates (`_wait_element`),
+    so a closed tab or a dead browser is never mistaken for an empty page.
     """
     for index, selector in enumerate(candidates):
-        with contextlib.suppress(ControlError):
-            plugin_api.wait("element", selector=selector,
-                            timeout=full_s if index == 0 else probe_s,
-                            tab=tab, browser=browser)
-            return selector
-    return ""
+        if _wait_element(selector, full_s if index == 0 else probe_s,
+                         tab, browser):
+            return selector, True
+    return "", False
 
 
 def _results(records: list[dict]) -> list[dict]:
@@ -216,7 +248,7 @@ def run(rest: list[str], browser: str) -> dict:
     # the HOMEPAGE, never a query URL: the query is typed below, into the
     # page's own field, and the site builds the address from it
     plugin_api.nav(HOME, tab=tab, browser=browser)
-    box = _rendered(SEARCH_BOXES, WAIT_S, PROBE_S, tab, browser)
+    box = _rendered(SEARCH_BOXES, WAIT_S, PROBE_S, tab, browser)[0]
     if not box:
         # no search box rendered: `focus` refuses with the core's own message,
         # exactly as the old single-selector path did after its suppressed wait
@@ -236,9 +268,9 @@ def run(rest: list[str], browser: str) -> dict:
              "chars) — refusing to submit a query the page does not hold")
     time.sleep(SUBMIT_PAUSE_S)          # a person's beat before Enter
     plugin_api.press("enter", tab=tab, browser=browser)
-    results_sel = _rendered(RESULT_CANDIDATES, WAIT_S, PROBE_S, tab, browser)
-    matched = bool(results_sel)
-    if not results_sel:
+    results_sel, matched = _rendered(RESULT_CANDIDATES, WAIT_S, PROBE_S,
+                                     tab, browser)
+    if not matched:
         # no candidate rendered: extract anyway with the first, which answers
         # the honest zero — a consent wall and an empty query read alike, and
         # `selectors.matched` is the flag that tells them from DOM drift
@@ -255,10 +287,25 @@ def run(rest: list[str], browser: str) -> dict:
     truncated = bool(data.get("truncated"))
     _absorb(results, seen, _results(data.get("matches") or []), pages)
     stop = "cap" if len(results) >= cap_n else "max-pages"
+    # the last Next control the page was asked for, and whether it was there:
+    # `next_matched: false` with `stop: "no-next"` is the honest end of the
+    # list, while `wait_error` is a page turn that FAILED (never the same thing)
+    next_sel, next_matched, wait_error = "", False, ""
     while len(results) < cap_n and pages < max_pages:
-        next_sel = _rendered(NEXT_CANDIDATES, NEXT_PROBE_S, NEXT_PROBE_S,
-                             tab, browser)
-        if not next_sel:
+        try:
+            next_sel, next_matched = _rendered(NEXT_CANDIDATES, NEXT_PROBE_S,
+                                               NEXT_PROBE_S, tab, browser)
+        except ControlError as e:
+            # the WAIT itself failed — the tab was closed, the browser went
+            # away. That is not "there is no Next control": recording it as
+            # `no-next` reported a pagination failure as the end of the list,
+            # so it is a stop of its own, it NAMES the refusal, and it sets
+            # `truncated` below (the results read so far are real and kept)
+            next_sel, next_matched = "", False
+            wait_error = f"{e.code}: {e.message}"
+            stop = "wait-failed"
+            break
+        if not next_matched:
             stop = "no-next"
             break
         # the Next link can sit below the fold: reveal it first, or the click
@@ -287,8 +334,12 @@ def run(rest: list[str], browser: str) -> dict:
 
     # `truncated` is "the list is not all there was": a page's own extraction
     # cut it, or the loop stopped short of the cap (a budget, a click that did
-    # not move, or a click the page would not take)
-    truncated = truncated or stop in ("max-pages", "no-growth", "click-failed")
+    # not move, a page turn whose wait FAILED, or a click the page would not
+    # take). `no-next` is deliberately NOT here: a page with no Next control
+    # was read to its end, and saying otherwise would be the same lie in the
+    # other direction
+    truncated = truncated or stop in ("max-pages", "no-growth", "click-failed",
+                                      "wait-failed")
     results = results[:cap_n]
     measured = round(len(query) / elapsed * 12, 1) if elapsed > 0 else 0.0
     return {
@@ -311,9 +362,17 @@ def run(rest: list[str], browser: str) -> dict:
         # from, so a merged multi-page list stays explainable
         "results": results,
         "loading": {"pages": pages, "clicks": clicks,
-                    "max_pages": max_pages, "stop": stop},
+                    "max_pages": max_pages, "stop": stop,
+                    # "" unless a page turn's wait FAILED, and then the refusal
+                    # itself (`ERR[code]: message`), so `stop: "wait-failed"`
+                    # is never a bare verdict
+                    "wait_error": wait_error},
         "selectors": {"search_box": box, "results": results_sel,
-                      "matched": matched},
+                      "matched": matched,
+                      # the pagination control, read the same way as `results`:
+                      # `next_matched` false with `stop: "no-next"` is the page
+                      # really having no Next, and `next` names the selector
+                      "next": next_sel, "next_matched": next_matched},
         "note": ("typed into the page's own search box at a human cadence and "
                  "submitted with Enter — no query URL was built, and further "
                  "pages are the site's own Next control, clicked; `landed_on` "
@@ -329,9 +388,10 @@ PLUGIN = {
     "actions": {
         "google": {
             "run": run,
-            # nav resolves the tab for_write=True and this verb types into the
-            # page, so the honest declaration is read+write
-            "classes": ("read", "write"),
+            # nav resolves the tab for_write=True, this verb types into the
+            # page, and the browser reaches the network for Google, so the
+            # honest declaration is read+write+egress (`--deny egress` stops it)
+            "classes": ("read", "write", "egress"),
             "usage": ("google search QUERY [--cap N] [--wpm N] "
                       "[--max-pages N] [--tab SPEC] — the rendered results as "
                       "records; the query is TYPED into the search box at a "

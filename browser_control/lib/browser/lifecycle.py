@@ -34,7 +34,13 @@ from browser_control.lib.browser.constants import (
     VERSION_WAIT_S,
 )
 from browser_control.lib.browser.machine import (
+    driver_port,
     endpoint_of,
+    row_port,
+)
+from browser_control.lib.browser.readback import (
+    browser_call_at,
+    url_landed,
 )
 from browser_control.lib.browser.selector import (
     Selector,
@@ -152,19 +158,48 @@ def profiles() -> list[str]:
     Dot-directories are not profiles: this CLI's own bookkeeping lives in
     `<root>/.locks/`, and a lock directory listed as a profile would be both
     wrong and a directory the census then tries to read.
+
+    A SYMLINKED entry is listed only when its real path is still under the
+    root (`paths.is_managed`, compared by real path): the boundary this tool
+    documents is that a scoped path outside the root is refused, never walked
+    — and `profile info` walks and weighs every row it is handed. A link
+    pointing at the user's own profile would otherwise be walked and reported
+    as one of ours. A link to another directory INSIDE the root stays listed:
+    it is a name for a profile this CLI owns, which is the rule
+    `instance_dir` refuses to START on (the lock and pid records key by the
+    lexical spelling, so a link is not a launch target) — listing it is a
+    report, not a launch.
     """
     base = root()
     try:
         names = sorted(os.listdir(base))
     except OSError:
         return []
-    return [os.path.join(base, name) for name in names
-            if not name.startswith(".")
-            and os.path.isdir(os.path.join(base, name))]
+    found: list[str] = []
+    for name in names:
+        if name.startswith("."):
+            continue
+        path = os.path.join(base, name)
+        if not os.path.isdir(path):
+            continue
+        if not is_managed(path):
+            # a symlink whose realpath leaves the root: not this CLI's to read
+            continue
+        found.append(path)
+    return found
 
-def ensure_up(profile: str) -> None:
-    """Refuse now when the verb needs a browser and none is drivable."""
-    if not cdp.reachable(profile):
+def ensure_up(profile: str, port: int = 0) -> None:
+    """Refuse now when the verb needs a browser and none is drivable.
+
+    `port` is the endpoint the CALLER already resolved (a row's own port);
+    without one it is resolved the one way a caller with no row can resolve it
+    (`driver_port`: the port file when it ANSWERS, else the port the process
+    itself names). The port FILE alone is not the oracle: a browser started
+    with an explicit `--remote-debugging-port=N` never writes one, and
+    answering "nothing is up" about a browser that is right there is the
+    refusal this gate exists to prevent.
+    """
+    if not cdp.answers(as_int(port) or driver_port(profile)):
         fail(ERR_CDP_UNREACHABLE,
              f"no drivable browser on {profile} — run "
              "`browser-control-cli open`, or attach a running one with "
@@ -279,19 +314,26 @@ def _default_profile(exe: str) -> str:
     path = expand(raw)
     return path if os.path.isdir(path) else ""
 
-def _writable_profile(browser: str = "") -> str:
-    """The profile a tab write goes to: the named browser's, else the ONE
-    writable browser that is up, else this CLI's own (which `open` starts).
+def _writable_route(browser: str = "") -> tuple[str, int]:
+    """(profile, port) a tab write goes to — ONE census decides both.
 
-    Two writable browsers refuse — the endpoint belongs to a browser identity,
-    and picking one silently is how a tab lands in the browser nobody asked
-    about. `attach`/`detach` decide which browsers are candidates; `--browser`
-    picks among them, and `--profile DIR` (the process scope) names ONE instance
+    The profile is the named browser's, else the ONE writable browser that is
+    up, else this CLI's own (which `open` starts). Two writable browsers
+    refuse — the endpoint belongs to a browser identity, and picking one
+    silently is how a tab lands in the browser nobody asked about.
+    `attach`/`detach` decide which browsers are candidates; `--browser` picks
+    among them, and `--profile DIR` (the process scope) names ONE instance
     outright — the answer to two instances of the same browser.
 
     A browser that is merely DRIVABLE is not a candidate either: with only a
     stranger's browser up, this returns the profile this CLI starts itself,
     because "write into whatever answered" is the bug this rule exists for.
+
+    The PORT comes from the row the same census returned (`row_port`), never
+    from a second read of the port file: a browser started with an explicit
+    `--remote-debugging-port=N` writes no `DevToolsActivePort`, so the file
+    answers 0 for it and every verb behind this route would refuse. 0 means
+    "no row": nothing is up, and the file answers once `open` has started one.
     """
     if _scoped():
         # the scope is a write target only when it is one this CLI manages or
@@ -306,7 +348,7 @@ def _writable_profile(browser: str = "") -> str:
                  f"--profile {_scoped()} is not a profile this CLI "
                  "manages or has attached — `open --profile DIR` starts one "
                  "under the root, or `attach --port N` hands one over")
-        return _scoped()
+        return _scoped(), as_int(cdp.port_of(_scoped()))
     rows = _pkg._writable(browser)
     if len(rows) > 1:
         names = ", ".join(os.path.basename(str(r["profile"]))
@@ -317,8 +359,12 @@ def _writable_profile(browser: str = "") -> str:
              "--profile DIR to name the instance, --browser NAME, or "
              "`detach` one")
     if rows:
-        return str(rows[0]["profile"])
-    return profile_dir(binary(browser)) if browser else profile_dir(binary())
+        return str(rows[0]["profile"]), row_port(rows[0])
+    return (profile_dir(binary(browser)) if browser else profile_dir(binary())), 0
+
+def _writable_profile(browser: str = "") -> str:
+    """The profile a tab write goes to (`_writable_route`, profile only)."""
+    return _writable_route(browser)[0]
 
 def managed_profile(browser: str = "") -> str:
     """The profile a LIFECYCLE verb (stop) is about: ours, or the one `open`
@@ -425,7 +471,7 @@ def detach(port: int = 0, pid: int = 0, profile: str = "",
     lock.warn(reply)
     return reply
 
-def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
+def _open_tabs(profile: str, urls: list[str], port: int = 0) -> list[dict]:
     """One new tab per URL: every id from CDP, all verified together.
 
     `Target.createTarget` answers with the id it made and ONE poll loop then
@@ -434,16 +480,28 @@ def _open_tabs(profile: str, urls: list[str]) -> list[dict]:
     is not a reason to destroy work. The endpoint is checked against the kernel
     FIRST: creating a tab is a write, and a write does not go to whoever holds
     the port (a review measured that this one had no owner check at all).
+
+    `port` is the endpoint the caller resolved (the row's own); without one it
+    is `driver_port`'s answer. The CALL goes to that port, and it is THAT port
+    the kernel is asked about (`_verify_profile_endpoint(profile, endpoint)`)
+    and whose holder is re-judged immediately before the connection
+    (`readback.browser_call_at`) — one port per verb, so a browser that wrote
+    no port file is driven on the port it names and nothing is sent to a
+    process that took the port over in between. Verifying the profile WITHOUT
+    the endpoint would re-resolve the port a second way and gate a different
+    listener than the call is aimed at (a review measured the split).
     """
-    _pkg._verify_profile_endpoint(profile)
+    endpoint = as_int(port) or driver_port(profile)
+    _pkg._verify_profile_endpoint(profile, endpoint)
     ids: list[str] = []
     for url in urls:
-        result = cdp.browser_call(profile, "Target.createTarget", {"url": url})
+        result = browser_call_at(profile, endpoint, "Target.createTarget",
+                                 {"url": url})
         target_id = str(result.get("targetId") or "")
         if not target_id:
             fail(ERR_NO_PAGE_TAB, f"CDP made no tab for {url!r}")
         ids.append(target_id)
-    found, missing = _pkg._wait_tabs(profile, ids)
+    found, missing = _pkg._wait_tabs(profile, ids, port=endpoint)
     if missing:
         fail(ERR_NO_PAGE_TAB,
              f"{len(missing)} of {len(ids)} tabs never showed up in the tab "
@@ -486,14 +544,28 @@ def _stop_failed_start(profile: str, pid: int) -> str:
     which is exactly the third-party guarantee this module's lock exists to
     replace.
 
+    The pid is RE-VERIFIED against its own command line first, exactly as
+    `stop` re-verifies before ITS signal (`pid_on_profile`): this path can
+    spend up to LAUNCH_WAIT_S waiting, and a pid recycled in that window would
+    otherwise be SIGTERMed — a stranger's process, killed for a browser that
+    had already exited. A pid that cannot show the profile is NOT signalled,
+    and the clause says so instead of reporting a stop that never happened:
+    the process was not touched, so nothing about it is proven, and the pid
+    record is left where `close --pid` (or `pid_of`) can still find it.
+
     SIGTERM is the signal `stop` sends and STOP_WAIT_S the budget it gives it —
     never a SIGKILL. The pid record is cleared the way `close` clears it, once
     the process is PROVEN gone; a survivor KEEPS the record, which is what
     lets `close --pid` (or `pid_of`) find it later.
 
     Returns the clause the refusal carries: one line, and honest about a
-    process that outlived the signal.
+    process that outlived the signal — or about one that was never signalled.
     """
+    if not pid_on_profile(pid, profile):
+        return (f"pid {pid} was NOT signalled: its own command line does not "
+                f"run {profile}, so it is not the browser this call started "
+                "(a pid recycled after that browser exited) — find the "
+                "survivor with `browser-control-cli list`")
     with contextlib.suppress(OSError):
         os.kill(pid, signal.SIGTERM)
     _attempts, alive = poll(lambda: pid_alive(pid), timeout=STOP_WAIT_S,
@@ -502,7 +574,11 @@ def _stop_failed_start(profile: str, pid: int) -> str:
     if alive:
         return (f"pid {pid} survived SIGTERM and may still hold {profile} — "
                 f"stop it with `browser-control-cli close --pid {pid}`")
-    Path(pid_file(profile)).unlink(missing_ok=True)
+    # best effort: the refusal being built is what matters, and a filesystem
+    # that refuses this unlink must not REPLACE it with an `internal` error
+    # (which also loses the pid the refusal was about)
+    with contextlib.suppress(OSError):
+        Path(pid_file(profile)).unlink(missing_ok=True)
     return f"pid {pid} was stopped again"
 
 def _resolved_mode(profile: str, owner: dict, already: bool,
@@ -533,6 +609,49 @@ def _resolved_mode(profile: str, owner: dict, already: bool,
         return False
     return bool(headless)
 
+def _opened_entry(requested: str, row: dict) -> dict:
+    """One `opened` entry: a tab the call CONFIRMED, or an OBSERVATION.
+
+    Two shapes, and the difference is what the call can PROVE:
+
+    * a tab this call matched — tiers 1 and 2 of `readback._wait_url`, or one
+      `Target.createTarget` answered the id of — keeps the contract every
+      caller branches on: `requested`, `id`, `url`, `title` and `matched`,
+      always present (`true` for the requested address). A `false` entry also
+      carries a `note` naming the requested and the observed address: a
+      redirect, an HSTS http→https upgrade or the browser's own
+      canonicalisation is a FACT about a healthy browser, and the note may say
+      this tab is the one the call opened because, at tiers 1 and 2, it is;
+    * a TIER-3 row is not: the ladder falls back to the browser's own first
+      page exactly when the requested address is nowhere in the tab list,
+      which on a restored session is somebody else's tab. It is reported as an
+      OBSERVATION — `observed: {url, title, id}` with `fallback: true` — so
+      `matched: false` alone cannot hand a caller a `--tab id:<id>` handle to
+      a page this call never opened (a review measured `open` answering
+      `tab: id:…` about a restored tab, with a note claiming the opposite).
+
+    `row["tier"]` is `_wait_url`'s own record of which tier produced the row;
+    a row from `_open_tabs` has none, which is the confirmed shape.
+    """
+    observed = str(row.get("url") or "")
+    if as_int(row.get("tier")) == 3:
+        return {"requested": requested,
+                "observed": {"url": observed,
+                             "title": row.get("title"),
+                             "id": row.get("id")},
+                "matched": False, "fallback": True,
+                "note": ("the requested address is not in the tab list; this "
+                         "is the browser's own first page, NOT necessarily "
+                         "the tab this call opened")}
+    entry = {"requested": requested, "id": row["id"], "url": observed,
+             "title": row["title"], "matched": url_landed(requested, observed)}
+    if not entry["matched"]:
+        entry["note"] = (f"landed on {observed} rather than the requested "
+                         f"{requested} — a redirect, an HSTS upgrade or the "
+                         "browser's own canonicalisation; this tab is the one "
+                         "the call opened")
+    return entry
+
 def launch(urls: list[str] | None = None, browser: str = "",
            headless: bool = False) -> dict:
     """Start (or adopt) the managed browser and prove the pages are there.
@@ -562,11 +681,31 @@ def launch(urls: list[str] | None = None, browser: str = "",
     and asking for headless when a windowed one is already up REFUSES rather
     than silently overrule the argv. Close it and open again to change mode.
 
-    A start that FAILS after the spawn — no CDP endpoint inside LAUNCH_WAIT_S,
-    or an endpoint that never shows the startup page — stops the process this
-    call started before refusing, and says so by pid. The browser runs in its
-    own session, so an unreported survivor held the profile while the caller's
-    retry started a second one on it (see `_stop_failed_start`).
+    A start that FAILS after the spawn — no CDP endpoint inside LAUNCH_WAIT_S
+    — stops the process this call started before refusing, and says so by pid
+    (see `_stop_failed_start`). A start whose endpoint DID come up is never
+    stopped over a URL: the startup page is matched by `_wait_url`'s LADDER,
+    so a navigation the browser redirected, HSTS-upgraded or canonicalised
+    answers with the address it ACTUALLY landed on. Only a tab list with no
+    page ROW at all refuses `no-page-tab` and stops what it started.
+
+    The LADDER has three tiers, and `opened` says which one answered:
+
+    * tier 1 — the requested address (`url_landed`, tolerant of the trailing
+      slash the browser adds);
+    * tier 2 — the requested HOST answering at another address (a redirect, an
+      HSTS http→https upgrade, a canonicalised path): a fact to report, and
+      the tab the call opened;
+    * tier 3 — neither, so the browser's own first page row. That page is NOT
+      a tab this call opened (on a restored session it is somebody else's),
+      and it is reported as an OBSERVATION instead of a handle: `observed:
+      {url, title, id}`, `matched: false`, `fallback: true`, and no `tab` key
+      unless some entry WAS confirmed.
+
+    Tier 1 and 2 entries keep the contract every caller already branches on —
+    `matched: true` for the requested address, else `matched: false` with a
+    `note` naming both addresses — and `matched` is always present, so a
+    caller can test the key without testing for it.
     """
     wanted = [safe_url(url) for url in (urls or [])]
     path = binary(browser)
@@ -583,10 +722,13 @@ def launch(urls: list[str] | None = None, browser: str = "",
         raise ControlError(ERR_PROFILE_UNUSABLE,
                            f"cannot create {profile}: {e}") from e
     with _pkg._lock(lock_path(profile), "open") as lock:
-        # the port is read INSIDE the lock: a value from before it can be 0
+        # the port is resolved INSIDE the lock: a value from before it can be 0
         # while the browser another call just started is already answering,
-        # and judging that stale 0 is what turned a race into a refusal
-        port = cdp.port_of(profile)
+        # and judging that stale 0 is what turned a race into a refusal. It is
+        # resolved the ONE way the census resolves it (`driver_port`: the file
+        # when it answers, else the port the process names), so an adoption
+        # probes the port that ANSWERS rather than a stale file.
+        port = as_int(driver_port(profile))
         owner = _pkg._await_owner(profile, port)
         if owner and not owner.get("verified"):
             if owner.get("profile_pid"):
@@ -604,7 +746,7 @@ def launch(urls: list[str] | None = None, browser: str = "",
         if already:
             if wanted:
                 requests = wanted
-                opened = _open_tabs(profile, wanted)
+                opened = _open_tabs(profile, wanted, port)
         else:
             first = wanted[0] if wanted else "about:blank"
             requests = [first, *wanted[1:]]
@@ -617,48 +759,64 @@ def launch(urls: list[str] | None = None, browser: str = "",
                      f"started {path} on {profile} but no CDP endpoint "
                      f"answered within {LAUNCH_WAIT_S:g}s — "
                      f"{_stop_failed_start(profile, pid)}")
+            # the endpoint is UP: from here on the browser is never stopped
+            # over a URL. `_wait_url` returns None only when the tab list
+            # holds no page ROW, which is the one honest "no startup page".
             row = _pkg._wait_url(profile, first)
             if row is None:
                 fail(ERR_NO_PAGE_TAB,
-                     f"{path} is up on {profile} but shows no tab for "
-                     f"{first!r} — {_stop_failed_start(profile, pid)}")
+                     f"{path} is up on {profile} but shows no page tab at "
+                     f"all for {first!r} to land on — "
+                     f"{_stop_failed_start(profile, pid)}")
+            port = as_int(cdp.port_of(profile)) or port
             opened = [row]
             if len(wanted) > 1:
-                opened += _open_tabs(profile, wanted[1:])
-        rows = _pkg._wait_rows(profile)
+                opened += _open_tabs(profile, wanted[1:], port)
+        rows = _pkg._wait_rows(profile, port=port)
     if not rows:
         fail(ERR_NO_PAGE_TAB,
              f"{path} is up on {profile} but shows no page tab — pass a URL "
              "(browser-control-cli open https://…)")
     notes = [text for text in (stale, lock.warning) if text]
+    entries = [_opened_entry(requests[index], row)
+               for index, row in enumerate(opened)]
     reply = {"ok": True, "started": not already, "browser": path,
              "profile": profile, "headless": mode,
-             "port": cdp.port_of(profile),
+             "port": as_int(cdp.port_of(profile)) or port,
              "pid": pid_of(profile), "tabs": rows,
-             "opened": [{"requested": requests[index], "id": row["id"],
-                         "url": row["url"], "title": row["title"]}
-                        for index, row in enumerate(opened)]}
-    if len(opened) == 1:
-        reply["tab"] = f"id:{opened[0]['id']}"
+             "opened": entries}
+    if len(entries) == 1 and not entries[0].get("fallback"):
+        # a HANDLE a later verb can act on — only for a tab this call
+        # CONFIRMED. Every tier-3 entry is a page the call did not match, so
+        # naming one here (`tab: id:<id>`) aimed `--tab id:<id>` at a tab
+        # nobody opened (a review measured it on a restored session): the key
+        # is omitted instead, and the entry says what was OBSERVED.
+        reply["tab"] = f"id:{entries[0]['id']}"
     if notes:
         reply["warning"] = "; ".join(notes)
     return reply
 
-def _page_count(profile: str) -> int | None:
+def _page_count(profile: str, port: int = 0) -> int | None:
     """How many page tabs answer on that profile, or None when it is silent.
 
     None is not zero. A browser whose endpoint is already gone cannot be asked
     what it holds, and neither can one whose port is held by something that is
     not that profile's browser — the difference decides whether `close` may
     warn about tabs.
+
+    `port` is the endpoint the caller resolved (the row of a NAMED browser);
+    without one the census-aware resolver answers (`driver_port`), never the
+    port file alone: a browser started with an explicit
+    `--remote-debugging-port=N` writes none, and reading the file would report
+    a live browser's tabs as unreadable.
     """
-    port = cdp.port_of(profile)
-    if not port or not cdp.answers(port):
+    endpoint = as_int(port) or driver_port(profile)
+    if not endpoint or not cdp.answers(endpoint):
         return None
-    if not _pkg.endpoint_owner(profile, port)["verified"]:
+    if not _pkg.endpoint_owner(profile, endpoint)["verified"]:
         return None
     try:
-        return len(cdp.page_rows(profile))
+        return len(cdp.rows_to_tabs(cdp.page_rows_at(endpoint)))
     except ControlError:
         return None
 
@@ -716,9 +874,25 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
     target = str(row["profile"]) if row else managed_profile(browser)
     with _pkg._lock(lock_path(target), "close") as lock:
         target_pid = as_int(row["pid"]) if row else pid_of(target)
-        tabs = _page_count(target)
+        # the endpoint this call must prove GONE: the port the caller NAMED (a
+        # row's own — a browser started with an explicit
+        # --remote-debugging-port wrote no file to read), else the managed
+        # profile's own port file, which is what `open` starts. It is resolved
+        # FIRST so that the tab count and the stop read the ONE port this call
+        # is about: `_page_count(target)` used to resolve its own
+        # (`driver_port`) while the proof below used the row's, so the count
+        # could come from a different listener than the one being proven gone
+        # (a review measured the two oracles).
+        endpoint = row_port(row) if row else as_int(cdp.port_of(target))
+        # ...and the count is read on THAT port. `endpoint` is 0 only when this
+        # call resolved none at all, and there the one-argument form is the
+        # same call: `_page_count`'s own default is the documented resolver for
+        # a caller with no row (`driver_port`: the file when it answers AND
+        # verifies, else the port the process names).
+        tabs = _page_count(target, endpoint) if endpoint else _page_count(target)
         if not target_pid:
-            if not cdp.reachable(target):
+            if not (cdp.answers(endpoint) if endpoint
+                    else cdp.reachable(target)):
                 reply = {"ok": True, "stopped": False, "profile": target,
                          "tabs": tabs,
                          "reason": "no managed browser was running"}
@@ -764,16 +938,22 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
             fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} survived SIGTERM for {STOP_WAIT_S:g}s — "
                  "stop it yourself; this CLI does not SIGKILL a browser")
-        _attempts, answering = poll(lambda: cdp.reachable(target),
-                                    timeout=PORT_WAIT_S,
-                                    interval=POLL_NORMAL,
-                                    accept=lambda a: not a,
-                                    on_error=lambda _e: True)
+        _attempts, answering = poll(
+            lambda: cdp.answers(endpoint) if endpoint
+            else cdp.reachable(target),
+            timeout=PORT_WAIT_S,
+            interval=POLL_NORMAL,
+            accept=lambda a: not a,
+            on_error=lambda _e: True)
         if answering:
             fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} is gone but the CDP endpoint on {target} "
                  "still answers")
-        Path(pid_file(target)).unlink(missing_ok=True)
+        # best effort: the stop is PROVEN at this point, and a filesystem that
+        # refuses this unlink must not turn a successful stop into a traceback
+        # (or into the refusal being built elsewhere)
+        with contextlib.suppress(OSError):
+            Path(pid_file(target)).unlink(missing_ok=True)
     reply = {"ok": True, "stopped": True, "pid": target_pid,
              "profile": target, "tabs": tabs,
              "forced": bool(tabs and force), "named": named,

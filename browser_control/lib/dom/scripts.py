@@ -55,6 +55,13 @@ PRELUDE = r"""
   const attr = (el, name) => (el.getAttribute ? el.getAttribute(name) : null);
   const textOf = (el) =>
     (el.innerText === undefined ? el.textContent : el.innerText) || '';
+  // A page's own `document.title` and `location.href` are the PAGE's to make
+  // huge, and both ride in every reply that calls itself page-bounded: a
+  // measured 2 MB `document.title` made `tab find` print 2 000 517 characters
+  // and `tab text` 2 240 308, because the caller stops passing a transport cap
+  // for a read the page bounds itself (a review found it). Clip them IN THE
+  // PAGE, and always to a string — the field is never null for a real page.
+  const clip = (v, n) => String(v == null ? '' : v).slice(0, n);
   const label = (el) => [
       attr(el, 'aria-label'), attr(el, 'placeholder'), attr(el, 'title'),
       attr(el, 'alt'), attr(el, 'name'),
@@ -133,9 +140,18 @@ FRAME_DOC = ("(() => {" + PRELUDE + r"""
 
 FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const vw = window.innerWidth, vh = window.innerHeight;
-  const base = {url: location.href, title: document.title,
+  const cap = __CAP__;
+  // `cap` rides in the reply: it is what lets a caller say whether the page
+  // HAS more matches than were returned, instead of reporting a count that the
+  // window it just printed contradicts (a review found `tab find --cap 50`
+  // showing index 20 while `tab click --index 20` refused "10 element(s)
+  // match")
+  // `clip`: 300 characters of title and 2000 of URL is every real title and
+  // every real address, and it is the page, not the transport, that bounds the
+  // reply (see PRELUDE)
+  const base = {url: clip(location.href, 2000), title: clip(document.title, 300),
                 ready: document.readyState,
-                visibility: document.visibilityState,
+                visibility: document.visibilityState, cap: cap,
                 viewport: [Math.round(vw), Math.round(vh)],
                 active: describe(document.activeElement),
                 scroll: [Math.round(scrollX), Math.round(scrollY)]};
@@ -143,8 +159,7 @@ FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
     return Object.assign(base, {matches: [], total: 0, offscreen: 0,
                                 truncated: false, degenerate: true});
   }
-  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__,
-        cap = __CAP__;
+  const mode = __MODE__, needle = __NEEDLE__, selector = __SELECTOR__;
   const all = mode === 'selector' ? query(selector)
     : query(INTERACTIVE).filter(
         (el) => label(el).toLowerCase().indexOf(needle) >= 0);
@@ -181,7 +196,10 @@ FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
 
 TEXT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const selector = __SELECTOR__, cap = __CAP__;
-  const base = {url: R.doc.location.href, title: R.doc.title,
+  // `title`/`url` are clipped like FIND_EXPR's: they are CONTEXT for the text,
+  // and the text itself is what `--chars` bounds (see PRELUDE)
+  const base = {url: clip(R.doc.location.href, 2000),
+                title: clip(R.doc.title, 300),
                 ready: R.doc.readyState,
                 visibility: R.doc.visibilityState,
                 viewport: [Math.round(R.win.innerWidth),
@@ -225,11 +243,32 @@ TEXT_TARGET_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const empty = !el || el === document.body || el === document.documentElement;
   const frame = !!(el && el.tagName && el.tagName.toLowerCase() === 'iframe');
   const value = el && typeof el.value === 'string' ? el.value : null;
-  const editable = !!(el && el.isContentEditable);
-  const text = editable ? textOf(el) : null;
-  return {focused: !empty, frame: frame,
-          editable: !empty && (value !== null || editable),
-          secret: frame || /type\s*=\s*["']?password\b/i.test(
+  const contenteditable = !!(el && el.isContentEditable);
+  const text = contenteditable ? textOf(el) : null;
+  // UNPROVABLE is not the same as "takes no text": a frame's active element, a
+  // canvas, or any element the page drives with its own key handlers holds no
+  // `value` and is not contentEditable, so this probe cannot READ what it
+  // takes — and `Input.insertText` still goes to the page. Such a focus is
+  // editable-but-unprovable (its `length` is null, which the verdict renders
+  // `verified: false`); only an EMPTY focus (nothing, body, documentElement)
+  // is `no-focus` (a review flagged the refusal this produced for a
+  // frame/canvas the documentation promises an unclear verdict for).
+  const unprovable = !empty && value === null && !contenteditable;
+  // an EDITABLE BODY is a real focus: a document left editable as a whole
+  // (`designMode`, or `<body contenteditable>`) puts `document.activeElement`
+  // on the body, which the `empty` test above would otherwise call "nowhere to
+  // type" — the probe measured it editable, so it says so and the verb takes
+  // the unclear-or-verified path instead of refusing `no-focus` (a review
+  // found the probe and the verb disagreeing about exactly this focus)
+  const editableBody = !!(el && empty && el.isContentEditable);
+  return {focused: !empty || editableBody, frame: frame,
+          editable: editableBody || (!empty && (value !== null
+                                                || contenteditable || frame
+                                                || unprovable)),
+          // a focus whose type cannot be read fails CLOSED, exactly like a
+          // password field: the frame's document and an unreadable value are
+          // both places a secret can land where this probe cannot see it
+          secret: frame || unprovable || /type\s*=\s*["']?password\b/i.test(
             (el && el.outerHTML) || ''),
           active: describe(el), target: path(el),
           length: value !== null ? value.length
@@ -285,7 +324,10 @@ CANDIDATES_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const all = mode === 'selector' ? query(selector)
     : query(INTERACTIVE).filter(
         (el) => label(el).toLowerCase().indexOf(needle) >= 0);
+  // `cap` rides along like FIND_EXPR's: an out-of-range `--index` must be able
+  // to say how big the window it counted in was
   return {total: all.length, offscreen: 0, truncated: all.length > cap,
+          cap: cap,
           matches: all.slice(0, cap).map((el) => ({
             tag: el.tagName.toLowerCase(), role: role(el), name: describe(el),
             text: label(el).slice(0, 120), in_viewport: false,
@@ -298,12 +340,26 @@ MEDIA_STATE_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const all = Array.from(document.querySelectorAll('video, audio'));
   const area = (el) => { const r = el.getBoundingClientRect();
                          return Math.round(r.width * r.height); };
-  // the element that is PLAYING first, else the biggest one on the page: a
-  // page can carry a preview clip beside the real player
+  const index = __INDEX__;
+  // the SAME element the action drives: `__INDEX__` >= 0 is `all[index]`,
+  // and -1 keeps the preferred rule — the element that is PLAYING first,
+  // else the biggest one on the page, because a page can carry a preview clip
+  // beside the real player. Picking independently of the action let an
+  // unrelated already-playing element's clock "verify" a play aimed at
+  // another one (a review found it), so both expressions share the pick.
   const playing = all.filter((el) => !el.paused && !el.ended);
-  const el = playing[0] ||
-    all.slice().sort((a, b) => area(b) - area(a))[0] || null;
-  const base = {count: all.length, found: !!el,
+  const el = index >= 0 ? (all[index] || null)
+    : (playing[0] || all.slice().sort((a, b) => area(b) - area(a))[0] || null);
+  // `index` in the reply is CONCRETE: the caller's, or the one the preferred
+  // rule settled on AT READ TIME. That number — not the rule — is what the
+  // verb drives and what every probe then reads. Re-evaluating `-1` on every
+  // probe re-picked an element per call, so a `pause` the page really applied
+  // was refused because the probe had moved to the other player, a reply
+  // described `b.mp4` while `a.mp4` was the one paused, and a `play` on a dead
+  // element was certified by an unrelated ad's clock (a review measured all
+  // three). `at` is -1 only when nothing was found.
+  const at = el ? all.indexOf(el) : -1;
+  const base = {count: all.length, found: !!el, index: at,
                 error: window.__bcMediaError || null};
   if (!el) return base;
   return Object.assign(base, {
@@ -322,6 +378,9 @@ MEDIA_ACTION_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   const area = (el) => { const r = el.getBoundingClientRect();
                          return Math.round(r.width * r.height); };
   const playing = all.filter((el) => !el.paused && !el.ended);
+  // the verb always passes the CONCRETE index the before-read settled on, so
+  // this drives exactly the element that read proved; the -1 branch keeps the
+  // pick shared with MEDIA_STATE_EXPR for a page whose identity read failed
   const el = index >= 0 ? (all[index] || null)
     : (playing[0] || all.slice().sort((a, b) => area(b) - area(a))[0] || null);
   if (!el) return {count: all.length, found: false};
@@ -344,8 +403,13 @@ MEDIA_ACTION_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
     thrown = ((e && e.name) || 'Error') + ': ' + ((e && e.message) || '');
     window.__bcMediaError = thrown;
   }
-  return {count: all.length, found: true,
+  // the element's identity rides back with the action's answer: the caller
+  // compares it with the before-read's, so an element the page REPLACED under
+  // the verb cannot have its clock certify an action aimed at the one before
+  // it (a review measured a `play --index 0` certified by an arriving ad)
+  return {count: all.length, found: true, index: index,
           element: el.tagName.toLowerCase(), paused: el.paused,
+          src: String(el.currentSrc || el.src || '').slice(0, 120),
           error: window.__bcMediaError || null};
 })())""")
 
@@ -488,12 +552,20 @@ EXTRACT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
       }
       row[name] = value;
     }
-    used += JSON.stringify(row).length;
+    // size the row BEFORE it is pushed: the budget is the WHOLE reply's, and
+    // charging it after the push let one row ride over it — a row is
+    // `#fields × --chars`, so a handful of fields blew the CDP transport cap
+    // and `tab extract` refused `result-too-large` naming an expression the
+    // caller never wrote (a review found it)
+    const n = JSON.stringify(row).length;
+    if (used + n > schema.budget) { budget_hit = true; break; }
+    used += n;
     records.push(row);
-    if (used >= schema.budget) { budget_hit = true; break; }
   }
   return {
-    url: location.href, title: document.title,
+    // clipped like FIND_EXPR's: the RECORDS are what the schema's `budget`
+    // bounds, and a 2 MB title must not ride over it (see PRELUDE)
+    url: clip(location.href, 2000), title: clip(document.title, 300),
     visibility: document.visibilityState,
     total: candidates.length, matches: records,
     truncated: budget_hit || candidates.length > records.length};
@@ -527,17 +599,37 @@ def fill(expression: str, **values: Any) -> str:
     document (`FRAME_DOC`). Defaulting it here means such a verb threads a root
     only when it has a different one — and the leftover check below still
     catches a root that was meant to be passed and was not.
+
+    The scan and the substitution both run over the TEMPLATE, never over text a
+    value brought with it: substituting in a loop across the growing expression
+    rescanned the caller's own string, so a selector holding a token another
+    value fills (`[data-k="__VISIBLE__"]`) was REWRITTEN inside the caller's
+    CSS (a scroll then acted on `x[data-k="true"]`), and a legitimate uppercase
+    token (`#__NEXT_DATA__`, `[id="__INITIAL_STATE__"]`) was refused as an
+    unfilled placeholder (a review found both).
     """
     if "__ROOT__" in expression:
         values = {**values, "root": values.get("root") or PAGE_ROOT}
+    filled: dict[str, str] = {}
     for name, value in values.items():
         token = f"__{name.upper()}__"
         if token not in expression:
             fail(ERR_BAD_ARGS,
                  f"fill: {token} is not a placeholder in this expression")
-        expression = expression.replace(token, str(value))
-    leftovers = sorted(set(re.findall(r"__[A-Z0-9_]+__", expression)))
+        filled[token] = str(value)
+    found = {match.group(0)
+             for match in re.finditer(r"__[A-Z0-9_]+__", expression)}
+    leftovers = sorted(token for token in found if token not in filled)
     if leftovers:
         fail(ERR_BAD_ARGS,
              f"fill: unfilled placeholder(s) {', '.join(leftovers)}")
-    return expression
+    # ONE pass over the template: a token that arrived inside a VALUE is text
+    # the caller owns, and is never rescanned (see the docstring)
+    out: list[str] = []
+    end = 0
+    for match in re.finditer(r"__[A-Z0-9_]+__", expression):
+        out.append(expression[end:match.start()])
+        out.append(filled[match.group(0)])
+        end = match.end()
+    out.append(expression[end:])
+    return "".join(out)

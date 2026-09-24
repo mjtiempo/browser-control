@@ -8,6 +8,15 @@ written — or a wider file cannot be narrowed — the line goes to a private
 scratch directory (`mkdtemp`, unique and 0700). A record is lost only when
 neither can be written, never silently.
 
+Writing the log also never BLOCKS, which is the same promise seen from the other
+side: a path that is not a regular file is refused before it is opened, because
+`open(O_WRONLY)` on a reader-less FIFO waits for ever — and the verb had already
+printed its answer by then, so the "a log that cannot be written never turns a
+working verb into a failure" contract became a hang in the `finally` of every
+invocation (a review measured it). A FIFO, a device node, a directory or a
+symlink at the log path is the ordinary fallback, and `O_NONBLOCK` rides on the
+open so the window between the check and the open is closed too.
+
 `lib/audit.py` owns the RECORD (what a line says, and what a proven secret
 becomes); this module owns where it goes.
 """
@@ -71,13 +80,35 @@ class FileSink:
         `fchmod`ed 0600 — arbitrary append into a file this CLI did not choose
         (CWE-377, the guard the pid-file writer already carries). A refused
         file falls back to the private scratch log like any other failure.
+
+        The path is `lstat`ed BEFORE the open and the open carries
+        `O_NONBLOCK`, because the `S_ISREG` refusal below it is no use to a
+        caller who never reaches it: `open(O_WRONLY)` on a reader-less FIFO
+        BLOCKS FOR EVER, so a log path that is a FIFO turned every invocation
+        into a hang in its `finally` — after the verb had already printed its
+        answer (a review measured it). `O_NONBLOCK` is a no-op for a regular
+        file, refuses a reader-less FIFO at the open, and makes a write to a
+        FIFO whose reader has stopped draining fail instead of blocking; the
+        lstat is the same refusal one step earlier, for a file that is already
+        there. A FIFO, a device node or a directory is `False` — the caller's
+        fallback, exactly like every other unwritable path.
         """
         try:
             parent = os.path.dirname(path)
             if parent:
                 os.makedirs(parent, mode=0o700, exist_ok=True)
+            try:
+                mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                mode = None          # nothing there: the open below creates it
+            except OSError:
+                return False
+            if mode is not None and not stat.S_ISREG(mode):
+                # a link fails here too (`lstat` never follows), which is the
+                # `O_NOFOLLOW` refusal above, without opening anything
+                return False
             handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND
-                             | os.O_NOFOLLOW, 0o600)
+                             | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
             try:
                 info = os.fstat(handle)
                 if not stat.S_ISREG(info.st_mode):

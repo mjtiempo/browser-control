@@ -25,11 +25,11 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 | --- | --- |
 | `launch-failed` | the browser was started but never answered CDP; the failed start is stopped and named by pid |
 | `browser-not-stopped` | SIGTERM did not end the process; it is reported (by pid), never hunted |
-| `cdp-unreachable` | the endpoint did not answer |
+| `cdp-unreachable` | the endpoint did not answer — including a port that lost its holder between the check and the connection (a re-judged port nobody holds any more) |
 | `cdp-not-local` | the DevTools port is held by something that is not that profile's browser; `close --force` then `open` |
 | `profile-busy` | another call holds the profile lock; wait for it and retry |
 | `profile-live` | a browser is running on the profile — close it first |
-| `profile-unusable` | the profile directory cannot be created/read (permissions) |
+| `profile-unusable` | the profile directory cannot be created/read (permissions), or its lock cannot be opened/taken at all |
 | `profile-exists` | `profile seed` target already exists — pass `--force` (it wipes) or pick another |
 | `not-managed` | a write needs a browser this CLI started/attached — `open`, `attach`, or read with `--tab` |
 | `not-attached` | `detach` found no attachment for that selector — check `attach --list` |
@@ -45,7 +45,7 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 | `no-page-tab` | no page tab matches (or none exist) — `open URL` / `tab URL`, or a different `--tab SPEC` |
 | `tab-ambiguous` | several tabs match the spec — use `id:<prefix>` or a longer substring |
 | `no-frame` | `--frame VALUE` matched no iframe — run `tab frames` |
-| `frame-ambiguous` | `--frame` matched several frames — use an index or a fuller URL |
+| `frame-ambiguous` | `--frame` matched several frames — when the frames have different URLs, use an index or a fuller URL; when several frames share one URL (and the browser gives their targets the same URL), they cannot be told apart from here: reach the one you mean by COORDINATE (`tab click --at X,Y`) or drive it from the tab that owns it |
 | `frame-not-separate` | that frame has no target to attach to: it shares the page's process (a same-origin/`srcdoc` frame), or its committed URL differs from the `src` (a redirect). `tab text`/`tab extract --frame N` read a same-process one; input needs `tab click --at X,Y` |
 | `frame-unattributable` | the browser does not report which tab owns an iframe target, so a SEPARATE frame cannot be reached — a same-process frame still reads (`tab text --frame N`); run `tab frames` and re-name it |
 | `no-viewport` | the page reports a zero viewport (windowless/never shown); nothing can be measured |

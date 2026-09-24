@@ -11,6 +11,14 @@ virtualized list is made to render past its first window). A context object
 carrying tab/browser/frame is a separate `api: 2` proposal — the
 `run(rest, browser)` signature does not change here.
 
+`frame` is here because a page can render its words inside an iframe: called
+with a value it SETS the frame scope for the rest of the call, called with
+nothing it READS the scope back (so a plugin that sets one for its own read can
+restore the caller's). An action that wants the caller's global `--frame`
+declares `"frames": True` in its action spec; the CLI consults that declaration
+in `_authorise`, and without it a plugin verb refuses `--frame` exactly as
+every non-content verb does.
+
 `errors` is re-exported WHOLE so a plugin names a refusal code
 (`errors.ERR_BAD_ARGS`) instead of typing the string: a raw string that is not
 registered ships a code no caller can branch on, which the hermetic vocabulary

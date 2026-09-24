@@ -99,7 +99,7 @@ check or a reviewer does not have to hardcode a verb list:
 | `write` | the page, the browser, or this CLI's authorization |
 | `code` | runs caller-supplied code: `tab js`, `tab wait --for js` |
 | `file` | a path the CALLER named: `screenshot`, `upload` |
-| `egress` | would reach the network — nothing today |
+| `egress` | would reach the network: it hands a URL to the browser (`open`, `tab`, `tab nav`) or runs caller code that can `fetch` (`tab js`, `tab wait --for js`); the shipped site plugins declare it too |
 
 Gate a call, or a whole session:
 
@@ -107,13 +107,17 @@ Gate a call, or a whole session:
 browser-control-cli --deny write tab click "Buy"      # ERR[not-allowed]
 BROWSER_CONTROL_DENY=write browser-control-cli tab insert "x"
 browser-control-cli --allow read tab text
+browser-control-cli --deny egress tab nav https://example.com   # ERR[not-allowed]
 browser-control-cli selftest | jq '.capabilities.by_class'
 ```
 
 Two notes on the policy inputs, so a deny never *looks* wider than it is:
-`--deny egress` is accepted but currently names no action — nothing carries
-that class yet; and `tab wait --for js` carries `code`+`write`, so either
-`--deny write` or `--deny code` stops it exactly as it stops `tab js`.
-`selftest` is never gated — a gate that blocked its own explanation would be a
-trap. Plugin verbs report their classes under `plugin_declared`: those are
-the plugin's OWN declarations, not something this tool verified.
+`--deny egress` refuses the verbs in that row and nothing else — `tab text` is
+`read` only, so `--deny file` (or `--deny egress`) leaves it alone; and
+`tab wait --for js` carries `code`+`write`+`egress`, so `--deny write`,
+`--deny code` or `--deny egress` stops it exactly as it stops `tab js`.
+`selftest` and `help` are the TWO verbs the gate does not consult — neither
+performs an action, and a gate that blocked its own explanation would be a
+trap — and both still write the one audit line every invocation owes. Plugin
+verbs report their classes under `plugin_declared`: those are the plugin's OWN
+declarations, not something this tool verified.

@@ -17,6 +17,7 @@ import sys
 from browser_control.cli import registry
 from browser_control.cli.argv import (
     _flags,
+    _head_of,
     _pop,
     _urls,
 )
@@ -199,17 +200,26 @@ flags: --browser NAME   the browser to drive (open/close/tab) or to narrow
                         from `tab frames` (a cross-origin frame is a target of
                         its own, so every verb that acts on a page's CONTENT
                         works inside it — not nav/back/forward/reload/list/
-                        frames/info/close/activate, which act on the tab)
+                        frames/info/close/activate, which act on the tab); a
+                        plugin action that declares `frames` takes it too
        --allow CLASSES  the capability classes this call may use (read, write,
-                        code, file, egress, or * for all)
+                        code, file, egress, or * for all); `egress` covers the
+                        verbs that hand a URL to the browser (open, tab,
+                        tab nav) and the caller-code ones, whose JS can fetch
        --deny CLASSES   classes it may not; a verb is refused `not-allowed`
                         when ANY of its classes fails the policy
 gate:  --allow/--deny, or BROWSER_CONTROL_ALLOW/BROWSER_CONTROL_DENY for a
-       whole session. `selftest` reports the policy in force and is the one
-       verb that is never gated — a gate that blocks its own explanation
-       would be a trap. No policy set means no gate.
+       whole session. `selftest` reports the policy in force; `selftest` and
+       `help` are the TWO verbs the gate does not consult, because neither
+       performs an action — a gate that blocked its own explanation would be
+       a trap. No policy set means no gate.
        --tab SPEC       the tab a page verb acts on (nav/back/forward/reload);
                         without it the verb acts on the ONLY page tab there is
+       --               ends the flags: every token after it is a POSITIONAL,
+                        so a TEXT or a URL starting with `-` is reachable
+                        (`tab type -- -hello`); the `--` itself is consumed,
+                        and a verb that takes no POSITIONAL refuses the first
+                        token after it by name (`attach -- --list`)
 reads: every drivable browser.  writes: a managed browser, or an attached one
        — `attach` grants TAB writes only, `close` never stops one; `tab js`
        and `tab wait --for js` count as writes (they run caller code)
@@ -219,9 +229,11 @@ def cmd_tab(rest: list[str], browser: str) -> dict:
 
     A subcommand is a reserved word, so `tab list` can never mean "open the
     site `list`" — a URL carries a scheme (`https://…`, `about:blank`), which
-    is what the URL policy enforces anyway.
+    is what the URL policy enforces anyway. A LEADING bare `--` is the
+    end-of-flags marker, so `tab -- list` is the URL `list` and not the
+    subcommand: after the marker nothing names a subcommand (`_head_of`).
     """
-    handler = registry.TAB_SUBCOMMANDS.get(str(rest[0]) if rest else "")
+    handler = registry.TAB_SUBCOMMANDS.get(_head_of(rest))
     if handler is not None:
         return handler(rest[1:], browser)
     return browser_lib.new_tab(_urls(rest, "tab"), browser=browser)
@@ -232,7 +244,7 @@ def cmd_profile(rest: list[str], browser: str) -> dict:
     CLI manages: seeing them, giving one a source profile's logins, and wiping
     one. The instance itself is named with the global `--profile DIR`.
     """
-    handler = registry.PROFILE_SUBCOMMANDS.get(str(rest[0]) if rest else "")
+    handler = registry.PROFILE_SUBCOMMANDS.get(_head_of(rest))
     if handler is None:
         fail(ERR_BAD_ARGS,
              "profile: a subcommand is required (info, logins, seed, reset)")
@@ -350,22 +362,22 @@ def _authorise(verb: str, rest: list[str],
     that cannot apply is refused here too, so `list --frame 1` and
     `open --frame 1 URL` cannot accept a scope and silently drop it.
     """
-    head = str(rest[0]) if rest else ""
+    head = _head_of(rest)
     if verb == "tab" and head and head not in registry.TAB_SUBCOMMANDS:
         _bare_tab_word(head)
     if flags["frame"] is not None and not str(flags["frame"]).strip():
         fail(ERR_BAD_ARGS,
              "--frame needs a VALUE — a URL substring or an index from "
              "`tab frames` (an empty value is not a frame)")
-    if flags["frame"] and verb != "selftest" and not (
-            verb == "tab" and head in dom.FRAME_VERBS):
+    if flags["frame"] and verb != "selftest" and not _takes_frame(verb, head):
         # a scope that cannot apply is REFUSED, by every verb: `list
         # --frame 1` and `open --frame 1 URL` used to accept it and drop it
         fail(ERR_BAD_ARGS,
              f"{verb}{' ' + head if head else ''}: --frame does not apply "
              "— it scopes the verbs that act on a page's CONTENT ("
              + ", ".join(sorted(dom.FRAME_VERBS))
-             + "), and `selftest` reports it; nothing else takes it")
+             + "), a plugin action that declares `frames`, and `selftest` "
+             "reports it; nothing else takes it")
     if verb != "selftest":
         # `selftest` is never gated: it is the verb that REPORTS the policy,
         # and a gate that blocks its own explanation is a trap. Everything
@@ -378,37 +390,46 @@ def _authorise(verb: str, rest: list[str],
                 wanted, capabilities.classes_for(wanted))
             if not permitted:
                 fail(ERR_NOT_ALLOWED, why)
-def _run_invocation(args: list[str]) -> int:
-    """One call end to end: plugins, globals, the gate, dispatch, emit.
+def _takes_frame(verb: str, head: str) -> bool:
+    """Does this call act inside the `--frame` scope?
 
-    Kept as one body because every step's ORDER is contract: plugins load before
+    The built-in answer is unchanged: a `tab` subcommand whose head is declared
+    in `dom.FRAME_VERBS`. A PLUGIN action opts in by declaring `"frames": True`
+    in its action spec (`plugins/page_reader.py` does, for a page whose words
+    are in a frame), which is the ONLY way `_authorise` lets a plugin verb take
+    a scope — the guard for the built-ins is not loosened, and a plugin that
+    does not declare it refuses exactly as it did before.
+    """
+    if verb == "tab":
+        return head in dom.FRAME_VERBS
+    plugin = registry.PLUGINS.actions.get(verb)
+    return plugin is not None and plugin.frames
+def _run_invocation(args: list[str]) -> int:
+    """One call end to end: the log, plugins, globals, the gate, dispatch, emit.
+
+    Kept as one body because every step's ORDER is contract: the audit line is
+    opened BEFORE anything can fail — the plugin load included, so a plugin can
+    no longer take the process down with no line written — plugins load before
     the help text and the gate, the scope/frame/policy are set or cleared before
     the handler runs, and the audit line is written in `finally` on every path
-    (refusals included). The two PURE decisions are called IN PLACE —
+    (refusals and `help` included). The two PURE decisions are called IN PLACE —
     `_parse_globals` where the globals are read, `_authorise` after the handler
     is known — so the order they run in is still this body's. `main` is the
     facade the console script calls.
     """
-    # Plugins load once per invocation, BEFORE the help text and the gate:
-    # `--help`/`selftest` report them, and the classes they declare have to be
-    # in the surface before `allowed()` is asked anything.
-    registry.PLUGINS.reset(plugins_lib.PluginSet.load(
-        reserved=set(registry.HANDLERS) | {"help"}))
-    capabilities.set_plugins(registry.PLUGINS.classes())
     # help is a VERB and also `-h`/`--help`, and the global flags may appear
     # anywhere — so the token is looked for after they are stripped too. The
     # argv[0]-only test made `--browser chrome --help` an `unknown-command`,
     # contradicting the flag grammar the usage text states (a review flagged
     # it). A bad global flag is left for the real parse below to refuse.
+    # A LEADING `--` is already past the flags, so the verb is the first token
+    # AFTER it: `-- help` asks for the help verb like `help` does.
     rest_for_help: list[str] = []
     with contextlib.suppress(ControlError):
         rest_for_help = _flags(args)[0]
-    if (args and args[0] in ("-h", "--help", "help")) or \
-            (rest_for_help and rest_for_help[0] in ("-h", "--help", "help")):
-        print(USAGE)
-        for usage in registry.PLUGINS.usages():
-            print(f"  {usage}")
-        return 0
+    first_for_help = (rest_for_help[1:]
+                      if rest_for_help and str(rest_for_help[0]) == "--"
+                      else rest_for_help)
     # reset the per-invocation secret HERE, before any early refusal: a call
     # that refuses before the verb must not be stamped with the PREVIOUS
     # call's `redacted` (a review flagged the stale stamp)
@@ -418,6 +439,30 @@ def _run_invocation(args: list[str]) -> int:
     ok = False
     code: str | None = None
     try:
+        # Plugins load once per invocation, BEFORE the help text and the gate:
+        # `--help`/`selftest` report them, and the classes they declare have to
+        # be in the surface before `allowed()` is asked anything. The load is
+        # INSIDE the try, after the log is open: `PluginSet.load` never raises
+        # and `discovery.import_module` swallows even a plugin's `sys.exit`, so
+        # this cannot fail — but if it ever did, the line this invocation owes
+        # would still be written and the failure would be a typed refusal.
+        registry.PLUGINS.reset(plugins_lib.PluginSet.load(
+            reserved=set(registry.HANDLERS) | {"help"}))
+        capabilities.set_plugins(registry.PLUGINS.classes())
+        if (args and args[0] in ("-h", "--help", "help")) or \
+                (first_for_help
+                 and first_for_help[0] in ("-h", "--help", "help")):
+            print(USAGE)
+            for usage in registry.PLUGINS.usages():
+                print(f"  {usage}")
+            # `help` is an invocation too: it writes its own audit line (the
+            # contract is one line per call) and it is one of the TWO verbs the
+            # gate never consults, because it performs no action — `selftest`
+            # is the other
+            verb = "help"
+            rest = rest_for_help
+            ok = True
+            return 0
         if not args:
             # INSIDE the try, so the `finally` writes the audit line: this
             # refusal used to return before the log existed, while the
@@ -430,6 +475,11 @@ def _run_invocation(args: list[str]) -> int:
             code = ERR_BAD_ARGS
             return 2
         rest, flags = _flags(args)
+        if rest and rest[0] == "--":
+            # a LEADING end-of-flags marker protects the VERB lookup and is then
+            # consumed: `-- tab list` lists tabs, and the verb itself is never
+            # read as a flag
+            rest = rest[1:]
         if not rest:
             # every token was a GLOBAL flag, so there is no verb to run: this
             # used to be an uncaught IndexError out of `main` — a traceback and
@@ -463,7 +513,7 @@ def _run_invocation(args: list[str]) -> int:
             raise ControlError(ERR_UNKNOWN_COMMAND,
                                f"{verb} (have: "
                                + ", ".join(registry.verb_names()) + ")")
-        head = str(rest[0]) if rest else ""
+        head = _head_of(rest)
         _authorise(verb, rest, flags)
         reply = handler(rest, browser)
         # ONE JSON object on stdout is the contract the usage text states and
@@ -476,7 +526,7 @@ def _run_invocation(args: list[str]) -> int:
                  f"{verb}: the handler returned {type(reply).__name__}, "
                  "not a JSON object")
         scoped_frame = dom.frame()
-        if verb == "tab" and head in dom.FRAME_VERBS and scoped_frame:
+        if _takes_frame(verb, head) and scoped_frame:
             # one place says which frame a scoped call acted in, so no verb has
             # to remember to (and none can forget to) — plus WHICH document that
             # turned out to be, because an index is the page's live frame order
@@ -511,10 +561,30 @@ def _run_invocation(args: list[str]) -> int:
             print("ERR[broken-pipe]: the reader of stdout went away",
                   file=sys.stderr)
         return 2
+    except SystemExit as e:
+        # `SystemExit` is NOT an `Exception` subclass, so the generic clause
+        # below never saw it: a plugin calling `sys.exit(0)` at import made
+        # EVERY invocation exit 0 with EMPTY stdout (indistinguishable from
+        # success to a JSON consumer), and `sys.exit(7)` from a plugin's `run`
+        # chose the plugin's own exit status. The loader already refuses that
+        # plugin; this clause is the belt: a `SystemExit` that reaches here is
+        # reported as `internal` with exit 2, the contract's refusal status,
+        # and it is still audited by the `finally` below.
+        code = ERR_INTERNAL
+        with contextlib.suppress(OSError):
+            print(f"ERR[{ERR_INTERNAL}]: a plugin tried to exit the process "
+                  f"({type(e).__name__}: {e}) — a plugin returns a reply "
+                  "object or refuses with fail(CODE, message), and this "
+                  "CLI's exit status is its own", file=sys.stderr)
+        return 2
     except Exception as e:                       # noqa: BLE001
         # ONE JSON object on stdout, or ERR[code] on stderr — an unexpected
         # failure is reported as `internal` with its type and message, never as
-        # a traceback, and it still reaches the action log in `finally`
+        # a traceback, and it still reaches the action log in `finally`.
+        # `KeyboardInterrupt` is deliberately NOT caught anywhere above: a
+        # plugin cannot raise it at import (the loader swallows it), and one
+        # raised from a running handler is indistinguishable from the caller
+        # pressing Ctrl-C, which must keep stopping the process.
         code = ERR_INTERNAL
         with contextlib.suppress(OSError):
             print(f"ERR[internal]: {type(e).__name__}: {e}", file=sys.stderr)

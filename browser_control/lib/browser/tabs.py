@@ -9,14 +9,18 @@ from __future__ import annotations
 import os
 
 from browser_control.lib import browser as _pkg
-from browser_control.lib import (
-    cdp,
-)
 from browser_control.lib.browser.constants import (
     ACTIVE_SPEC,
 )
+from browser_control.lib.browser.lifecycle import (
+    _writable_route,
+)
 from browser_control.lib.browser.machine import (
     may_write,
+    row_port,
+)
+from browser_control.lib.browser.readback import (
+    browser_call_at,
 )
 from browser_control.lib.errors import (
     ERR_BAD_ARGS,
@@ -88,16 +92,22 @@ def resolve_tab(rows: list[dict], spec: str) -> dict:
         fail(ERR_TAB_AMBIGUOUS, f"{needle!r} matches {len(hits)} tabs: {titles}")
     return hits[0]
 
-def _visible(profile: str, target_id: str) -> bool | None:
+def _visible(profile: str, target_id: str, port: int = 0) -> bool | None:
     """Does that tab's page report itself visible? None when it cannot say.
 
     `document.visibilityState` is what makes a tab "the active one": measured
     in this project, a hidden tab still has a viewport, layout and hit-testing,
     so geometry cannot tell the two apart — this can.
+
+    `port` is the endpoint the CALLER resolved (the row's own). Without one the
+    read re-resolves it (`driver_port`), which is a SECOND oracle for a browser
+    this verb already has a row for: `--tab active` used to do exactly that per
+    candidate, so a port file that had gone stale could answer `[]`/
+    `no-page-tab` about a browser whose tabs were fine (a review measured it).
     """
     try:
         return _pkg._eval(profile, target_id, "document.visibilityState",
-                     timeout=5) == "visible"
+                     timeout=5, port=port) == "visible"
     except ControlError:
         return None
 
@@ -111,10 +121,14 @@ def _spec_hits(rows: list[dict], tabs_of: dict,
     same way `tab list` can never mean a site called "list".
     """
     if str(spec).strip().lower() == ACTIVE_SPEC:
+        # ONE port per row: the row the census returned already resolved the
+        # endpoint the file-vs-cmdline question, so the visibility read is
+        # aimed at THAT port instead of re-resolving it per candidate
         return [(row, tab, index)
                 for row in rows
                 for index, tab in enumerate(tabs_of[row["pid"]])
-                if _visible(str(row["profile"]), str(tab["id"]))]
+                if _visible(str(row["profile"]), str(tab["id"]),
+                            row_port(row))]
     hits: list[tuple[dict, dict, int]] = []
     for row in rows:
         tabs = tabs_of[row["pid"]]
@@ -389,23 +403,31 @@ def _close_and_verify(ours: list[tuple[dict, dict, int]]) -> None:
     """Close every resolved tab, then prove each id is GONE.
 
     The close goes per browser, and each profile's endpoint is re-verified
-    once first — `browser_call` re-reads the port FILE at call time, so a
-    close must not go wherever it points. Every requested id is then read
+    once first — against the port the RESOLVED ROW names (`row_port`), which is
+    the only oracle for a browser started with an explicit
+    `--remote-debugging-port=N`: such a browser writes no `DevToolsActivePort`,
+    so a close aimed through the port FILE would refuse `cdp-unreachable` at a
+    browser that is right there. `browser_call_at` also re-judges that port's
+    holder immediately before it connects, so a stale port file or a port
+    taken over in between receives nothing. Every requested id is then read
     back: a survivor is a refusal that names it, never a silent success.
     """
-    by_profile: dict[str, list[str]] = {}
+    by_profile: dict[str, tuple[dict, list[str]]] = {}
     for row, tab, _index in ours:
-        by_profile.setdefault(str(row["profile"]), []).append(str(tab["id"]))
-    for profile, ids in by_profile.items():
-        # closing a tab is a WRITE, and `browser_call` re-reads the port FILE at
-        # call time: ask the kernel once per profile first (a review measured
-        # that this loop went wherever the port file pointed)
-        _pkg._verify_profile_endpoint(profile)
+        _row, ids = by_profile.setdefault(str(row["profile"]), (row, []))
+        ids.append(str(tab["id"]))
+    for profile, (row, ids) in by_profile.items():
+        # closing a tab is a WRITE, and the call below aims at a port resolved
+        # at call time: ask the kernel about THAT port once per profile first
+        # (a review measured that this loop went wherever the port file
+        # pointed)
+        port = row_port(row)
+        _pkg._verify_profile_endpoint(profile, port)
         for target_id in ids:
-            cdp.browser_call(profile, "Target.closeTarget",
-                             {"targetId": target_id})
+            browser_call_at(profile, port, "Target.closeTarget",
+                            {"targetId": target_id})
     survivors: list[str] = []
-    for profile, ids in by_profile.items():
+    for profile, (_row, ids) in by_profile.items():
         survivors += _pkg._wait_ids_gone(profile, ids)
     if survivors:
         fail(ERR_CLOSE_TAB_NOT_VERIFIED,
@@ -516,15 +538,20 @@ def new_tab(urls: list[str] | None = None, browser: str = "") -> dict:
 
     A write, so it goes to a MANAGED browser: the one `--browser` names, else
     the live managed one — never a browser this CLI did not start.
+
+    The profile AND its port come from ONE census (`_writable_route`), because
+    a browser started with an explicit `--remote-debugging-port=N` writes no
+    port file: the row's own port is what the create-call and both read-backs
+    (the tab list and the reply's count) are aimed at.
     """
     # the URL policy comes FIRST: an address this tool will never open is
     # wrong whether or not a browser is running (the order `launch` uses)
     wanted = [_pkg.safe_url(url) for url in (urls or [])] or ["about:blank"]
-    profile = _pkg._writable_profile(browser)
-    _pkg.ensure_up(profile)
-    opened = _pkg._open_tabs(profile, wanted)
+    profile, port = _writable_route(browser)
+    _pkg.ensure_up(profile, port)
+    opened = _pkg._open_tabs(profile, wanted, port)
     reply: dict = {
-        "ok": True, "count": len(_pkg._rows(profile)),
+        "ok": True, "count": len(_pkg._rows(profile, port)),
         "opened": [{"requested": url, "id": row["id"], "url": row["url"],
                     "title": row["title"]}
                    for url, row in zip(wanted, opened, strict=True)]}

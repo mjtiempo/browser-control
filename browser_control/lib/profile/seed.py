@@ -6,8 +6,13 @@ CLI's own records (`trees.SEED_SKIP`), with the destination's lock held across
 the whole copy — and across the `--force` wipe that precedes it, because
 `--force` REPLACES the target rather than merging into it (the wipe is
 `reset`'s, so what is left is the source's content and never a mix of the
-two). What landed is read back twice — by file size, and by the login stores
-themselves (`stores._logins_facts`).
+two). What landed is read back twice — by the size each file was COPIED at (the
+walk's manifest, never a fresh stat of a source that may be a RUNNING browser
+rewriting it), and by the login stores themselves (`stores._logins_facts`).
+
+The target is marked as this CLI's own BEFORE the copy starts, so a seed that
+fails half way is still cleanable. The source and the destination are compared
+by REAL path, so no symlink can point the copy into its own output.
 """
 from __future__ import annotations
 
@@ -96,7 +101,10 @@ def seed(source: str = "", profile: str = "", browser: str = "",
     the target used to survive it and the profile became a mix of two (a review
     flagged the promise the refusal makes). `--dry` first reports what would
     land AND what `--force` would destroy, in bytes and files, without writing
-    anything.
+    anything — and says `would_refuse` (the code the same call WITHOUT `--dry`
+    would refuse with, "" when it would go through), because a dry reply a
+    caller gates the real call on must not come back green for a call that
+    cannot run.
     """
     if not source:
         fail(ERR_BAD_ARGS,
@@ -109,17 +117,24 @@ def seed(source: str = "", profile: str = "", browser: str = "",
         fail(ERR_BAD_ARGS, f"profile seed: {src} is not a directory")
     target = Instance.resolve(profile, browser, verb="seed").path
     dest = _seed_destination(src, target)
-    if src == dest or src.startswith(dest + os.sep) \
-            or dest.startswith(src + os.sep):
+    # the same-tree guard, by REAL path: the lexical compare it replaces let a
+    # `--from` that reached the destination through a SYMLINK through, and the
+    # copy then walked into its own output (`Default/inst/Default/inst/…` until
+    # ENAMETOOLONG — 938 directories / 1560 files / 312 levels, left behind; a
+    # review measured it). The copy engine asks the same question again before
+    # it creates a directory, so neither guard is the only one.
+    overlap = seedtree.trees_overlap(src, dest)
+    if overlap:
         fail(ERR_BAD_ARGS,
-             f"profile seed: the source and the destination are the same "
-             f"tree ({src} and {dest})")
+             f"profile seed: the source and the destination are the same tree "
+             f"({src} and {dest}): {overlap}")
     Instance(target).refuse_live("seeding")
     # the SOURCE may be running: that is a legitimate snapshot, so it is a
     # warning and not a refusal — Chrome flushes cookies to disk lazily, so what
     # is copied can lag the live state by a few seconds
     source_pid = Instance(src).live_pid()
     held = True
+    would_refuse = ""
     # `--dry` must not write anything: taking the target's lock CREATES the
     # target directory and its lock file, and the docstring promises "without
     # writing anything" (a review flagged it). The root lock still orders the
@@ -135,11 +150,17 @@ def seed(source: str = "", profile: str = "", browser: str = "",
             # started on (a review measured it). Re-checked UNDER the lock.
             Instance(target).refuse_live("seeding")
         existing = _has_content(target)
-        if existing and not force and not dry:
-            fail(ERR_PROFILE_EXISTS,
-                 f"{target} already holds a profile — `profile seed --force` "
-                 "overwrites it (logins and all), or `profile reset --force` "
-                 "clears it first; `--dry` reports what this call would copy")
+        if existing and not force:
+            # the refusal the real call makes is also what a `--dry` run
+            # REPORTS: a green dry reply that the same call without `--dry`
+            # then refuses is a trap for a caller gating on it (a review
+            # flagged it), so the dry reply carries `would_refuse` below
+            would_refuse = ERR_PROFILE_EXISTS
+            if not dry:
+                fail(ERR_PROFILE_EXISTS,
+                     f"{target} already holds a profile — `profile seed --force` "
+                     "overwrites it (logins and all), or `profile reset --force` "
+                     "clears it first; `--dry` reports what this call would copy")
         # `--force` OVERWRITES, which is what the refusal above promises: the
         # copy alone writes only what the SOURCE holds, so files unique to the
         # target survived it and the result was a MIX of the two profiles (a
@@ -149,17 +170,21 @@ def seed(source: str = "", profile: str = "", browser: str = "",
         # counted FIRST, because the reply has to say what was LOST, not only
         # what arrived.
         wipe = _tree(target, count_skips=True) if existing and force else None
-        if wipe is not None and not dry and not marked(target):
+        if wipe is not None and not marked(target):
             # a root moved with BROWSER_CONTROL_ROOT is caller-chosen: the
             # recursive wipe refuses a directory this CLI cannot prove it
             # created (a review found `seed --force` could delete anything
-            # under such a root). The marker is written by `open`/`seed`.
-            fail(ERR_NOT_MANAGED,
-                 f"{target} was not created by this CLI (no {MARKER} marker) "
-                 "and the managed root is not the default one — refusing to "
-                 "recursively delete a directory this tool cannot prove is "
-                 "its own. Remove it yourself, or create the profile with "
-                 "`open`/`profile seed`")
+            # under such a root). The marker is written by `open`/`seed` — and
+            # `would_refuse` says so to a `--dry` caller, because the real call
+            # refuses here too.
+            would_refuse = ERR_NOT_MANAGED
+            if not dry:
+                fail(ERR_NOT_MANAGED,
+                     f"{target} was not created by this CLI (no {MARKER} marker) "
+                     "and the managed root is not the default one — refusing to "
+                     "recursively delete a directory this tool cannot prove is "
+                     "its own. Remove it yourself, or create the profile with "
+                     "`open`/`profile seed`")
         detached = False
         if wipe is not None and not dry:
             detached = browser_lib.is_attached(target)
@@ -177,6 +202,16 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                 fail(ERR_RESET_NOT_VERIFIED,
                      f"{target} still exists after the wipe — something "
                      "recreated it")
+        if not dry:
+            # the TARGET is THIS CLI's own profile from here on, and the marker
+            # is written BEFORE the copy: it used to land only after the
+            # read-back, so a copy that failed half way (ENOSPC, an unreadable
+            # source file) left a partial directory under a moved root that
+            # `profile reset --force` then refused `not-managed` — neither
+            # re-seedable nor cleanable (a review found it). The directory is
+            # made here, 0700, so the marker has somewhere to go.
+            seedtree.private_dir(target)
+            mark(target)
         facts = _copy(src, dest, dry)
         if dry:
             held = False
@@ -188,15 +223,18 @@ def seed(source: str = "", profile: str = "", browser: str = "",
                  "could not be read, so this copy is PARTIAL and nothing "
                  "was verified: " + "; ".join(facts["unreadable"][:3]))
         else:
-            absent = seedtree.missing(facts["entries"], src, dest)
+            absent = seedtree.missing(facts["entries"], src, dest,
+                                      sizes=facts["sizes"])
             if absent:
                 fail(ERR_SEED_NOT_VERIFIED,
                      f"{len(absent)} file(s) did not land in {dest}: "
                      + ", ".join(absent[:4]))
-            # what landed is THIS CLI's own profile now, whatever root it sits
-            # under: the marker is what a later `--force` wipe checks
-            mark(target)
     wiped = wipe if not dry else None    # the facts of a wipe that HAPPENED
+    # the source files whose SIZE moved under the copy: a fact about the source
+    # (a live browser rewriting `*-journal`/`*-wal`/leveldb `.log` files), never
+    # a file that "did not land" — each landed at the size its source had when
+    # it was copied. Named relative to the source and capped, like `missing`.
+    changed = sorted({os.path.relpath(path, src) for path in facts["changed"]})
     reply = {"ok": True, "from": src, "profile": target,
              "profile_dir": dest, "dry": bool(dry),
              "copied_bytes": facts["bytes"], "copied_files": facts["files"],
@@ -206,6 +244,8 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              "special_files": facts["special"],
              "links_planted": facts["links_planted"],
              "unreadable": facts["unreadable"],
+             "changed": changed[:8],
+             "changed_files": len(changed),
              # what `--force` DESTROYED, not only what arrived: the wipe runs
              # under the same lock as the copy, so the two counts describe one
              # consistent transition
@@ -214,13 +254,22 @@ def seed(source: str = "", profile: str = "", browser: str = "",
              "wiped_bytes": wiped["bytes"] if wiped is not None else 0,
              "detached": detached,
              "verified": bool(held),
-             # WHAT the check could see, said out loud: the sizes of the files
-             # this copy walked. A same-size corruption is outside that oracle,
-             # and a caller should not have to guess which one was used.
-             "verified_by": "size of every file this copy walked",
+             # WHAT the check could see, said out loud: the size the SOURCE had
+             # for each file as the copy read it. A same-size corruption is
+             # outside that oracle, a file whose source moved under the copy has
+             # no size to be held to (`changed` names it), and a caller should
+             # not have to guess which one was used.
+             "verified_by": "size of the source of every file this copy walked, "
+                            "recorded as it was copied",
              "note": ("same machine, same user: Chrome's cookie and password "
                       "keys live in the OS keyring, so the copy decrypts here "
                       "and only here")}
+    if dry:
+        # a dry run writes nothing, so it must also SAY what the same call
+        # without `--dry` would do: a green dry reply that the real call then
+        # refuses is a trap for a caller gating the real call on it (a review
+        # flagged it). "" means nothing would refuse.
+        reply["would_refuse"] = would_refuse
     if dry and wipe is not None:
         # a dry run writes nothing, so the wipe it would cause is reported
         # under its own name — a dry reply must never claim a wipe that did
@@ -233,9 +282,18 @@ def seed(source: str = "", profile: str = "", browser: str = "",
         reply["logins"] = _logins_facts(target, cap=SEED_LOGINS_SITES)
     lock.warn(reply)
     profile_lock.warn(reply)
+    notes: list[str] = []
+    if changed:
+        notes.append(f"{len(changed)} file(s) under {src} changed on disk while "
+                     "the copy ran (a source in use?): the copy read them "
+                     "mid-rewrite, so their bytes landed from between two "
+                     "sizes and no size is held against them — a file that "
+                     "landed SHORT is refused by name, never blamed on the "
+                     "source")
     if source_pid:
-        lag = (f"the source profile is in use (pid {source_pid}): what is on "
-               "disk may lag its live state by a few seconds")
-        reply["warning"] = f"{reply['warning']}; {lag}" if "warning" in reply \
-            else lag
+        notes.append(f"the source profile is in use (pid {source_pid}): what is "
+                     "on disk may lag its live state by a few seconds")
+    for note in notes:
+        reply["warning"] = (f"{reply['warning']}; {note}"
+                            if "warning" in reply else note)
     return reply

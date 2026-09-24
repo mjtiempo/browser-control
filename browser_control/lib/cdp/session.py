@@ -16,9 +16,12 @@ from browser_control.lib.cdp.rpc import (
     BLOCKED_HINT,
     DIALOG_EVENT,
     DIALOG_GRACE_S,
+    EVAL_RESULT_CAP,
     PARKED_BUDGET_S,
     _await_reply,
     _checked_ws,
+    _error_text,
+    _json_object,
     _page_enable,
     _value_of,
 )
@@ -32,6 +35,13 @@ from browser_control.lib.errors import (
     fail,
 )
 from browser_control.lib.text import foreign
+
+# The closing handshake gets ONE second, at connect. websockets' default is
+# ten, and `close()` WAITS it out against a peer that never answers the close
+# frame — so every verb's budget silently grew by up to ten seconds (measured:
+# a 1 s budget took 11 s). This is the one number in the transport that is
+# about a peer that has already stopped mattering.
+CLOSE_TIMEOUT_S = 1.0
 
 
 def require_websockets() -> None:
@@ -87,8 +97,10 @@ class Session:
             try:
                 self._ws = self._loop.run_until_complete(
                     # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- loopback-only, host-checked by _checked_ws  # noqa: E501
-                    rpc.websockets.connect(self._ws_url, max_size=2 ** 24,
-                                       open_timeout=10))
+                    rpc.websockets.connect(self._ws_url,
+                                           max_size=rpc.TRANSPORT_CAP,
+                                           open_timeout=10,
+                                           close_timeout=CLOSE_TIMEOUT_S))
             except Exception as e:                             # noqa: BLE001
                 self.close()
                 raise ControlError(ERR_CDP_ERROR,
@@ -199,9 +211,7 @@ class Session:
 
         return await _await_reply(
             ws, rid, method, params, budget,
-            error_text=lambda err: (
-                f"{method}: {foreign(err.get('message'))} "
-                f"(code {foreign(err.get('code'), 40)})"),
+            error_text=lambda err: _error_text(method, err),
             on_timeout=timed_out, on_deadline=past_deadline,
             on_frame=saw, wait_hook=wait_hook)
 
@@ -227,17 +237,25 @@ class Session:
             raise ControlError(ERR_CDP_ERROR, f"{method}: {e}") from e
 
     def evaluate(self, expression: str, timeout: float = 0.0,
-                 raw: bool = False) -> Any:
+                 raw: bool = False,
+                 cap: int | None = EVAL_RESULT_CAP) -> Any:
         """One Runtime.evaluate on the open connection, value semantics.
 
         `raw=True` hands a string answer back UNDECODED — the escape hatch's
         reading, where a page string that happens to parse as JSON is still
         that string (`rpc._value_of`). Every internal probe wants the decode,
         which is why it stays the default.
+
+        `cap` is the POST-transfer size refusal, and `None` is the only way to
+        turn it off: a verb whose expression already sliced its answer IN THE
+        PAGE passes it, because JSON escaping inflates the wire value past the
+        text the page produced. The transport's own 16 MiB frame limit still
+        applies to every call (`rpc.TRANSPORT_CAP`).
         """
         return _value_of(self.call(
             "Runtime.evaluate",
-            {"expression": expression, "returnByValue": True}, timeout), raw)
+            {"expression": expression, "returnByValue": True}, timeout),
+            raw, cap)
 
     def handle(self, expression: str, timeout: float = 0.0) -> str:
         """The objectId of a NON-serialized expression, for `DOM.requestNode`.
@@ -250,14 +268,31 @@ class Session:
                            {"expression": expression, "returnByValue": False},
                            timeout)
         details = result.get("exceptionDetails")
-        if details:
-            exception = details.get("exception") or {}
+        if isinstance(details, dict) and details:
+            exception = details.get("exception")
+            if not isinstance(exception, dict):
+                # `exception` is an object in the protocol; a peer that answers
+                # a string or a list used to raise a raw AttributeError here,
+                # out of a `lib` call that promises a typed refusal (a review
+                # flagged it). A non-object is treated as absent, so the
+                # refusal stays `js-error` and names what text there was.
+                exception = {}
             text = str(exception.get("description") or details.get("text")
                        or "page JS exception")
             fail(ERR_JS_ERROR, f"Runtime.evaluate: {foreign(text)}")
-        return str((result.get("result") or {}).get("objectId") or "")
+        inner = _json_object(result.get("result"), "Runtime.evaluate")
+        return str(inner.get("objectId") or "")
 
     def close(self) -> None:
+        """Drop the connection and its loop, on a bounded clock.
+
+        The closing handshake is bounded by `CLOSE_TIMEOUT_S` (passed at
+        connect), so a peer that never answers the close frame costs one
+        second, not ten — the budget a verb was given is the budget it keeps.
+        Whatever the close raises is suppressed: the session is going away, and
+        a transport that already died is not a new failure. The loop is closed
+        after it, so no loop and no transport outlive the session.
+        """
         if self._ws is not None:
             with contextlib.suppress(Exception):
                 self._loop.run_until_complete(self._ws.close())
@@ -287,7 +322,7 @@ def call(ws_url: str, method: str, params: dict | None = None,
 
 
 def evaluate(ws_url: str, expression: str, timeout: float = 15.0,
-             raw: bool = False) -> Any:
+             raw: bool = False, cap: int | None = EVAL_RESULT_CAP) -> Any:
     """Evaluate an expression on ONE tab's own connection, returning its value.
 
     `returnByValue`, so a page that answers JSON is decoded to the value it
@@ -297,10 +332,14 @@ def evaluate(ws_url: str, expression: str, timeout: float = 15.0,
     because a caller branches on them: the page THREW (`js-error`), the page
     did not answer within the budget (`eval-timeout`), and the transport itself
     failed (`cdp-error`).
+
+    `cap` is `_value_of`'s POST-transfer size refusal (64 k by default);
+    `cap=None` is for a verb whose expression already bounded its answer in the
+    page. The 16 MiB frame limit bounds the transfer whatever `cap` says.
     """
     require_websockets()
     with Session(_checked_ws(ws_url, "tab")) as session:
-        return session.evaluate(expression, timeout, raw)
+        return session.evaluate(expression, timeout, raw, cap)
 
 
 def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
@@ -312,6 +351,17 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
     connections. A sample the page does not answer is what a poll loop is FOR:
     it is caught and the loop continues; only the connection itself failing,
     or a tab that was ALREADY parked when the session opened, refuses.
+
+    The deadline is the POLL's, so it is read BEFORE every sample: a sample is
+    given exactly what is left of the budget, and with nothing left the loop
+    returns the last value and its sample count without starting another one.
+    The old `max(0.5, deadline - now)` handed every sample half a second no
+    matter what remained, so a poll could run `interval + 0.5s` past its own
+    timeout (a review measured it). The sleep between samples is bounded by
+    what is left as well, so the loop ends AT the deadline rather than
+    `interval` after it. (`_await_reply` still floors one wait at 0.1 s, so a
+    sample with less than that left can overrun by that floor — it is the
+    transport's own granularity, not a second budget.)
     """
     require_websockets()
     deadline = time.monotonic() + timeout
@@ -324,10 +374,12 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
             # answer, and the old path refused `blocked` right here
             raise ControlError(ERR_BLOCKED, BLOCKED_HINT)
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return value, samples
             samples += 1
             try:
-                value = session.evaluate(expression,
-                                         max(0.5, deadline - time.monotonic()))
+                value = session.evaluate(expression, remaining)
                 if accept(value):
                     return value, samples
             except ControlError as e:
@@ -335,6 +387,7 @@ def evaluate_until(ws_url: str, expression: str, accept: Any, timeout: float,
                 # is what the loop is for; anything else is a real failure
                 if e.code not in (ERR_EVAL_TIMEOUT, ERR_BLOCKED):
                     raise
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return value, samples
-            time.sleep(interval)
+            time.sleep(min(interval, remaining))

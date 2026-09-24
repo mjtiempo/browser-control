@@ -61,14 +61,14 @@ def cmd_tab_close(rest: list[str], browser: str) -> dict:
     rest, dry = _switch(rest, "--dry")
     rest, excepts = _pop_all(rest, "--except", "tab close")
     rest, likes = _pop_all(rest, "--like", "tab close")
-    _no_flags(rest, "tab close")
+    rest = _no_flags(rest, "tab close")
     return browser_lib.close_tabs(rest, browser=browser, title=title, url=url,
                       all_tabs=every, excepts=excepts, like=likes, dry=dry)
 
 def cmd_tab_nav(rest: list[str], browser: str) -> dict:
     """`tab nav URL [--tab SPEC]` — navigate, then read the address back."""
     rest, spec = _tab_flag(rest, "tab nav")
-    _no_flags(rest, "tab nav")
+    rest = _no_flags(rest, "tab nav")
     if not rest:
         fail(ERR_BAD_ARGS,
              "tab nav: a URL is required (http(s) or about:blank)")
@@ -165,7 +165,7 @@ def cmd_tab_screenshot(rest: list[str], browser: str) -> dict:
     rest, path = _pop(rest, "--path", "tab screenshot")
     rest, full = _switch(rest, "--full")
     rest, force = _switch(rest, "--force")
-    _no_flags(rest, "tab screenshot")
+    rest = _no_flags(rest, "tab screenshot")
     if len(rest) > 1:
         fail(ERR_BAD_ARGS, f"tab screenshot: one PATH at most, got {len(rest)}")
     if rest and path is not None:
@@ -200,7 +200,7 @@ def cmd_tab_extract(rest: list[str], browser: str) -> dict:
 def cmd_tab_js(rest: list[str], browser: str) -> dict:
     """`tab js EXPR [--tab SPEC]` — the escape hatch, declared unverified."""
     rest, spec = _tab_flag(rest, "tab js")
-    _no_flags(rest, "tab js")
+    rest = _no_flags(rest, "tab js")
     if not rest:
         fail(ERR_BAD_ARGS, "tab js: an EXPRESSION is required")
     if len(rest) > 1:
@@ -311,7 +311,7 @@ def cmd_tab_focus(rest: list[str], browser: str) -> dict:
 def cmd_tab_press(rest: list[str], browser: str) -> dict:
     """`tab press KEY [--tab SPEC]` — one key event at the DOM focus."""
     rest, spec = _tab_flag(rest, "tab press")
-    _no_flags(rest, "tab press")
+    rest = _no_flags(rest, "tab press")
     if not rest:
         fail(ERR_BAD_ARGS, "tab press: KEY is required (enter, tab, escape, …)")
     if len(rest) > 1:
@@ -335,7 +335,7 @@ def cmd_tab_upload(rest: list[str], browser: str) -> dict:
     rest, spec = _tab_flag(rest, "tab upload")
     rest, selector = _pop(rest, "--selector", "tab upload")
     rest, index = _pop(rest, "--index", "tab upload")
-    _no_flags(rest, "tab upload")
+    rest = _no_flags(rest, "tab upload")
     if not rest:
         fail(ERR_BAD_ARGS, "tab upload: FILE is required (an absolute path)")
     if len(rest) > 1:
@@ -348,7 +348,7 @@ def cmd_tab_media(rest: list[str], browser: str) -> dict:
     """`tab media state|play|pause [--index N] [--tab SPEC]`."""
     rest, spec = _tab_flag(rest, "tab media")
     rest, index = _pop(rest, "--index", "tab media")
-    _no_flags(rest, "tab media")
+    rest = _no_flags(rest, "tab media")
     if not rest:
         fail(ERR_BAD_ARGS, "tab media: MODE is required (state, play or pause)")
     if len(rest) > 1:

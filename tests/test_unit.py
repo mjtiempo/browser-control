@@ -9,6 +9,7 @@ CDP HTTP read path against a fake endpoint.
 """
 from __future__ import annotations
 
+import binascii
 import contextlib
 import glob
 import http.server
@@ -62,12 +63,14 @@ from browser_control.lib import scope as scope_lib
 from browser_control.lib.browser import lifecycle as lifecycle_lib  # noqa: E402
 from browser_control.lib.browser import machine as machine_lib  # noqa: E402
 from browser_control.lib.browser import readback as readback_lib  # noqa: E402
+from browser_control.lib.browser import tabs as tabs_lib  # noqa: E402
 # These four are bound through importlib because their facades re-export the
 # VERB of the same name (`browser.nav` is the function, not the module), so a
 # plain `from … import nav` would hand the check a function where it needs the
 # module's patchable seams (`page_eval`, `poll`).
 nav_lib: Any = import_module("browser_control.lib.browser.nav")
 dialog_lib: Any = import_module("browser_control.lib.dom.dialog")
+frames_lib: Any = import_module("browser_control.lib.dom.frames")
 media_lib: Any = import_module("browser_control.lib.dom.media")
 scroll_lib: Any = import_module("browser_control.lib.dom.scroll")
 actions_lib: Any = import_module("browser_control.lib.dom.actions")
@@ -132,6 +135,24 @@ def run_cli(argv: list[str]) -> tuple[int, str, str]:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         rc = cli_main.main(argv)
     return rc, out.getvalue(), err.getvalue()
+
+
+def _png(width: int, height: int) -> bytes:
+    """A COMPLETE minimal PNG, for the checks that judge a file by its bytes.
+
+    Signature, an IHDR with its real length and CRC, an (empty) IDAT and the
+    trailing IEND. `png_size` refuses a header-only stub, so every fixture
+    that means "this IS a PNG" has to be a whole one (a review found the
+    screenshot fixtures were 28-byte stubs).
+    """
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (len(body).to_bytes(4, "big") + kind + body
+                + binascii.crc32(kind + body).to_bytes(4, "big"))
+
+    ihdr = (width.to_bytes(4, "big") + height.to_bytes(4, "big")
+            + bytes([8, 6, 0, 0, 0]))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", b"") + chunk(b"IEND", b""))
 
 
 # ------------------------------------------------------------------- checks
@@ -464,7 +485,11 @@ def t_expressions_and_shot_rules() -> None:
     assert images_lib.png_size(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20) == []
     header = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
               + (1882).to_bytes(4, "big") + (842).to_bytes(4, "big"))
-    assert images_lib.png_size(header) == [1882, 842]
+    # a header-ONLY file is not a PNG: the IHDR body, a following chunk and a
+    # trailing IEND are required (a 28-byte stub used to be accepted, so
+    # "the file's own header vouches for it" vouched for nothing)
+    assert images_lib.png_size(header) == []
+    assert images_lib.png_size(_png(1882, 842)) == [1882, 842]
     assert images_lib.expected_pixels(941, 2) == 1882
     for css, ratio in ((941, float("inf")), (941, float("nan")),
                        (10 ** 9, 2.0), (10, 0.0), (10, -1.0)):
@@ -1016,49 +1041,65 @@ def t_one_tab_addressing() -> None:
             # the port file pointed (a review found no test for it at all)
             calls: list[tuple] = []
             real_owner, real_port = browser.endpoint_owner, cdp.port_of
-            real_call, real_verify = cdp.browser_call, browser._verify_profile_endpoint
+            real_listener, real_call = cdp.listener_of, cdp.call
+            real_call_at = tabs_lib.browser_call_at
+            real_verify = browser._verify_profile_endpoint   # noqa: SLF001
+            cdp.port_of = lambda profile: 1515                # type: ignore[assignment]
             browser.endpoint_owner = lambda profile, port: {    # type: ignore[assignment]
                 "verified": False, "reason": "a stranger holds that port"}
-            cdp.port_of = lambda profile: 1515                # type: ignore[assignment]
-            cdp.browser_call = lambda profile, method, params: (  # type: ignore[assignment]
-                calls.append((profile, method)) or {})
+            cdp.call = lambda ws, method, params=None, timeout=15.0: (  # type: ignore[assignment]
+                calls.append((method, params)) or {})
             try:
                 refusal(lambda: browser._open_tabs(         # noqa: SLF001
                     str(rows()[0]["profile"]), ["about:blank"]),
                     "cdp-not-local")
                 assert calls == [], calls
+                # …and the tab-CLOSING path asks too, once per profile (its
+                # endpoint call is `readback.browser_call_at`, the one seam
+                # that re-judges the port's holder right before connecting)
+                asked: list[str] = []
+                browser._verify_profile_endpoint = \
+                    lambda profile, port=0: asked.append(profile)  # type: ignore[assignment]
+                tabs_lib.browser_call_at = (                # type: ignore[assignment]
+                    lambda profile, port, method, params:
+                    tabs.__setitem__(1616, []) or {})
+                try:
+                    browser.close_tabs(["AB12"])
+                finally:
+                    browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
+                    tabs_lib.browser_call_at = real_call_at      # type: ignore[assignment]
+                assert asked == [str(rows()[0]["profile"])], asked
+                # …and it REFUSES before any browser call when the endpoint is
+                # not the browser we think (the probe above only asserted that
+                # it asked)
+                tabs[1616] = [page("AB12")]
+                calls2: list[tuple] = []
+                cdp.call = lambda ws, method, params=None, timeout=15.0: (  # type: ignore[assignment]
+                    calls2.append((method, params)) or {})
+                refusal(lambda: browser.close_tabs(["AB12"]), "cdp-not-local")
+                assert calls2 == [], calls2
+                # …and the VERDICT is re-taken at the connection itself: the
+                # endpoint can answer `verified` and then be REBOUND to another
+                # holder between the check and the write (the TOCTOU a review
+                # measured), so `browser_call_at` asks the KERNEL again and
+                # sends nothing when the holder is no longer this browser
+                browser.endpoint_owner = lambda profile, port: {  # type: ignore[assignment]
+                    "verified": True, "reason": ""}
+                cdp.listener_of = lambda port: {             # type: ignore[assignment]
+                    "pid": 999, "exe": "python3", "cmd": "python3 -c pass"}
+                calls3: list[tuple] = []
+                cdp.call = lambda ws, method, params=None, timeout=15.0: (  # type: ignore[assignment]
+                    calls3.append((method, params)) or {})
+                refusal(lambda: browser._open_tabs(          # noqa: SLF001
+                    str(rows()[0]["profile"]), ["about:blank"]),
+                    "cdp-not-local")
+                assert calls3 == [], calls3
             finally:
                 browser.endpoint_owner = real_owner          # type: ignore[assignment]
                 cdp.port_of = real_port                      # type: ignore[assignment]
-                cdp.browser_call = real_call                 # type: ignore[assignment]
-            # …and the tab-CLOSING path asks too, once per profile
-            asked: list[str] = []
-            browser._verify_profile_endpoint = \
-                lambda profile: asked.append(profile)        # type: ignore[assignment]
-            cdp.browser_call = lambda profile, method, params: \
-                tabs.__setitem__(1616, []) or {}             # type: ignore[assignment]
-            try:
-                browser.close_tabs(["AB12"])
-            finally:
-                browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
-                cdp.browser_call = real_call                 # type: ignore[assignment]
-            assert asked == [str(rows()[0]["profile"])], asked
-            # …and it REFUSES before any browser call when the endpoint is not
-            # the browser we think (the probe above only asserted that it asked)
-            calls2: list[tuple] = []
-            cdp.browser_call = lambda profile, method, params: (  # type: ignore[assignment]
-                calls2.append((profile, method)) or {})
-            browser.endpoint_owner = lambda profile, port: {      # type: ignore[assignment]
-                "verified": False, "reason": "a stranger holds that port"}
-            cdp.port_of = lambda profile: 1515                 # type: ignore[assignment]
-            tabs[1616] = [page("AB12")]
-            try:
-                refusal(lambda: browser.close_tabs(["AB12"]), "cdp-not-local")
-                assert calls2 == [], calls2
-            finally:
-                browser.endpoint_owner = real_owner           # type: ignore[assignment]
-                cdp.port_of = real_port                       # type: ignore[assignment]
-                cdp.browser_call = real_call                  # type: ignore[assignment]
+                cdp.listener_of = real_listener              # type: ignore[assignment]
+                cdp.call = real_call                         # type: ignore[assignment]
+                tabs_lib.browser_call_at = real_call_at      # type: ignore[assignment]
             # …and the BEHAVIOUR above is the check: a failed read refuses and
             # a good one passes through. The old assertion read the tier's
             # source text for `_tabs_of(row)[0]`; the refusal test proves the
@@ -1442,11 +1483,11 @@ def t_keys_and_verdicts() -> None:
     verdicts = [dom._text_verdict(before, after, 3)[0]         # noqa: SLF001
                 for after in (
                     dict(before, length=6),        # it grew: verified
-                    dict(before, length=3),        # readable, unchanged: NO
+                    dict(before, length=3),        # unchanged: UNCLEAR, not "no"
                     dict(before, target="input#t@0.2", length=6),  # moved
                     dict(before, frame=True, length=6),   # a frame: unclear
                     dict(before, length=None))]    # no value to read: unclear
-    assert verdicts == [True, False, None, None, None], verdicts
+    assert verdicts == [True, None, None, None, None], verdicts
     secrets = [dom._is_secret(probe) for probe in (            # noqa: SLF001
         {"secret": True}, {"frame": True}, {"unreadable": True},
         {"secret": False})]
@@ -1981,7 +2022,7 @@ def t_capability_surface() -> None:
         if top == "tab" and len(parts) > 1:
             assert parts[1] in registry.TAB_SUBCOMMANDS, action
     # the classes a caller would guess, including the ones a MODE decides
-    assert capabilities.ACTIONS["tab js"] == ("code", "write")
+    assert capabilities.ACTIONS["tab js"] == ("code", "write", "egress")
     assert capabilities.ACTIONS["tab text"] == ("read",)
     assert capabilities.ACTIONS["tab extract"] == ("read",)
     assert capabilities.ACTIONS["tab screenshot"] == ("read", "file")
@@ -1993,7 +2034,8 @@ def t_capability_surface() -> None:
     assert capabilities.ACTIONS["tab dialog state"] == ("read",)
     assert capabilities.ACTIONS["tab dialog accept"] == ("write",)
     assert capabilities.ACTIONS["tab wait"] == ("read",)
-    assert capabilities.ACTIONS["tab wait --for js"] == ("code", "write")
+    assert capabilities.ACTIONS["tab wait --for js"] == ("code", "write",
+                                                         "egress")
     assert capabilities.ACTIONS["selftest"] == ("read",)
     # and the reply a caller gets is the table the library declares
     rc, out, err = run_cli(["selftest"])
@@ -2008,7 +2050,9 @@ def t_capability_surface() -> None:
         if "write" in classes), caps["by_class"]["write"]
     assert caps["by_class"]["file"] == ["profile seed", "tab screenshot",
                                         "tab upload"], caps["by_class"]["file"]
-    assert caps["by_class"]["egress"] == [], caps["by_class"]["egress"]
+    assert caps["by_class"]["egress"] == ["open", "tab", "tab js", "tab nav",
+                                          "tab wait --for js"], \
+        caps["by_class"]["egress"]
 
 
 def t_lock_serializes_a_check_then_act() -> None:
@@ -2037,10 +2081,16 @@ def t_lock_serializes_a_check_then_act() -> None:
         # ...and the lock file is 0600 while every other create is 0700
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, \
             oct(stat.S_IMODE(os.stat(path).st_mode))
-        # a path that cannot be opened at all is a WARNING, never a failure:
-        # a guard that silently does nothing would be worse than none
-        with browser._lock("/proc/nope/lock", "open") as broken:  # noqa: SLF001
-            assert broken.held is False and broken.warning, broken
+        # a path that cannot be opened at all REFUSES: a guard whose failure
+        # mode is "proceed anyway" is no guard — fail-open let two browsers
+        # onto one profile, and `reset`/`seed` run unlocked (a review
+        # measured the directory-at-the-lock-path case)
+        try:
+            with browser._lock("/proc/nope/lock", "open"):  # noqa: SLF001
+                raise AssertionError("an unopenable lock did not refuse")
+        except ControlError as e:
+            assert e.code == "profile-unusable", e
+            assert "/proc/nope/lock" in e.message, e.message
 
 
 def t_lock_lives_outside_the_wiped_profile() -> None:
@@ -2148,22 +2198,38 @@ def t_opened_tab_match_stops_at_a_path_boundary() -> None:
     `example.com/page` (a review measured the mis-attribution).
 
     The tolerance that has to survive is the browser's own trailing slash, and
-    a `?query` the page appended.
+    a `?query` the page appended. A genuinely DIFFERENT address is still a
+    fact to report — `open` must never kill the healthy browser it started
+    over a URL the browser canonicalised (a review measured the SIGTERM), so
+    the row comes back with `url_landed` false and the caller names both
+    addresses; only an EMPTY tab list is "no page tab".
     """
     rows = [{"id": "A", "url": "https://example.com/page2"}]
     real = browser._rows
-    browser._rows = lambda _profile: rows            # type: ignore[assignment]
+    browser._rows = lambda _profile, _port=0: rows       # type: ignore[assignment]
     try:
+        # the boundary rule itself: `page2` never answers for `page`
+        assert not readback_lib.url_landed("https://example.com/page",
+                                           "https://example.com/page2")
+        got = readback_lib._wait_url("unused", "https://example.com/page",
+                                     timeout=0.2)                # noqa: SLF001
+        assert got and got["id"] == "A", got
+        assert not readback_lib.url_landed("https://example.com/page",
+                                           got["url"]), got
+        # ...while the browser's own normalisations still land
+        for tab_id, observed in (("B", "https://example.com/page/"),
+                                 ("C", "https://example.com/page?a=1")):
+            rows[:] = [{"id": tab_id, "url": observed}]
+            got = readback_lib._wait_url("unused",
+                                         "https://example.com/page",
+                                         timeout=0.2)            # noqa: SLF001
+            assert got and got["id"] == tab_id, got
+            assert readback_lib.url_landed("https://example.com/page",
+                                           observed), observed
+        # an EMPTY tab list is the only "the startup page never appeared"
+        rows[:] = []
         assert readback_lib._wait_url("unused", "https://example.com/page",
-                                      timeout=0.2) is None      # noqa: SLF001
-        rows[:] = [{"id": "B", "url": "https://example.com/page/"}]
-        got = readback_lib._wait_url("unused", "https://example.com/page",
-                                     timeout=0.2)                # noqa: SLF001
-        assert got and got["id"] == "B", got
-        rows[:] = [{"id": "C", "url": "https://example.com/page?a=1"}]
-        got = readback_lib._wait_url("unused", "https://example.com/page",
-                                     timeout=0.2)                # noqa: SLF001
-        assert got and got["id"] == "C", got
+                                      timeout=0.2) is None       # noqa: SLF001
     finally:
         browser._rows = real                         # type: ignore[assignment]
 
@@ -2180,7 +2246,7 @@ def t_policy_gate() -> None:
         # no policy: everything the declared surface holds is allowed
         assert _may(_gate(), "tab js")[0] is True
         # an allow-list: EVERY class of the action has to be in it
-        assert _may(_gate("read,write"), "open")[0] is True          # write
+        assert _may(_gate("read,write,egress"), "open")[0] is True   # +egress
         assert _may(_gate("read,write"), "tab js")[0] is False       # code+write
         assert _may(_gate("read,write"), "tab upload")[0] is False   # write+file
         # a deny-list: any one class is enough to block
@@ -2315,7 +2381,11 @@ def t_gate_and_argv_hardening() -> None:
         os.environ[policy_lib.ALLOW_ENV] = "read"
         gate = _gate(deny="egress")
         allowed, why = _may(gate, "tab js")
-        assert allowed is False and "not allowed" in why, why
+        # `tab js` holds egress now, so the DENY side trips first; either way
+        # the call is blocked and the reason names the rule that blocked it
+        assert allowed is False and ("denied" in why or "not allowed" in why), \
+            why
+        assert "egress" in why or "code" in why, why
         described = gate.describe()
         assert described["source"] == f"{policy_lib.ALLOW_ENV} + --deny", \
             described
@@ -2424,6 +2494,12 @@ def t_frames_bind_to_their_tab() -> None:
     real = {name: getattr(cdp, name) for name in
             ("evaluate", "frame_targets", "target_ws", "port_of")}
     real_frames_of = dom.frames_of
+    # the census opens its own websocket and re-judges the port's holder first
+    # (`verify_port_owner`): this check drives the census through FAKED CDP
+    # seams and a fake port, so the judge is stubbed here — its own refusal is
+    # pinned by `t_the_frame_census_judges_its_port`
+    real_judge = frames_lib.verify_port_owner
+    frames_lib.verify_port_owner = lambda port: None         # type: ignore[assignment]
     cdp.evaluate = lambda ws, expr, timeout=15.0: census    # type: ignore[assignment]
     cdp.port_of = lambda profile: 1234                      # type: ignore[assignment]
     cdp.target_ws = lambda port, target, kind="page": f"ws://{kind}/{target}"  # type: ignore[assignment]
@@ -2460,9 +2536,41 @@ def t_frames_bind_to_their_tab() -> None:
             {"id": "CCC", "url": "http://localhost:9/widget.html",
              "parent": "PAGE_A"}]
         rows = dom.frames_of(1234, "PAGE_A")
-        assert rows[0]["target"] == "" and rows[0]["candidates"] == 2, rows
+        # an unbound SEPARATE frame is `null`, never "": "this frame has no
+        # target of its own" is a claim the census cannot support when the
+        # browser simply did not say which target is whose
+        assert rows[0]["target"] is None and rows[0]["matched"] is False \
+            and rows[0]["candidates"] == 2, rows
         refusal(lambda: dom._frame_target(1234, "PAGE_A", "widget"),  # noqa: SLF001
                 "frame-ambiguous")
+        # ...and when exactly ONE separate frame is unbound and exactly ONE of
+        # this tab's targets is unclaimed, the pair is FORCED: the binding is a
+        # proof (and says so), with the URL the target COMMITTED — which is the
+        # answer for a frame whose `src` a redirect or a script rewrote
+        cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
+            {"id": "LATE", "url": "http://committed.example/final",
+             "parent": "PAGE_A"}]
+        rows = dom.frames_of(1234, "PAGE_A")
+        assert rows[0]["target"] == "LATE", rows
+        assert rows[0]["matched"] == "elimination", rows
+        assert rows[0]["committed"] == "http://committed.example/final", rows
+        assert dom._frame_target(1234, "PAGE_A", "widget")["target"] == \
+            "LATE"                                       # noqa: SLF001
+        # ...but elimination is only a proof when it is FORCED: with TWO
+        # unclaimed targets and one unbound frame the pair is a choice, so the
+        # frame stays unbound (`target: None`, `matched: False`) and `--frame`
+        # refuses instead of driving a 50/50 guess
+        cdp.frame_targets = lambda port: [                  # type: ignore[assignment]
+            {"id": "AAA", "url": "http://committed.example/one",
+             "parent": "PAGE_A"},
+            {"id": "BBB", "url": "http://committed.example/two",
+             "parent": "PAGE_A"}]
+        rows = dom.frames_of(1234, "PAGE_A")
+        assert rows[0]["target"] is None, rows
+        assert rows[0]["matched"] is False, rows
+        assert rows[0]["candidates"] == 0, rows
+        refusal(lambda: dom._frame_target(1234, "PAGE_A", "widget"),  # noqa: SLF001
+                "frame-not-separate")
         # 2. a browser that does NOT say who owns a target attributes NOTHING:
         #    a URL that appears once is not proof (a cross-origin frame in this
         #    page's own process has no target of its own, while another tab's
@@ -2470,7 +2578,8 @@ def t_frames_bind_to_their_tab() -> None:
         #    rather than driving the wrong tab — a review constructed exactly it
         cdp.frame_targets = lambda port: []                 # type: ignore[assignment]
         rows = dom.frames_of(1234, "PAGE_A")
-        assert rows[0]["target"] == "", rows
+        assert rows[0]["target"] is None, rows
+        assert rows[0]["matched"] is False, rows
         assert rows[0]["attribution"] == "unattributable", rows
         refusal(lambda: dom._frame_target(1234, "PAGE_A", "widget"),  # noqa: SLF001
                 "frame-unattributable")
@@ -2520,7 +2629,12 @@ def t_frames_bind_to_their_tab() -> None:
         # frames_of_rows is the row-taking form the package keeps for callers
         # that already hold a resolution (frames itself resolves internally now)
         listed = dom.frames_of_rows(row, tab_row)            # noqa: SLF001
-        assert listed["separate"] is None, listed
+        # `separate` is the CENSUS fact (the page says this frame is not
+        # same-process), while `bound` counts what can actually be attached to:
+        # a reply that reported `separate: None` here made "none of them can be
+        # driven" out of a fact the census had already proved (a review found
+        # the two conflated)
+        assert listed["separate"] == 1 and listed["bound"] == 0, listed
         assert "cannot attribute" in listed["note"], listed
         dom.frames_of = lambda port, page, census=None: two  # type: ignore[assignment]
 
@@ -2561,6 +2675,7 @@ def t_frames_bind_to_their_tab() -> None:
             cdp.evaluate = patched                          # type: ignore[assignment]
     finally:
         dom.frames_of = real_frames_of
+        frames_lib.verify_port_owner = real_judge            # type: ignore[assignment]
         for name, fn in real.items():
             setattr(cdp, name, fn)
     # 4. the RESOLVED frame travels in the reply, and is cleared with the scope:
@@ -2755,7 +2870,8 @@ def t_click_presses_at_the_proven_point() -> None:
                      tb: object) -> None:
             return None
 
-        def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+        def evaluate(self, expression: str, timeout: float = 0.0,
+                     raw: bool = False, cap: int | None = None) -> object:
             return {"url": "u", "title": "t", "active": "body",
                     "scroll": [0, 0], "x": 0, "y": 0}
 
@@ -2813,7 +2929,8 @@ def t_same_process_frames_read_without_caller_code() -> None:
                      tb: object) -> None:
             return None
 
-        def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+        def evaluate(self, expression: str, timeout: float = 0.0,
+                     raw: bool = False, cap: int | None = None) -> object:
             seen.append(expression)
             return {"url": "about:srcdoc", "title": "frame",
                     "ready": "complete", "visibility": "visible",
@@ -2880,7 +2997,7 @@ def t_selftest_answers_the_policy_question() -> None:
     assert set(data) == {"ok", "classes"}, data
     assert data["classes"]["tab text"] == ["read"], data["classes"]["tab text"]
     assert data["classes"]["tab screenshot"] == ["read", "file"]
-    assert data["classes"]["tab js"] == ["code", "write"]
+    assert data["classes"]["tab js"] == ["code", "write", "egress"]
     assert data["classes"]["selftest"] == ["read"]
     for action, classes in capabilities.ACTIONS.items():
         assert data["classes"][action] == list(classes), action
@@ -3041,7 +3158,8 @@ class _ScriptedPage:
                  tb: object) -> None:
         return None
 
-    def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+    def evaluate(self, expression: str, timeout: float = 0.0,
+                 raw: bool = False, cap: int | None = None) -> object:
         return self.route(expression)
 
     def handle(self, expression: str, timeout: float = 0.0) -> str:
@@ -3106,21 +3224,31 @@ def t_mutation_readbacks_refuse_when_the_page_says_no() -> None:
     not a verb that quietly did nothing.
     """
     row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
-    # 1. the shared text reply: a field that did not take the text, by rung.
-    #    `insert` and `type` share ONE reply builder; the rung names the code a
-    #    caller branches on, so both spellings are pinned.
+    # 1. the shared text reply. `insert` and `type` share ONE reply builder,
+    #    and the oracle is deliberately narrow: a PROVEN no-op refuses (the
+    #    probe says the focus takes no text at all), while a length that simply
+    #    did not change is UNCLEAR, not proof of absence — `Input.insertText`
+    #    REPLACES a selection, so a landed write can leave the length equal or
+    #    shorter (a review measured the false refusal that came from treating
+    #    the delta as proof).
     before = {"active": "input#s", "target": "input#s@0.1", "length": 3,
               "frame": False, "editable": True, "focused": True}
+    unclear = dom._text_reply(                                           # noqa: SLF001
+        row, tab_row, before, dict(before), "hello", "insert")
+    assert unclear["verified"] is False and unclear["inserted"] == 0, unclear
+    assert unclear["note"] == "the length did not change", unclear
+    # a focus the probe PROVES takes no text is the one no-op that refuses
+    no_take = dict(before, editable=False)
     refusal(lambda: dom._text_reply(                                     # noqa: SLF001
-        row, tab_row, before, dict(before), "hello", "insert"),
+        row, tab_row, no_take, dict(no_take), "hello", "insert"),
         "insert-not-verified")
     refusal(lambda: dom._text_reply(                                     # noqa: SLF001
-        row, tab_row, before, dict(before), "hello", "type"),
+        row, tab_row, no_take, dict(no_take), "hello", "type"),
         "type-not-verified")
     # ...and through the VERB, not only the reply builder it calls: a
     # regression that stopped routing the verdict through `insert` would
     # leave the builder assertions green (the deepseek review's finding)
-    page = _ScriptedPage(lambda expr: dict(before)
+    page = _ScriptedPage(lambda expr: dict(no_take)
                          if "editable" in expr else {})
     real = (dom._resolve, dom._session)                                  # noqa: SLF001
     dom._resolve = (lambda tab="", browser="",                        # noqa: SLF001
@@ -3243,12 +3371,8 @@ def t_screenshot_refusals_write_nothing() -> None:
     passed both suites (a review found the gap). A scripted page answers the
     geometry and the capture; the bytes on disk are the oracle.
     """
-    good = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
-            + (941).to_bytes(4, "big") + (400).to_bytes(4, "big")
-            + b"\x00\x00\x00\x00")
-    wrong = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
-             + (640).to_bytes(4, "big") + (480).to_bytes(4, "big")
-             + b"\x00\x00\x00\x00")
+    good = _png(941, 400)
+    wrong = _png(640, 480)
     metrics = {"iw": 941, "ih": 400, "dpr": 1.0, "sw": 941, "sh": 2500,
                "url": "u", "title": "t", "visibility": "visible"}
 
@@ -3350,16 +3474,21 @@ def t_seed_refuses_a_partial_copy() -> None:
             os.chmod(os.path.join(source, "locked"), 0o700)
         # 2. the manifest oracle: a file that walked but is not in the target
         entries = [os.path.join(source, "Cookies")]
+        sizes = {entries[0]: os.path.getsize(entries[0])}
         empty = os.path.join(root, "empty-dst")
-        assert seedtree_lib.missing(entries, source, empty) == ["Cookies"]
+        assert seedtree_lib.missing(entries, source, empty,
+                                    sizes=sizes) == ["Cookies"]
         made = os.path.join(root, "made-dst")
         os.makedirs(made)
         Path(made, "Cookies").write_text("login", encoding="utf-8")
-        assert seedtree_lib.missing(entries, source, made) == []
+        assert seedtree_lib.missing(entries, source, made, sizes=sizes) == []
         # ...and one that landed with the WRONG SIZE is absent too: the oracle
-        # is the size, not the name
+        # is the RECORDED size, never a re-stat of the live source (a source
+        # being written by a running browser made the old form refuse a seed
+        # whose files had all landed)
         Path(made, "Cookies").write_text("logi", encoding="utf-8")
-        assert seedtree_lib.missing(entries, source, made) == ["Cookies"]
+        assert seedtree_lib.missing(entries, source, made,
+                                    sizes=sizes) == ["Cookies"]
     finally:
         shutil.rmtree(root, ignore_errors=True)
         _restore_root(keep_root)
@@ -3386,7 +3515,7 @@ def t_lifecycle_readbacks_refuse_when_the_page_says_no() -> None:
     try:
         # 1. nav: the document never left — a beforeunload prompt, typically
         def eval_stuck(profile: str, target_id: str, expression: str,
-                       timeout: float = 15.0) -> object:
+                       timeout: float = 15.0, port: int = 0) -> object:
             if "location.href" in expression:
                 return before_url
             if "timeOrigin" in expression:
@@ -3399,7 +3528,7 @@ def t_lifecycle_readbacks_refuse_when_the_page_says_no() -> None:
         real = (nav_lib.page_eval, nav_lib.page_session)
         nav_lib.page_eval = eval_stuck                                  # noqa: SLF001
         nav_lib.page_session = (lambda profile, target_id,              # noqa: SLF001
-                                page_domain=True: page)
+                                page_domain=True, port=0: page)
         try:
             with _capped_poll(nav_lib):
                 refusal(lambda: browser.nav(target), "nav-not-verified")
@@ -3425,7 +3554,7 @@ def t_lifecycle_readbacks_refuse_when_the_page_says_no() -> None:
         real = (nav_lib.page_eval, nav_lib.page_session)
         nav_lib.page_eval = (lambda *a, **k: "")                        # noqa: SLF001
         nav_lib.page_session = (lambda profile, target_id,              # noqa: SLF001
-                                page_domain=True: page)
+                                page_domain=True, port=0: page)
         with _capped_poll(nav_lib):
             try:
                 refusal(lambda: browser.activate(), "activate-not-verified")
@@ -3436,7 +3565,7 @@ def t_lifecycle_readbacks_refuse_when_the_page_says_no() -> None:
                 (nav_lib.page_eval, nav_lib.page_session) = real         # noqa: SLF001
         # 4. back with nothing to go back to: a NAV-FAILED, not a lie
         real = (nav_lib.page_ws, nav_lib.page_eval)
-        nav_lib.page_ws = lambda profile, target_id: "ws://unused"       # noqa: SLF001
+        nav_lib.page_ws = lambda profile, target_id, port=0: "ws://unused"  # noqa: SLF001
         nav_lib.page_eval = eval_stuck                                  # noqa: SLF001
         real_call = cdp.call
         cdp.call = lambda ws, method, params=None, timeout=15.0: (        # noqa: SLF001
@@ -3512,7 +3641,9 @@ def t_dialog_verdicts_are_three_state() -> None:
     try:
         # 1. state on a tab that cannot answer: NULL, not a claim of absence
         class SilentTab(_ScriptedPage):
-            def evaluate(self, expression: str, timeout: float = 0.0) -> object:
+            def evaluate(self, expression: str, timeout: float = 0.0,
+                         raw: bool = False,
+                         cap: int | None = None) -> object:
                 raise ControlError("eval-timeout", "no reply within 1.5s")
 
         dom._session = lambda _row, _tab: SilentTab(lambda expr: {})     # noqa: SLF001
@@ -3603,8 +3734,9 @@ def t_close_survivor_is_a_refusal() -> None:
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         ours = os.path.join(tmp, "ours")
         real_browsers, real_rows = browser.browsers, cdp.page_rows_at
-        real_call, real_verify = cdp.browser_call, browser._verify_profile_endpoint  # noqa: SLF001
-        real_gone = browser._wait_ids_gone                               # noqa: SLF001
+        real_call = tabs_lib.browser_call_at
+        real_verify = browser._verify_profile_endpoint           # noqa: SLF001
+        real_gone = browser._wait_ids_gone                       # noqa: SLF001
         browser.browsers = lambda: [                 # type: ignore[assignment]
             {"pid": 1, "exe": "chrome", "path": "/usr/bin/chrome",
              "profile": ours, "profile_from": "flag", "managed": True,
@@ -3613,8 +3745,10 @@ def t_close_survivor_is_a_refusal() -> None:
         cdp.page_rows_at = lambda port: [              # type: ignore[assignment]
             {"type": "page", "id": "AB12", "title": "zombie",
              "url": "https://a/"}]
-        cdp.browser_call = lambda profile, method, params: {}  # type: ignore[assignment]
-        browser._verify_profile_endpoint = lambda profile: None  # type: ignore[assignment]
+        tabs_lib.browser_call_at = (                   # type: ignore[assignment]
+            lambda profile, port, method, params: {})
+        browser._verify_profile_endpoint = \
+            lambda profile, port=0: None                 # type: ignore[assignment]
         # the read-back finds the tab STILL THERE after the close
         browser._wait_ids_gone = (                      # type: ignore[assignment]
             lambda profile, ids: list(ids))
@@ -3624,7 +3758,7 @@ def t_close_survivor_is_a_refusal() -> None:
         finally:
             browser.browsers = real_browsers         # type: ignore[assignment]
             cdp.page_rows_at = real_rows             # type: ignore[assignment]
-            cdp.browser_call = real_call             # type: ignore[assignment]
+            tabs_lib.browser_call_at = real_call     # type: ignore[assignment]
             browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
             browser._wait_ids_gone = real_gone       # type: ignore[assignment]
             _restore_root(keep_root)
@@ -4615,7 +4749,8 @@ def t_a_failed_open_stops_what_it_started() -> None:
     os.makedirs(profile)
     originals = (lifecycle_lib.binary, lifecycle_lib.instance_dir,
                  lifecycle_lib.spawn, browser._await_owner,
-                 browser._wait_own_port, browser._wait_url)
+                 browser._wait_own_port, browser._wait_url,
+                 lifecycle_lib.pid_on_profile)
     lifecycle_lib.binary = lambda name="": "/nonexistent/chrome"
     lifecycle_lib.instance_dir = lambda path: profile
     browser._await_owner = lambda profile, port: {}   # type: ignore[assignment]
@@ -4625,6 +4760,10 @@ def t_a_failed_open_stops_what_it_started() -> None:
             child = subprocess.Popen([sys.executable, "-c",
                                       "import time; time.sleep(60)"])
             lifecycle_lib.spawn = lambda argv: child.pid  # type: ignore[assignment]
+            # the pid PROVES it is this profile's browser, which is the bar
+            # every other signal site applies: only then may it be stopped
+            lifecycle_lib.pid_on_profile = (              # type: ignore[assignment]
+                lambda pid, prof: True)
             # the record this call writes, made explicit so "it was cleared"
             # is a fact about a file that was certainly there
             Path(profile, paths_lib.PID_FILE).write_text(str(child.pid),
@@ -4649,11 +4788,43 @@ def t_a_failed_open_stops_what_it_started() -> None:
                 with contextlib.suppress(OSError):
                     child.kill()
                 child.wait()
+        # ...and a RECYCLED pid whose own command line does NOT name the
+        # profile is never signalled: the clause says so, the stranger is left
+        # alone, and the record stays for `close --pid` to find (a review
+        # measured the unguarded SIGTERM on this path)
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import time; time.sleep(60)"])
+        lifecycle_lib.spawn = lambda argv: child.pid      # type: ignore[assignment]
+        lifecycle_lib.pid_on_profile = (                  # type: ignore[assignment]
+            lambda pid, prof: False)
+        Path(profile, paths_lib.PID_FILE).write_text(str(child.pid),
+                                                     encoding="utf-8")
+        browser._wait_own_port = (                   # type: ignore[assignment]
+            lambda profile, timeout=0: False)
+        browser._wait_url = (                        # type: ignore[assignment]
+            lambda profile, url, timeout=0: None)
+        try:
+            try:
+                browser.launch(["about:blank"])
+                raise AssertionError("expected ERR[launch-failed]")
+            except ControlError as e:
+                assert e.code == "launch-failed", e
+                assert f"pid {child.pid}" in e.message, e.message
+                assert "NOT signalled" in e.message, e.message
+            assert browser._pid_alive(child.pid), \
+                "a pid that does not name the profile was signalled"
+            assert os.path.exists(paths_lib.pid_file(profile)), \
+                "the pid record was cleared for a process never touched"
+        finally:
+            with contextlib.suppress(OSError):
+                child.kill()
+            child.wait()
     finally:
         (lifecycle_lib.binary, lifecycle_lib.instance_dir,
          lifecycle_lib.spawn, browser._await_owner,
          browser._wait_own_port,
-         browser._wait_url) = originals               # type: ignore[assignment]
+         browser._wait_url,
+         lifecycle_lib.pid_on_profile) = originals     # type: ignore[assignment]
         _restore_root(keep_root)
 
 
@@ -5573,7 +5744,7 @@ def t_google_plugin_offline() -> None:
     os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
     calls: dict[str, list] = {"nav": [], "focus": [], "type": [], "press": [],
                               "scroll": [], "click": []}
-    state = {"verified": True, "served": 0, "missing": ()}
+    state = {"verified": True, "served": 0, "missing": (), "failing": ()}
     # two SERPs the fake serves in order — page 2 repeats nothing, so the
     # merge has something to merge and the `page` stamps differ
     pages = (
@@ -5595,7 +5766,8 @@ def t_google_plugin_offline() -> None:
     def fresh() -> None:
         for key in calls:
             calls[key].clear()
-        state.update({"verified": True, "served": 0, "missing": ()})
+        state.update({"verified": True, "served": 0, "missing": (),
+                      "failing": ()})
 
     def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
         calls["nav"].append((url, tab))
@@ -5605,8 +5777,16 @@ def t_google_plugin_offline() -> None:
                   expr: str | None = None, timeout: float = 0.0,
                   idle_ms: int = 0, tab: str = "", browser: str = "") -> dict:
         if selector in state["missing"]:
-            raise plugin_api.ControlError(plugin_api.errors.ERR_NO_MATCH,
+            # the REAL `dom.wait` reports an element that never rendered as
+            # `wait-timeout`; `no-match` is what the MATCHER raises, and only
+            # a timeout means "this control is not on the page"
+            raise plugin_api.ControlError(plugin_api.errors.ERR_WAIT_TIMEOUT,
                                           f"no element matches {selector!r}")
+        if selector in state["failing"]:
+            # a tab that closed, a browser that went away: a refusal that is
+            # NOT the page saying it has no such control
+            raise plugin_api.ControlError(plugin_api.errors.ERR_CDP_ERROR,
+                                          "the tab did not answer")
         return {"ok": True}
 
     def fake_focus(text: str | None = None, selector: str | None = None,
@@ -5678,9 +5858,10 @@ def t_google_plugin_offline() -> None:
         assert data["landed_on"].startswith("https://www.google.com/"), data
         assert data["selectors"] == {"search_box": 'textarea[name="q"]',
                                      "results": "#search div.MjjYud:has(h3)",
-                                     "matched": True}, data
+                                     "matched": True,
+                                     "next": "", "next_matched": False}, data
         assert data["loading"] == {"pages": 1, "clicks": 0, "max_pages": 3,
-                                   "stop": "cap"}, data
+                                   "stop": "cap", "wait_error": ""}, data
         assert data["truncated"] is False, data
         assert calls["click"] == [] and calls["scroll"] == [], calls
 
@@ -5698,7 +5879,7 @@ def t_google_plugin_offline() -> None:
             "First", "Second", "Third"], data
         assert [r["page"] for r in data["results"]] == [1, 1, 2], data
         assert data["loading"] == {"pages": 2, "clicks": 1, "max_pages": 3,
-                                   "stop": "cap"}, data
+                                   "stop": "cap", "wait_error": ""}, data
         assert data["truncated"] is False, data
 
         # a page with no Next control ends the paging honestly
@@ -5709,7 +5890,7 @@ def t_google_plugin_offline() -> None:
         data = json.loads(out)
         assert data["count"] == 2, data
         assert data["loading"] == {"pages": 1, "clicks": 0, "max_pages": 3,
-                                   "stop": "no-next"}, data
+                                   "stop": "no-next", "wait_error": ""}, data
         assert data["truncated"] is False, data
         assert calls["click"] == [], calls
 
@@ -5720,8 +5901,26 @@ def t_google_plugin_offline() -> None:
         assert rc == 0, (rc, err)
         data = json.loads(out)
         assert data["loading"] == {"pages": 1, "clicks": 0, "max_pages": 1,
-                                   "stop": "max-pages"}, data
+                                   "stop": "max-pages", "wait_error": ""}, data
         assert data["truncated"] is True, data
+
+        # ...and a Next-control WAIT that fails for a reason which is NOT a
+        # timeout (a tab that closed, a browser that went away) is a PAGINATION
+        # FAILURE, never the honest end of the list: the refusal is recorded by
+        # name, `stop` says `wait-failed`, and the list is `truncated` because
+        # more may exist. Only the timeout branch had ever been driven, so a
+        # closed tab shipped as `no-next` — the end of the list, reported about
+        # a page nobody finished reading (a review found it)
+        fresh()
+        state["failing"] = ("a#pnnext",)
+        rc, out, err = run_cli(["google", "search", "q", "--cap", "5"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert data["loading"]["stop"] == "wait-failed", data
+        assert "cdp-error" in data["loading"]["wait_error"], data
+        assert data["truncated"] is True, data
+        assert data["count"] == 2, data        # what WAS read is kept
+        assert calls["click"] == [], calls
 
         # the selector map is ORDERED: a missing first candidate falls through
         # to the next, and the reply names the one extraction ran with
@@ -6013,7 +6212,7 @@ def t_close_reply_keys_match_the_preview() -> None:
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         ours = os.path.join(tmp, "ours")
         real_browsers, real_rows = browser.browsers, cdp.page_rows_at
-        real_call = cdp.browser_call
+        real_call = tabs_lib.browser_call_at
         real_verify = browser._verify_profile_endpoint           # noqa: SLF001
         real_gone = browser._wait_ids_gone                       # noqa: SLF001
         tabs = [{"type": "page", "id": "AB12", "title": "t",
@@ -6028,8 +6227,10 @@ def t_close_reply_keys_match_the_preview() -> None:
              "attached": False,
              "cdp": {"port": 1616, "reachable": True, "verified": True}}]
         cdp.page_rows_at = lambda port: list(tabs)    # type: ignore[assignment]
-        cdp.browser_call = lambda profile, method, params: {}  # type: ignore[assignment]
-        browser._verify_profile_endpoint = lambda profile: None  # type: ignore[assignment]
+        tabs_lib.browser_call_at = (                  # type: ignore[assignment]
+            lambda profile, port, method, params: {})
+        browser._verify_profile_endpoint = \
+            lambda profile, port=0: None                 # type: ignore[assignment]
         browser._wait_ids_gone = lambda profile, ids: []     # type: ignore[assignment]
         try:
             cases: list[tuple[dict[str, Any], dict[str, Any]]] = [
@@ -6060,7 +6261,7 @@ def t_close_reply_keys_match_the_preview() -> None:
         finally:
             browser.browsers = real_browsers        # type: ignore[assignment]
             cdp.page_rows_at = real_rows            # type: ignore[assignment]
-            cdp.browser_call = real_call            # type: ignore[assignment]
+            tabs_lib.browser_call_at = real_call    # type: ignore[assignment]
             browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
             browser._wait_ids_gone = real_gone      # type: ignore[assignment]
             _restore_root(keep_root)
@@ -6164,7 +6365,8 @@ def t_focus_nodes_go_through_one_helper() -> None:
                                    "Node is not focusable (code -32000)")
             return {}
 
-        def evaluate(self, expression: str, timeout: float = 0.0) -> dict:
+        def evaluate(self, expression: str, timeout: float = 0.0,
+                     raw: bool = False, cap: int | None = None) -> dict:
             # the probe `select` reads before it focusses: already selected it
             # would return early, so this is one option away from the target
             return {"is_select": True, "matched": 1, "target": 1,
@@ -6325,7 +6527,7 @@ def t_close_resolve_and_verify_seam() -> None:
         os.environ["BROWSER_CONTROL_ROOT"] = tmp
         ours = os.path.join(tmp, "ours")
         real_browsers, real_rows = browser.browsers, cdp.page_rows_at
-        real_call = cdp.browser_call
+        real_call = tabs_lib.browser_call_at
         real_verify = browser._verify_profile_endpoint           # noqa: SLF001
         real_gone = browser._wait_ids_gone                       # noqa: SLF001
         tabs = [{"type": "page", "id": "AB12", "title": "keep",
@@ -6340,13 +6542,14 @@ def t_close_resolve_and_verify_seam() -> None:
         cdp.page_rows_at = lambda port: list(tabs)    # type: ignore[assignment]
         closes: list[str] = []
 
-        def browser_call(profile: str, method: str, params: dict) -> dict:
+        def browser_call(profile: str, port: int, method: str,
+                         params: dict) -> dict:
             closes.append(params["targetId"])
             return {}
 
-        cdp.browser_call = browser_call               # type: ignore[assignment]
+        tabs_lib.browser_call_at = browser_call       # type: ignore[assignment]
         browser._verify_profile_endpoint = (          # type: ignore[assignment]
-            lambda profile: None)
+            lambda profile, port=0: None)
         browser._wait_ids_gone = (                    # type: ignore[assignment]
             lambda profile, ids: [])
         try:
@@ -6360,7 +6563,7 @@ def t_close_resolve_and_verify_seam() -> None:
         finally:
             browser.browsers = real_browsers         # type: ignore[assignment]
             cdp.page_rows_at = real_rows             # type: ignore[assignment]
-            cdp.browser_call = real_call             # type: ignore[assignment]
+            tabs_lib.browser_call_at = real_call     # type: ignore[assignment]
             browser._verify_profile_endpoint = real_verify  # type: ignore[assignment]
             browser._wait_ids_gone = real_gone       # type: ignore[assignment]
             _restore_root(keep_root)
@@ -6552,13 +6755,27 @@ def t_screenshot_is_0600() -> None:
 
 
 def t_bidi_controls_are_flattened() -> None:
-    """A hostile title cannot reorder or disguise a refusal with bidi text."""
+    """A hostile title cannot reorder or disguise a refusal with bidi text.
+
+    Not only the embeddings and overrides: the invisible marks, the DEPRECATED
+    format run (U+206A–U+206F) and the interlinear annotation controls
+    (U+FFF9–U+FFFB) reorder or hide a URL, a host or a filename just as well,
+    and those three families reached the terminal untouched (a review found
+    them). The whole RANGE of each family is swept, not its edges: a filter
+    that drops one code point of a family is a filter that drops none of them.
+    """
     from browser_control.lib import text as text_lib  # noqa: PLC0415
 
     spoof = "safe\u202egnp.exe\u202c"
     assert "\u202e" not in text_lib.foreign(spoof), repr(text_lib.foreign(spoof))
-    for ch in ("\u200b", "\u200f", "\u202a", "\u2066"):
+    for ch in ("\u061c", "\u200b", "\u200f", "\u202a", "\u2066"):
         assert ch not in text_lib.foreign(f"a{ch}b"), repr(ch)
+    for start, end in ((0x061c, 0x061c), (0x200b, 0x200f),
+                       (0x202a, 0x202e), (0x2066, 0x2069),
+                       (0x206a, 0x206f), (0xfff9, 0xfffb)):
+        for code in range(start, end + 1):
+            assert chr(code) not in text_lib.foreign(f"a{chr(code)}b"), \
+                hex(code)
 
 
 def t_js_reports_unserializable_values() -> None:
@@ -6577,7 +6794,12 @@ def t_js_reports_unserializable_values() -> None:
     negative_zero = cdp_rpc._value_of(
         {"result": {"unserializableValue": "-0"}})
     assert math.copysign(1.0, negative_zero) == -1.0, negative_zero
-    assert cdp_rpc._value_of({"result": {"type": "undefined"}}) is None
+    assert cdp_rpc._value_of(
+        {"result": {"type": "undefined"}}) is cdp_rpc.UNDEFINED
+    assert cdp_rpc._value_of({"result": {"type": "object",
+                                         "subtype": "null",
+                                         "value": None}}) is None
+    assert cdp_rpc._value_of({"result": {}}) is None
 
 
 def t_query_neither_given_names_the_real_mistake() -> None:
@@ -6648,6 +6870,1485 @@ def t_seed_destination_parent_is_0700() -> None:
         _restore_root(keep_root)
 
 
+def t_click_changed_compares_the_page_state() -> None:
+    """`tab click`'s `changed` is a COMPARISON, not a constant.
+
+    `PageState.changed` is the whole verdict of a click (and of `--at`):
+    `changed: false` is a FACT about a click that had no visible effect, not a
+    failure — which is only information if the four fields are actually
+    compared. Nothing read the field through the verb, so a regression that
+    answered `True` unconditionally (or compared the wrong two snapshots)
+    shipped green. The matcher payload's own four facts are what the "before"
+    is built from, so an unchanged page is spelled exactly as the page
+    reports it.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    # the matcher payload's four facts (what the "before" is built from), and
+    # the SNAPSHOT shape `STATE_EXPR` really answers (url/title/active/x/y):
+    # `PageState.from_dict` reads both, so both are exercised here
+    snap = {"url": "u", "title": "t", "active": "body", "x": 0, "y": 0}
+    moved = dict(snap, title="moved")
+
+    def page_for(*snapshots: dict) -> _ScriptedPage:
+        """A page whose STATE reads answer the snapshots in order."""
+        reads = {"n": 0}
+
+        def route(expression: str) -> object:
+            # the point probe (and anything else that is not the snapshot) is
+            # answered with what the point reaches; STATE_EXPR is the one that
+            # names `location.href` — the PRELUDE both share mentions
+            # `elementFromPoint`, so that is not a discriminator
+            if "location.href" not in expression:
+                return "input#tick"
+            reads["n"] += 1
+            return dict(snapshots[min(reads["n"], len(snapshots)) - 1])
+
+        return _ScriptedPage(route)
+
+    real = (dom._resolve, dom._session, dom._matches_in)         # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._matches_in = (lambda session, needle, css, cap:          # noqa: SLF001
+                       _matches_data(_element_row()))
+    try:
+        # 1. the ELEMENT path: every field identical -> changed is FALSE, and
+        #    the input did land (that is what makes it a fact, not a failure)
+        dom._session = lambda _row, _tab: page_for(snap)           # noqa: SLF001
+        reply = dom.click(selector="#tick")
+        assert reply["clicked"] is True, reply
+        assert reply["changed"] is False, reply
+        assert reply["before"] == {"url": "u", "title": "t",
+                                   "active": "body", "scroll": [0, 0]}, reply
+        assert reply["after"] == {"url": "u", "title": "t", "active": "body",
+                                  "scroll": [0, 0]}, reply
+        # ...one observable field moved -> TRUE
+        dom._session = lambda _row, _tab: page_for(moved)          # noqa: SLF001
+        assert dom.click(selector="#tick")["changed"] is True
+        # 2. `--at` has no element: it compares two SNAPSHOTS, and the same
+        #    comparison is the verdict
+        dom._session = lambda _row, _tab: page_for(snap, snap)     # noqa: SLF001
+        reply = dom.click(at="10,20")
+        assert reply["changed"] is False and reply["verified"] is False, reply
+        dom._session = lambda _row, _tab: page_for(snap, moved)    # noqa: SLF001
+        assert dom.click(at="10,20")["changed"] is True
+    finally:
+        (dom._resolve, dom._session,                                # noqa: SLF001
+         dom._matches_in) = real
+
+
+class _NoSignal:
+    """An `os` shim whose `kill` RECORDS instead of signalling.
+
+    The check that drives `stop` must never aim a SIGTERM at whatever pid the
+    fixture named (the fixture's pid is a number on a live machine), so the
+    one module the verb reaches for `kill` is replaced and the recorded call
+    becomes an assertion of its own.
+    """
+
+    def __init__(self) -> None:
+        self.signals: list[tuple[int, int]] = []
+
+    def kill(self, pid: int, sig: int) -> None:
+        self.signals.append((pid, sig))
+
+
+def t_stop_refuses_a_known_tab_count() -> None:
+    """`stop` refuses on a count it COULD read — and `--force` goes through it.
+
+    The unreadable-count branch (`None` is not zero) was pinned; the readable
+    one was not, and it is the guard's whole point: three open page tabs must
+    refuse the stop, naming the number and `--force`. A regression that
+    replaced the condition (`if tabs and not force` -> `if False`) left every
+    check green, because no check ever handed `stop` a count.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        target = os.path.join(root, "managed")
+        os.makedirs(target)
+        originals = (lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+                     lifecycle_lib._page_count,
+                     lifecycle_lib.pid_on_profile, lifecycle_lib.pid_alive,
+                     lifecycle_lib.os, lifecycle_lib.cdp.reachable)
+        signals = _NoSignal()
+        lifecycle_lib.managed_profile = (lambda browser="": target)  # type: ignore[assignment]
+        lifecycle_lib.pid_of = lambda profile: 4321        # type: ignore[assignment]
+        lifecycle_lib._page_count = (lambda profile, port=0: 3)  # type: ignore[assignment]
+        lifecycle_lib.pid_on_profile = (                   # type: ignore[assignment]
+            lambda pid, profile: True)
+        lifecycle_lib.pid_alive = lambda pid: False        # type: ignore[assignment]
+        lifecycle_lib.os = signals                     # type: ignore[assignment]
+        lifecycle_lib.cdp.reachable = (                    # type: ignore[assignment]
+            lambda profile: False)
+        try:
+            try:
+                lifecycle_lib.stop()
+                raise AssertionError("expected ERR[tabs-open]")
+            except ControlError as e:
+                assert e.code == "tabs-open", e
+                assert "3" in e.message, e.message
+                assert "--force" in e.message, e.message
+            assert signals.signals == [], \
+                "a refused stop signalled the browser anyway"
+            # ...and saying it out loud takes the same count through
+            reply = lifecycle_lib.stop(force=True)
+            assert reply["stopped"] is True, reply
+            assert reply["tabs"] == 3 and reply["forced"] is True, reply
+            assert len(signals.signals) == 1, signals.signals
+            assert signals.signals[0][0] == 4321, signals.signals
+        finally:
+            (lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+             lifecycle_lib._page_count, lifecycle_lib.pid_on_profile,
+             lifecycle_lib.pid_alive, lifecycle_lib.os,
+             lifecycle_lib.cdp.reachable) = originals   # type: ignore[assignment]
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def t_wait_names_its_predicate_and_reports_its_samples() -> None:
+    """`tab wait`'s timeout NAMES what it waited for, how long, and how often.
+
+    The one verb whose whole contract is a bounded wait had its refusal path
+    unasserted: the predicate, the deadline and the sample count all ride in
+    the message, and a caller branches on them (a review found the gap). The
+    passing half carries the same number in the reply. `evaluate_until` is the
+    seam: (False, 3) is a page that never said yes, (True, 2) one that did.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    seen: list[tuple[str, float]] = []
+    answers = [(False, 3), (True, 2)]
+
+    def until(url: str, expression: str, accept: object, timeout: float,
+              interval: float = 0.4) -> tuple[object, int]:
+        seen.append((expression, timeout))
+        return answers[min(len(seen), len(answers)) - 1]
+
+    real = (dom._resolve, dom._document_ws, cdp.evaluate_until)   # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._document_ws = lambda port, target: f"ws://page/{target}"  # noqa: SLF001
+    cdp.evaluate_until = until                          # type: ignore[assignment]
+    try:
+        try:
+            dom.wait("element", selector="#ready", timeout=7.5)
+            raise AssertionError("expected ERR[wait-timeout]")
+        except ControlError as e:
+            assert e.code == "wait-timeout", e
+            assert "#ready" in e.message, e.message       # the predicate
+            assert "7.5s" in e.message, e.message         # the deadline
+            assert "3 samples" in e.message, e.message    # and what it took
+        # the poll really carried the predicate and the deadline to the seam
+        assert seen and "#ready" in seen[0][0], seen
+        assert seen[0][1] == 7.5, seen
+        reply = dom.wait("element", selector="#ready", timeout=7.5)
+        assert reply["samples"] == 2 and reply["for"] == "element", reply
+        assert 0 <= reply["waited_s"] <= 7.5, reply
+    finally:
+        (dom._resolve, dom._document_ws,                         # noqa: SLF001
+         cdp.evaluate_until) = real
+
+
+def t_check_already_in_the_wanted_state_sends_no_click() -> None:
+    """`tab check` in the state it WANTS sends nothing — a click would toggle it.
+
+    The already-wanted branch is the one place this verb must do nothing, and
+    it is exactly what a regression breaks by dispatching anyway: the box then
+    flips AWAY and the read-back contradicts the reply. Both spellings are
+    driven (check and `--uncheck`), and `page.calls` must hold no mouse event
+    at all — a `changed: false` that came from a click is not this branch.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    probe = {"found": True, "tag": "input", "type": "checkbox",
+             "name": "input#tick", "checkable": True, "disabled": False}
+    real = (dom._resolve, dom._session, dom._matches_in)         # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._matches_in = (lambda session, needle, css, cap:          # noqa: SLF001
+                       _matches_data(_element_row()))
+    try:
+        for wanted, uncheck in ((True, False), (False, True)):
+            page = _ScriptedPage(
+                lambda expression, checked=wanted: (
+                    dict(probe, checked=checked) if "checkable" in expression
+                    else {}))
+            dom._session = lambda _row, _tab, _p=page: _p            # noqa: SLF001
+            reply = dom.check(selector="#tick", uncheck=uncheck)
+            assert reply["changed"] is False, reply
+            assert reply["verified"] is True, reply
+            assert reply["checked"] is (not uncheck), reply
+            assert "no click was sent" in reply["note"], reply
+            assert [c for c in page.calls
+                    if c["method"] == "Input.dispatchMouseEvent"] == [], \
+                page.calls
+    finally:
+        (dom._resolve, dom._session, dom._matches_in) = real      # noqa: SLF001
+
+
+def t_select_refuses_a_control_that_does_not_move() -> None:
+    """`tab select`: the arrow keys landed and the control holds the OLD option.
+
+    The read-back is the control's own `value`/`selectedIndex`, so a page that
+    ignores the keys (or re-sets itself) must refuse `select-not-verified`
+    instead of reporting the wanted option — and the keys it DID send are what
+    the message accounts for. Nothing drove this branch, so an unconditional
+    `selected: true` shipped green.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    probe = {"is_select": True, "disabled": False, "multiple": False,
+             "matched": 1, "target": 2, "selected": 0, "value": "a",
+             "target_value": "c", "target_label": "C", "by": "value",
+             "labels": ["a", "b", "c"], "candidates": []}
+    page = _ScriptedPage(lambda expression: (
+        dict(probe) if "is_select" in expression else {}))
+    real = (dom._resolve, dom._session, dom._matches_in,          # noqa: SLF001
+            dom._node_of, actions_lib.poll)                       # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                        # noqa: SLF001
+    dom._matches_in = (lambda session, needle, css, cap:          # noqa: SLF001
+                       _matches_data(_element_row()))
+    dom._node_of = lambda session, expression: 7       # type: ignore[assignment]
+    try:
+        with _capped_poll(actions_lib):
+            refusal(lambda: dom.select(selector="#sel", value="c"),
+                    "select-not-verified")
+        assert page.calls, "the refusal never dispatched what it reports on"
+        keys = [c for c in page.calls
+                if c["method"] == "Input.dispatchKeyEvent"]
+        # two steps down (index 0 -> 2), each a rawKeyDown/keyUp pair: no
+        # stray `char` — an arrow must not type anything into the control
+        assert [k["type"] for k in keys] == ["rawKeyDown", "keyUp"] * 2, keys
+        assert {k["code"] for k in keys} == {"ArrowDown"}, keys
+        focused = [c for c in page.calls if c["method"] == "DOM.focus"]
+        assert focused == [{"method": "DOM.focus", "nodeId": 7}], page.calls
+    finally:
+        (dom._resolve, dom._session, dom._matches_in,             # noqa: SLF001
+         dom._node_of, actions_lib.poll) = real
+
+
+def t_type_sends_three_events_per_character() -> None:
+    """`tab type`'s wire shape: keyDown, char, keyUp — per character, in order.
+
+    A page whose handlers listen per key sees exactly these three frames, and
+    the `char` is the one carrying the text (which is why a character outside
+    the virtual-key table still types). The suite pinned what the verb REPORTS
+    and the frames `insert`/`press` send; the per-character triplet itself was
+    never asserted, so a regression to one `insertText` — or to a missing
+    `char` — shipped green.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    reads = {"n": 0}
+
+    def route(expression: str) -> object:
+        if "editable" in expression:
+            reads["n"] += 1
+            return {"focused": True, "frame": False, "editable": True,
+                    "secret": False, "active": "input#s",
+                    "target": "input#s@0.1",
+                    "length": 0 if reads["n"] == 1 else 2}
+        return {}
+
+    page = _ScriptedPage(route)
+    real = (dom._resolve, dom._session)                           # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                        # noqa: SLF001
+    try:
+        reply = dom.type_text("ab")
+        assert reply["verified"] is True and reply["inserted"] == 2, reply
+        events = [c for c in page.calls
+                  if c["method"] == "Input.dispatchKeyEvent"]
+        assert [e["type"] for e in events] == [
+            "keyDown", "char", "keyUp", "keyDown", "char", "keyUp"], events
+        assert [e["key"] for e in events[:3]] == ["a", "a", "a"], events
+        assert events[1]["text"] == "a", events[1]     # the text rides `char`
+        assert "text" not in events[2], events[2]      # never the keyUp
+        assert [e["windowsVirtualKeyCode"] for e in events[:3]] == \
+            [ord("a")] * 3, events
+    finally:
+        (dom._resolve, dom._session) = real                       # noqa: SLF001
+
+
+def t_a_click_refuses_before_it_presses() -> None:
+    """`tab click`'s actionability guards fire BEFORE any mouse event.
+
+    "Occluded" and "outside the viewport" are verdicts about a point, and the
+    promise they carry is that a refused click costs the page nothing: a
+    dispatch-then-check order would land a real press on whatever is on top —
+    the accident the guard exists to prevent. The refusal must also NAME what
+    is in the way, or "something is on top of it" is not actionable.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (dom._resolve, dom._session, dom._matches_in)          # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    try:
+        for element, code, phrase in (
+                (_element_row(hit=False, hit_element="div#cover"), "occluded",
+                 "div#cover"),
+                (_element_row(in_viewport=False), "no-viewport-target",
+                 "outside the viewport")):
+            page = _ScriptedPage(lambda expression: {})
+            dom._session = lambda _row, _tab, _p=page: _p          # noqa: SLF001
+            dom._matches_in = (lambda session, needle, css, cap,   # noqa: SLF001
+                               _elements=(element,):
+                               _matches_data(*_elements))
+            try:
+                dom.click(selector="#tick")
+                raise AssertionError(f"expected ERR[{code}]")
+            except ControlError as e:
+                assert e.code == code, e
+                assert phrase in e.message, e.message
+            assert [c for c in page.calls
+                    if c["method"] == "Input.dispatchMouseEvent"] == [], \
+                f"{code} dispatched a mouse event: {page.calls}"
+    finally:
+        (dom._resolve, dom._session, dom._matches_in) = real       # noqa: SLF001
+
+
+def t_wait_tabs_names_what_is_missing() -> None:
+    """`_wait_tabs` confirms the ROWS it saw and NAMES the ids still missing.
+
+    The bounded waiter behind a start/attach read-back: a row that appears on
+    the third poll comes back with its own row (not merely "it is up"), and an
+    id that never appears is returned by name. Both halves are what a caller
+    branches on — `seen` is what it may act on, `missing` is what it must not
+    claim — and neither was driven.
+    """
+    rows = [{"id": "A", "title": "t", "url": "https://a/"},
+            {"id": "Z", "title": "z", "url": "https://z/"}]
+    polls = {"n": 0}
+
+    def later(profile: str, port: int = 0) -> list[dict]:
+        polls["n"] += 1
+        if polls["n"] < 3:
+            raise ControlError("cdp-unreachable", "the endpoint is starting")
+        return list(rows)
+
+    real = browser._rows                                           # noqa: SLF001
+    browser._rows = later                          # type: ignore[assignment]
+    try:
+        with _capped_poll(readback_lib, cap=0.8):
+            seen, missing = readback_lib._wait_tabs("/p", ["A"], timeout=2.0)
+        # it took more than one poll: the row was LATE, and it is the ANSWER
+        # (not the absence of an error) that confirmed it
+        assert polls["n"] >= 3, polls
+        assert seen == {"A": rows[0]}, seen
+        assert missing == [], missing
+        # an id that never appears is REPORTED, never read as gone quietly
+        polls["n"] = 0
+        with _capped_poll(readback_lib, cap=0.8):
+            seen, missing = readback_lib._wait_tabs("/p", ["B"], timeout=2.0)
+        assert seen == {}, seen
+        assert missing == ["B"], missing
+    finally:
+        browser._rows = real                       # type: ignore[assignment]
+
+
+def t_cli_profile_grammar() -> None:
+    """`profile info|logins|seed|reset`: the exact call each argv makes.
+
+    A recorder per verb pins the grammar as ARGUMENTS rather than as a message:
+    `--site`/`--cap` reach `logins` with their values, `seed` carries `--from`,
+    `--force` and `--dry` through, `reset --force` is one boolean. Then the
+    real verbs run for the arity rules — `--from` is REQUIRED and never
+    guessed, and a subcommand is required at all.
+    """
+    calls: list[tuple] = []
+    originals = (profile_lib.info, profile_lib.logins, profile_lib.seed,
+                 profile_lib.reset)
+    profile_lib.info = (                               # type: ignore[assignment]
+        lambda profile="": calls.append(("info", profile)) or {"ok": True})
+    profile_lib.logins = (                             # type: ignore[assignment]
+        lambda profile="", browser="", site="", cap=0:
+        calls.append(("logins", site, cap, browser)) or {"ok": True})
+    profile_lib.seed = (                               # type: ignore[assignment]
+        lambda source="", profile="", browser="", force=False, dry=False:
+        calls.append(("seed", source, force, dry, browser)) or {"ok": True})
+    profile_lib.reset = (                              # type: ignore[assignment]
+        lambda profile="", browser="", force=False:
+        calls.append(("reset", force, browser)) or {"ok": True})
+    try:
+        for argv in (["profile", "info"],
+                     ["profile", "logins", "--site", "x", "--cap", "5"],
+                     ["profile", "seed", "--from", "/x", "--force", "--dry"],
+                     ["profile", "reset", "--force"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [("info", ""), ("logins", "x", 5, ""),
+                         ("seed", "/x", True, True, ""),
+                         ("reset", True, "")], calls
+    finally:
+        (profile_lib.info, profile_lib.logins, profile_lib.seed,
+         profile_lib.reset) = originals                # type: ignore[assignment]
+    # `--from` is required and never guessed; a subcommand is required at all
+    for argv in (["profile", "seed"], ["profile"],
+                 ["profile", "info", "extra"],
+                 ["profile", "seed", "--from"]):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+
+
+def t_the_last_unproduced_refusal_codes() -> None:
+    """The refusal codes that still had no PRODUCER, each by its real path.
+
+    A refusal code is the contract a caller branches on, and "every code has a
+    check" has to mean the code was actually RAISED somewhere — the sibling
+    check covered six, and these ten were registered, raised and never
+    provoked. Each is driven through the branch that raises it: a focus that
+    cannot take text, a page with no media and one whose playback the browser
+    rejected, a page with no iframes, a screenshot path already taken, a
+    `stop` with no browser to name, a profile a browser is running on, the two
+    pointer guards (`aim`'s, shared by every element verb) and the wait
+    deadline.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (dom._resolve, dom._session, dom._matches_in,          # noqa: SLF001
+            dom.frames_of, cdp.evaluate_until, dom._document_ws,  # noqa: SLF001
+            media_lib.poll)                                       # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._document_ws = lambda port, target: f"ws://page/{target}"  # noqa: SLF001
+    try:
+        # 1. `no-focus`: nothing focused, so the text has nowhere to go — and
+        #    NOTHING is dispatched, by either rung of the text verbs
+        unfocused = _ScriptedPage(lambda expression: {
+            "focused": False, "frame": False, "editable": False,
+            "secret": False, "active": None, "value": None})
+        dom._session = lambda _row, _tab: unfocused               # noqa: SLF001
+        refusal(lambda: dom.insert("hello"), "no-focus")
+        refusal(lambda: dom.type_text("hello"), "no-focus")
+        assert [c for c in unfocused.calls
+                if c["method"] == "Input.insertText"] == [], unfocused.calls
+        assert [c for c in unfocused.calls
+                if c["method"] == "Input.dispatchKeyEvent"] == [], \
+            unfocused.calls
+        # 2. `no-media`: a page with no video/audio element at all
+        empty = _ScriptedPage(lambda expression: {"found": False, "count": 0})
+        dom._session = lambda _row, _tab: empty                   # noqa: SLF001
+        try:
+            dom.media("play")
+            raise AssertionError("expected ERR[no-media]")
+        except ControlError as e:
+            assert e.code == "no-media", e
+            assert "no video or audio element" in e.message, e.message
+            assert "0 found" in e.message, e.message
+        # 3. `media-blocked`: the page's own play() was REJECTED, so the
+        #    refusal carries the page's reason (and the autoplay hint)
+        reads = {"n": 0}
+
+        def media_route(expression: str) -> object:
+            if "const action" in expression:
+                return {"found": True, "count": 1, "paused": True,
+                        "element": "video"}
+            if "video, audio" in expression:
+                reads["n"] += 1
+                if reads["n"] == 1:
+                    return {"found": True, "count": 1, "element": "video",
+                            "paused": True, "time": 0.0, "ready_state": 4,
+                            "error": ""}
+                return {"found": True, "count": 1, "element": "video",
+                        "paused": True, "time": 0.0, "ready_state": 4,
+                        "error": "NotAllowedError: play() failed because the "
+                                 "user didn't interact with the document "
+                                 "first"}
+            return {}
+
+        blocked = _ScriptedPage(media_route)
+        dom._session = lambda _row, _tab: blocked                 # noqa: SLF001
+        with _capped_poll(media_lib):
+            try:
+                dom.media("play")
+                raise AssertionError("expected ERR[media-blocked]")
+            except ControlError as e:
+                assert e.code == "media-blocked", e
+                assert "NotAllowedError" in e.message, e.message
+                assert "tab click" in e.message, e.message   # the way out
+        # 4. `no-frame`: a page with no iframes cannot satisfy `--frame`
+        real_frames = dom.frames_of
+        dom.frames_of = lambda port, page, census=None: []        # type: ignore[assignment]
+        try:
+            try:
+                dom._frame_target(1234, "PAGE_A", "1")            # noqa: SLF001
+                raise AssertionError("expected ERR[no-frame]")
+            except ControlError as e:
+                assert e.code == "no-frame", e
+                assert "tab frames" in e.message, e.message
+        finally:
+            dom.frames_of = real_frames                  # type: ignore[assignment]
+        # 5. `file-exists`: a screenshot onto a path already taken, with no
+        #    --force, leaves the file it found untouched
+        shot_dir = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+        try:
+            target = os.path.join(shot_dir, "taken.png")
+            Path(target).write_bytes(b"keep")
+            metrics = {"iw": 4, "ih": 3, "dpr": 1.0, "sw": 4, "sh": 3,
+                       "url": "u", "title": "t", "visibility": "visible"}
+
+            def shot_route(expression: str, _metrics: dict = metrics) -> object:
+                return dict(_metrics) if "dpr" in expression else {}
+
+            shot_page = _ScriptedPage(shot_route)
+
+            def capture(method: str, params: dict | None = None,
+                        timeout: float = 0.0,
+                        _page: _ScriptedPage = shot_page,
+                        _png: bytes = _png(4, 3)) -> dict:
+                _page.calls.append({"method": method, **(params or {})})
+                return {"data": base64.b64encode(_png).decode("ascii")}
+
+            shot_page.call = capture            # type: ignore[method-assign]
+            dom._session = lambda _row, _tab: shot_page           # noqa: SLF001
+            try:
+                dom.screenshot(target)
+                raise AssertionError("expected ERR[file-exists]")
+            except ControlError as e:
+                assert e.code == "file-exists", e
+                assert target in e.message, e.message
+                assert "--force" in e.message, e.message
+            assert Path(target).read_bytes() == b"keep", \
+                "a refused screenshot clobbered the file it found"
+        finally:
+            shutil.rmtree(shot_dir, ignore_errors=True)
+        # 6. `no-browser`: a named browser that is not running at all
+        real_browsers = browser.browsers
+        browser.browsers = lambda: []              # type: ignore[assignment]
+        try:
+            try:
+                browser.stop(port=9222)
+                raise AssertionError("expected ERR[no-browser]")
+            except ControlError as e:
+                assert e.code == "no-browser", e
+                assert "--port 9222" in e.message, e.message
+        finally:
+            browser.browsers = real_browsers       # type: ignore[assignment]
+        # 7. `profile-live`: a browser is running on the instance, so neither
+        #    the wipe nor the seed may touch it
+        live_root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+        os.environ["BROWSER_CONTROL_ROOT"] = live_root
+        try:
+            live = os.path.join(live_root, "chrome")
+            os.makedirs(live)
+            Path(live, "Cookies").write_text("login", encoding="utf-8")
+            paths_lib.mark(live)
+            source = os.path.join(live_root, "source")
+            os.makedirs(source)
+            Path(source, "Cookies").write_text("login", encoding="utf-8")
+            on_it = [{"pid": 777, "exe": "chrome", "profile": live,
+                      "managed": True, "attached": False,
+                      "cdp": {"port": 1515, "reachable": True,
+                              "verified": True}}]
+            browser.browsers = lambda: list(on_it)  # type: ignore[assignment]
+            try:
+                for call in (lambda: profile_lib.reset(profile=live,
+                                                       force=True),
+                             lambda: profile_lib.seed(source=source,
+                                                      profile=live,
+                                                      force=True)):
+                    try:
+                        call()
+                        raise AssertionError("expected ERR[profile-live]")
+                    except ControlError as e:
+                        assert e.code == "profile-live", e
+                        assert "pid 777" in e.message, e.message
+            finally:
+                browser.browsers = real_browsers    # type: ignore[assignment]
+            assert Path(live, "Cookies").read_text(encoding="utf-8") == "login"
+        finally:
+            _restore_root(keep_root)
+            shutil.rmtree(live_root, ignore_errors=True)
+        # 8. `occluded` through `tab hover`: the guard is `aim`'s, shared with
+        #    click, and the move it refuses must not have been dispatched
+        hover_page = _ScriptedPage(lambda expression: {})
+        dom._session = lambda _row, _tab: hover_page              # noqa: SLF001
+        dom._matches_in = (lambda session, needle, css, cap:       # noqa: SLF001
+                           _matches_data(_element_row(
+                               hit=False, hit_element="div#cover")))
+        try:
+            dom.hover(selector="#hover-me")
+            raise AssertionError("expected ERR[occluded]")
+        except ControlError as e:
+            assert e.code == "occluded", e
+            assert "div#cover" in e.message, e.message
+        assert [c for c in hover_page.calls
+                if c["method"] == "Input.dispatchMouseEvent"] == [], \
+            hover_page.calls
+        # 9. `no-viewport-target` through `tab check`: the same guard, and a
+        #    control below the fold must not be clicked at a point outside it
+        check_page = _ScriptedPage(lambda expression: (
+            {"checkable": True, "checked": False, "disabled": False,
+             "tag": "input", "type": "checkbox"}
+            if "checkable" in expression else {}))
+        dom._session = lambda _row, _tab: check_page              # noqa: SLF001
+        dom._matches_in = (lambda session, needle, css, cap:       # noqa: SLF001
+                           _matches_data(_element_row(in_viewport=False)))
+        try:
+            dom.check(selector="#tick")
+            raise AssertionError("expected ERR[no-viewport-target]")
+        except ControlError as e:
+            assert e.code == "no-viewport-target", e
+            assert "outside the viewport" in e.message, e.message
+        assert [c for c in check_page.calls
+                if c["method"] == "Input.dispatchMouseEvent"] == [], \
+            check_page.calls
+        # 10. `wait-timeout` for a predicate that has no argument (`--for
+        #     idle`): the message still names the mode, the budget and the
+        #     samples — the sibling check drives the `element` spelling
+        cdp.evaluate_until = (                            # type: ignore[assignment]
+            lambda url, expression, accept, timeout, interval=0.4:
+            (False, 0))
+        try:
+            dom.wait("idle", timeout=1.5)
+            raise AssertionError("expected ERR[wait-timeout]")
+        except ControlError as e:
+            assert e.code == "wait-timeout", e
+            assert "--for idle" in e.message, e.message
+            assert "1.5s" in e.message and "0 samples" in e.message, e.message
+    finally:
+        (dom._resolve, dom._session, dom._matches_in,             # noqa: SLF001
+         dom.frames_of, cdp.evaluate_until, dom._document_ws,     # noqa: SLF001
+         media_lib.poll) = real                                   # noqa: SLF001
+
+
+def t_http_read_deadline_holds_against_a_dribbling_peer() -> None:
+    """`cdp._get_bytes` RETURNS against a peer that dribbles — it used to hang.
+
+    A local server sends a status line with a huge `Content-Length` and then
+    one byte every two seconds: `timeout=5` bounds one socket operation, not a
+    drip, so the read stayed inside a blocked `recv` — and the reader's lock
+    made `response.close()` on the caller's thread wait for that same peer
+    (measured: hung past 40 s under a 5 s budget). The wall-clock deadline now
+    belongs to the caller: the request runs on a worker joined for
+    `GET_DEADLINE_S`, the recorded socket is shut down at the deadline, and
+    the refusal is built from the reader's outcome. So the call comes back
+    REFUSED within the deadline plus the documented close grace.
+    """
+    try:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+    except OSError as e:                    # a host that cannot bind loopback
+        SKIP.append(("the HTTP read deadline holds against a dribbling peer",
+                     f"a loopback socket cannot be bound here: {e}"))
+        return
+    port = int(listener.getsockname()[1])
+    accepted: list[Any] = []
+    stop = threading.Event()
+
+    def dribble() -> None:
+        """Headers at once, then one body byte per pause — forever."""
+        try:
+            conn, _addr = listener.accept()
+        except OSError:
+            return
+        accepted.append(conn)
+        with contextlib.suppress(OSError):
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json"
+                         b"\r\nContent-Length: 1000000\r\n\r\n")
+        while not stop.is_set():
+            try:
+                conn.sendall(b" ")
+            except OSError:
+                return
+            stop.wait(2.0)
+
+    serving = threading.Thread(target=dribble, daemon=True)
+    serving.start()
+    started = time.monotonic()
+    try:
+        try:
+            cdp._get_port(port, "/json/version")             # noqa: SLF001
+            raise AssertionError("a dribbling peer produced a value")
+        except ControlError as e:
+            assert e.code == "cdp-unreachable", e
+            assert "did not finish answering" in e.message, e.message
+        elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        with contextlib.suppress(OSError):
+            listener.close()
+        for conn in accepted:
+            with contextlib.suppress(OSError):
+                conn.close()
+        serving.join(timeout=1.0)
+    # the whole point is that it RETURNS at the deadline (plus the close
+    # grace), not that the peer gave up: a bound of deadline + 2 s is generous
+    # enough for a loaded runner and still fails the pre-fix behaviour, which
+    # never came back at all
+    assert elapsed < cdp.GET_DEADLINE_S + 2.0, elapsed
+    assert elapsed >= cdp.GET_DEADLINE_S * 0.8, \
+        f"the read gave up in {elapsed:.2f}s — the peer never got to dribble"
+
+
+def t_a_hostile_port_or_pid_file_is_no_answer() -> None:
+    """A FIFO, a device symlink and an oversized file at those paths are "no".
+
+    Both files are written by ANOTHER process, so both are hostile input: a
+    FIFO at `DevToolsActivePort` made the read block forever (before any read
+    — `open` waits for a writer), and a symlink to `/dev/zero` grew
+    `readline()` until MemoryError (both reproduced by a review). The rule is
+    one: only a small REGULAR file is a port or a pid, and anything else is
+    "no answer" — never a hang, never an allocation the peer chooses.
+    """
+    with tempfile.TemporaryDirectory() as profile:
+        port_path = os.path.join(profile, cdp.PORT_FILE)
+        os.mkfifo(port_path)
+        started = time.monotonic()
+        assert cdp.port_of(profile) == 0, "a FIFO was read as a port"
+        assert time.monotonic() - started < 2.0, "a FIFO blocked the read"
+        os.unlink(port_path)
+        # a character device with no end: read follows the link, so the
+        # symlink refusal (O_NOFOLLOW) is what keeps this call finite
+        os.symlink("/dev/zero", port_path)
+        assert cdp.port_of(profile) == 0, "a device symlink was read as a port"
+        os.unlink(port_path)
+        # past anything a browser writes: a "port file" is one line
+        Path(port_path).write_bytes(b"80\n" + b"9" * 4096)
+        assert cdp.port_of(profile) == 0, \
+            "an oversized file was read as a port"
+        # ...and the line a real browser wrote still reads
+        Path(port_path).write_text("34591\n/devtools/browser/x\n")
+        assert cdp.port_of(profile) == 34591
+        os.unlink(port_path)
+        # the PID record is the same kind of file, read by the same rule
+        pid_path = paths_lib.pid_file(profile)
+        real_walk = proc_lib.main_processes
+        proc_lib.main_processes = lambda: []           # type: ignore[assignment]
+        try:
+            os.mkfifo(pid_path)
+            started = time.monotonic()
+            assert proc_lib.pid_of(profile) == 0, "a FIFO was read as a pid"
+            assert time.monotonic() - started < 2.0, "a FIFO blocked pid_of"
+            os.unlink(pid_path)
+            os.symlink("/dev/zero", pid_path)
+            assert proc_lib.pid_of(profile) == 0, \
+                "a device symlink was read as a pid"
+            os.unlink(pid_path)
+            Path(pid_path).write_bytes(b"7\n" + b"0" * 4096)
+            assert proc_lib.pid_of(profile) == 0, \
+                "an oversized file was read as a pid"
+            os.unlink(pid_path)
+        finally:
+            proc_lib.main_processes = real_walk        # type: ignore[assignment]
+
+
+def t_a_crafted_cookie_store_is_capped_not_fatal() -> None:
+    """A `cookies` VIEW over an unterminated recursive CTE cannot exhaust RAM.
+
+    The Cookies store is a file the profile's owner writes, so its SCHEMA is
+    hostile input: a VIEW named `cookies` answering `WITH RECURSIVE` forever
+    grew the census until MemoryError (measured by a review). The read is
+    bounded IN SQL — a parameterized `limit` asking one row past the cap on
+    purpose — so the census comes back with `capped: true` and the
+    `rows_limit` it was read under, which is how the reply says its counts are
+    a FLOOR rather than the store. The census runs on a worker so a regression
+    to an unbounded read FAILS here instead of hanging the suite.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        instance = os.path.join(root, "crafted")
+        profile = os.path.join(instance, "Default")
+        os.makedirs(profile)
+        conn = sqlite3.connect(os.path.join(profile, "Cookies"))
+        try:
+            conn.execute("create table seed (x integer)")
+            conn.execute(
+                "create view cookies as with recursive c(x) as "
+                "(select 1 union all select x + 1 from c) "
+                "select 'host' || x as host_key, 'name' || x as name, "
+                "'13300000000000000' as expires_utc from c")
+            conn.commit()
+        finally:
+            conn.close()
+        box: list[dict] = []
+        started = time.monotonic()
+
+        def census() -> None:
+            box.append(profile_lib.logins(profile=instance))
+
+        worker = threading.Thread(target=census, daemon=True)
+        worker.start()
+        worker.join(timeout=60.0)
+        assert not worker.is_alive(), \
+            "the cookie census never came back — the store is still unbounded"
+        assert time.monotonic() - started < 60.0
+        cookies = box[0]["stores"]["cookies"]
+        assert cookies["present"] is True and cookies["readable"] is True, \
+            cookies
+        assert cookies["capped"] is True, cookies
+        # the cap BIT is what says the counts are a floor, and the reply names
+        # the limit they were read under
+        assert cookies["rows"] == cookies["rows_limit"] > 0, cookies
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def t_a_directory_at_the_lock_path_refuses_seed_and_reset() -> None:
+    """A lock that cannot be TAKEN is a refusal — those verbs never run unlocked.
+
+    The fail-open was measured on the two verbs that write or DESTROY: a
+    directory pre-created at the profile's lock path made `flock` impossible,
+    the caller was warned, and `seed`/`reset` went ahead without the lock
+    `open` takes — two browsers, or a wipe, on one profile. (`browser._lock`
+    refusing `/proc/nope/lock` is pinned by the lock check; this is the
+    store-level half, where the fail-open actually ran.) The refusal is
+    `profile-unusable`, it names the path, and nothing was written.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        target = os.path.join(root, "chrome")
+        os.makedirs(target)
+        Path(target, "Cookies").write_text("login", encoding="utf-8")
+        paths_lib.mark(target)
+        source = os.path.join(root, "source")
+        os.makedirs(source)
+        Path(source, "Cookies").write_text("login", encoding="utf-8")
+        lock_file = paths_lib.lock_path(target)
+        # the ROOT lock is fine; only the PROFILE's is unusable — a directory
+        # where the lock file goes is exactly what a hostile profile owner does
+        os.makedirs(lock_file)
+        for call in (lambda: profile_lib.reset(profile=target, force=True),
+                     lambda: profile_lib.seed(source=source, profile=target,
+                                              force=True)):
+            try:
+                call()
+                raise AssertionError("a locked-out verb ran anyway")
+            except ControlError as e:
+                assert e.code == "profile-unusable", e
+                assert lock_file in e.message, e.message
+        # ...and neither ran: the profile is byte-for-byte what it was
+        assert Path(target, "Cookies").read_text(encoding="utf-8") == "login"
+        assert not os.path.exists(os.path.join(target, "Default")), \
+            "a refused seed wrote into the profile"
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def t_a_plugin_baseexception_cannot_choose_the_exit() -> None:
+    """A plugin's `sys.exit` cannot empty stdout or pick this CLI's status.
+
+    A plugin is local code imported into this process, so its `BaseException`s
+    are the boundary's problem: `sys.exit(0)` AT IMPORT used to take the whole
+    invocation down — every call exited 0 with EMPTY stdout and no audit line,
+    indistinguishable from success to a JSON consumer — and `sys.exit(7)` from
+    a plugin's `run` chose the plugin's own status. Both are driven here: the
+    import is refused and NAMED, and the running one is `internal`/2.
+    """
+    plugin_env = "BROWSER_CONTROL_PLUGIN_PATH"
+    keep = os.environ.get(plugin_env)
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "exit0.py").write_text(
+            "import sys\nsys.exit(0)\n", encoding="utf-8")
+        os.environ[plugin_env] = tmp
+        try:
+            rc, out, err = run_cli(["selftest"])
+            assert rc == 0, (rc, err)
+            assert out.strip(), "a plugin emptied stdout"
+            data = json.loads(out)          # ONE JSON object, parseable
+            errors = "\n".join(data["plugin_errors"])
+            assert "exit0.py" in errors, errors
+            assert "SystemExit" in errors, errors
+            assert data["plugins"] == [], data["plugins"]
+            # ...and the exit status is still this CLI's: a verb that refuses
+            # refuses, instead of the import's `0` with nothing on stdout
+            rc, out, err = run_cli(["no-such-verb"])
+            assert rc == 2 and out == "", (rc, out)
+            assert "ERR[unknown-command]" in err, err
+        finally:
+            if keep is None:
+                os.environ.pop(plugin_env, None)
+            else:
+                os.environ[plugin_env] = keep
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "exiter.py").write_text(
+            "import sys\n"
+            "def run(rest, browser):\n"
+            "    sys.exit(7)\n"
+            "PLUGIN = {'api': 1, 'name': 'exiter', 'description': 'x',\n"
+            "          'actions': {'boom': {'run': run,\n"
+            "                               'classes': ('read',),\n"
+            "                               'usage': 'boom'}}}\n",
+            encoding="utf-8")
+        os.environ[plugin_env] = tmp
+        try:
+            rc, out, err = run_cli(["boom"])
+            assert rc == 2, (rc, err)
+            assert out == "", f"a plugin's exit still wrote stdout: {out!r}"
+            assert "ERR[internal]" in err, err
+        finally:
+            if keep is None:
+                os.environ.pop(plugin_env, None)
+            else:
+                os.environ[plugin_env] = keep
+
+
+def t_a_relative_plugin_path_imports_nothing() -> None:
+    """A RELATIVE plugin entry is refused, so the CWD is never imported.
+
+    An entry like `plugins` in a shell rc would import whatever `./plugins/*.py`
+    the directory you happen to be standing in holds — local code running in
+    this process with the CLI's own credentials and its CDP access, executed
+    before the policy gate exists. The fixture is exactly that: a temp CWD with
+    a `plugins/planted.py` that writes a marker on import. The marker must not
+    exist afterwards, and `selftest` must REPORT the path it refused.
+    """
+    plugin_env = "BROWSER_CONTROL_PLUGIN_PATH"
+    keep = os.environ.get(plugin_env)
+    with tempfile.TemporaryDirectory() as tmp:
+        planted = os.path.join(tmp, "plugins")
+        os.makedirs(planted)
+        marker = os.path.join(tmp, "MARKER")
+        Path(planted, "planted.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({marker!r}).write_text('imported', encoding='utf-8')\n"
+            "PLUGIN = {'api': 1, 'name': 'planted', 'description': 'x',\n"
+            "          'actions': {'planted': {'run':\n"
+            "              lambda rest, browser: {'ok': True},\n"
+            "              'classes': ('read',), 'usage': 'planted'}}}\n",
+            encoding="utf-8")
+        cwd = os.getcwd()
+        os.environ[plugin_env] = "plugins"
+        os.chdir(tmp)
+        try:
+            rc, out, err = run_cli(["selftest"])
+            assert rc == 0, (rc, err)
+            data = json.loads(out)
+            assert not os.path.exists(marker), \
+                "a relative plugin entry imported code from the CWD"
+            assert data["plugins"] == [], data["plugins"]
+            errors = "\n".join(data["plugin_errors"])
+            assert "RELATIVE" in errors, errors
+            # ...and the action the planted plugin would have served does not
+            # exist: nothing was imported, not merely un-registered
+            rc, _out, err = run_cli(["planted"])
+            assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
+        finally:
+            os.chdir(cwd)
+            if keep is None:
+                os.environ.pop(plugin_env, None)
+            else:
+                os.environ[plugin_env] = keep
+
+
+def t_egress_is_a_class_the_gate_actually_enforces() -> None:
+    """`--deny egress` DENIES the verbs that hand a URL to the browser.
+
+    A class that is declared but never consulted is a promise the gate does not
+    keep: `egress` covers the verbs that give the browser an address (`open`,
+    `tab`, `tab nav`) and the caller-code ones, whose JavaScript can `fetch`
+    whatever it likes (`tab js`, `tab wait --for js`). It must NOT cover the
+    reads that merely talk to the browser this tool already drives — `tab text`
+    under `--deny egress` is a call the caller may make.
+    """
+    try:
+        for name in (policy_lib.ALLOW_ENV, policy_lib.DENY_ENV):
+            os.environ.pop(name, None)
+        # the declarations first: what each verb says it can reach
+        for action in ("open", "tab", "tab nav", "tab js",
+                       "tab wait --for js"):
+            assert "egress" in capabilities.classes_for(action), action
+        for action in ("tab text", "tab find", "tab extract", "profile info"):
+            assert "egress" not in capabilities.classes_for(action), action
+        # ...and the gate reads them: denied where declared, allowed where not
+        for action in ("open", "tab", "tab nav", "tab js",
+                       "tab wait --for js"):
+            blocked, why = _may(_gate(deny="egress"), action)
+            assert blocked is False and "denied" in why, (action, why)
+        for action in ("tab text", "tab find", "tab extract", "tab wait",
+                       "profile info", "selftest"):
+            assert _may(_gate(deny="egress"), action)[0] is True, action
+        # in-process, the refusal happens BEFORE the verb runs: a navigation
+        # never reaches a browser at all
+        rc, _out, err = run_cli(["--deny", "egress", "tab", "nav",
+                                 "https://example.com/"])
+        assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
+        # ...while a read is not refused for the class it does not hold (it
+        # fails later, if at all, for the real reason: no browser here)
+        rc, _out, err = run_cli(["--deny", "egress", "tab", "text"])
+        assert "ERR[not-allowed]" not in err, (rc, err)
+    finally:
+        for name in (policy_lib.ALLOW_ENV, policy_lib.DENY_ENV):
+            os.environ.pop(name, None)
+
+
+def t_wait_url_walks_its_ladder() -> None:
+    """`_wait_url`'s three tiers, and the one honest `None`.
+
+    The ladder is what `open` reports its `matched` from: tier 1 the requested
+    address (`url_landed`, tolerant of the browser's trailing slash and
+    stopping at a path boundary), tier 2 the REQUESTED HOST answering — an
+    http->https upgrade, a `www.` the browser added — and tier 3 the first
+    non-blank page row when the address is nowhere at all. An empty tab list
+    is the only "the startup page never appeared", and it must be `None`
+    rather than a placeholder row.
+    """
+    real = browser._rows                                           # noqa: SLF001
+    try:
+        with _capped_poll(readback_lib, cap=0.01):
+            # 1. the requested URL itself answers, FIRST tier
+            browser._rows = lambda profile, port=0: [               # type: ignore[assignment]
+                {"id": "A", "url": "https://example.com/", "title": "t"}]
+            got = readback_lib._wait_url("/p", "https://example.com/")
+            assert got is not None and got["id"] == "A", got
+            assert readback_lib.url_landed("https://example.com/",
+                                           "https://example.com/") is True
+            # 2. a canonicalisation the BROWSER did: the same host answering is
+            #    the requested page, and tier 1 says it is not the same URL —
+            #    which is exactly what makes the fallback load-bearing (open
+            #    used to SIGTERM the browser it had just started over this)
+            for want, landing in (("http://example.com", "https://example.com/"),
+                                  ("https://google.com", "https://www.google.com/")):
+                browser._rows = lambda profile, port=0, _u=landing: [  # type: ignore[assignment]
+                    {"id": "S", "url": _u, "title": "t"}]
+                got = readback_lib._wait_url("/p", want)
+                assert got is not None and got["id"] == "S", (want, got)
+                assert readback_lib.url_landed(want, landing) is False, want
+                assert readback_lib._same_site(want, landing) is True, want  # noqa: SLF001
+            # 3. an unrelated host: the first non-blank page row, in the order
+            #    the browser listed it
+            browser._rows = lambda profile, port=0: [               # type: ignore[assignment]
+                {"id": "X", "url": "https://elsewhere.example/", "title": "x"}]
+            got = readback_lib._wait_url("/p", "https://wanted.example/")
+            assert got is not None and got["id"] == "X", got
+            # 4. NO page row at all: the only honest None
+            browser._rows = lambda profile, port=0: []              # type: ignore[assignment]
+            assert readback_lib._wait_url("/p", "https://wanted.example/") is None
+    finally:
+        browser._rows = real                       # type: ignore[assignment]
+
+
+def t_media_index_reads_the_element_the_action_drove() -> None:
+    """`tab media --index N` drives and reads THAT element — not the player.
+
+    The probe used to re-pick its own element, so a play aimed at index 0 was
+    certified by an unrelated already-playing element's clock (a review found
+    it): the read is now about `all[index]`, exactly what the action drove. So
+    `--index 0` on a page where only element 1 plays must REFUSE
+    `media-not-verified`, every state read carries the caller's index, and an
+    index the page cannot satisfy is `bad-args` naming the count.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    expressions: list[str] = []
+    reads: dict[str, int] = {}
+
+    def route(expression: str) -> object:
+        expressions.append(expression)
+        if "const action" in expression:
+            # only element 1 plays; the action drives whichever index it was
+            # given, and the read-back below is what judges it
+            return {"found": True, "count": 2, "paused": True, "element": "video"}
+        if "video, audio" in expression:
+            index = ("1" if "index = 1" in expression
+                     else "0" if "index = 0" in expression else "preferred")
+            reads[index] = reads.get(index, 0) + 1
+            first = reads[index] == 1
+            if index == "0":
+                # the element the caller NAMED: it never plays, however long
+                # the poll waits
+                return {"found": True, "count": 2, "element": "video",
+                        "playing": True, "paused": False, "ended": False,
+                        "time": 0.0, "duration": 10.0, "ready_state": 4,
+                        "error": ""}
+            # element 1 plays — and so does the PREFERRED pick (`-1`), which is
+            # exactly the element a probe that re-picked its own would certify
+            return {"found": True, "count": 2, "element": "video",
+                    "playing": not first, "paused": first, "ended": False,
+                    "time": 0.0 if first else 1.5, "duration": 10.0,
+                    "ready_state": 4, "error": ""}
+        return {}
+
+    page = _ScriptedPage(route)
+    real = (dom._resolve, dom._session, media_lib.poll)            # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                     # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                         # noqa: SLF001
+    try:
+        with _capped_poll(media_lib):
+            refusal(lambda: dom.media("play", index=0), "media-not-verified")
+        state_reads = [e for e in expressions if "video, audio" in e]
+        assert state_reads, expressions
+        assert all("index = 0" in e for e in state_reads), state_reads
+        # ...and the element that DOES advance is certified through the same
+        # index: the fix is not "refuse everything indexed"
+        expressions.clear()
+        reads.clear()
+        with _capped_poll(media_lib):
+            reply = dom.media("play", index=1)
+        assert reply["mode"] == "play" and reply["time"] == 1.5, reply
+        assert all("index = 1" in e for e in expressions
+                   if "video, audio" in e), expressions
+        assert all("index = 1" in e for e in expressions
+                   if "const action" in e), expressions
+        # an index the page cannot satisfy is REFUSED by name, not a no-op
+        try:
+            dom.media("play", index=5)
+            raise AssertionError("expected ERR[bad-args]")
+        except ControlError as e:
+            assert e.code == "bad-args", e
+            assert "5" in e.message and "2" in e.message, e.message
+        refusal(lambda: dom.media("play", index=-1), "bad-args")
+        refusal(lambda: dom.media("state", index=0), "bad-args")
+    finally:
+        (dom._resolve, dom._session, media_lib.poll) = real        # noqa: SLF001
+
+
+def t_a_partial_text_landing_is_named_not_certified() -> None:
+    """A field that took 2 of 10 characters is UNCLEAR, and the reply says so.
+
+    `_text_reply` reports the raw delta in `inserted` and the shortfall in
+    `note`: a `maxlength` or an input filter that silently truncates is not
+    proof the text arrived, and not proof it did not — certifying it is the
+    overclaim the tri-state exists to prevent (a review measured
+    `verified: true, chars: 10` on an `<input maxlength=4>`). A full landing
+    carries no note at all.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    before = {"active": "input#s", "target": "input#s@0.1", "length": 2,
+              "frame": False, "editable": True, "focused": True}
+    partial = dom._text_reply(row, tab_row, before,                # noqa: SLF001
+                              dict(before, length=4), "x" * 10, "insert")
+    assert partial["verified"] is False, partial
+    assert partial["inserted"] == 2, partial
+    assert "2 of 10" in partial["note"], partial
+    assert partial["chars"] == 10 and partial["length_after"] == 4, partial
+    full = dom._text_reply(row, tab_row, before,                   # noqa: SLF001
+                           dict(before, length=12), "x" * 10, "insert")
+    assert full["verified"] is True and full["inserted"] == 10, full
+    assert "note" not in full, full
+    # ...and through the VERB, so a reply builder nobody routes through cannot
+    # pass the assertions above on its own
+    counts = {"n": 0}
+
+    def route(expression: str) -> object:
+        if "editable" in expression:
+            counts["n"] += 1
+            return dict(before, length=2 if counts["n"] == 1 else 4)
+        return {}
+
+    page = _ScriptedPage(route)
+    real = (dom._resolve, dom._session)                            # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                     # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                         # noqa: SLF001
+    try:
+        reply = dom.insert("x" * 10)
+        assert reply["verified"] is False and reply["inserted"] == 2, reply
+        assert "2 of 10" in reply["note"], reply
+        assert [c for c in page.calls
+                if c["method"] == "Input.insertText"], page.calls
+    finally:
+        (dom._resolve, dom._session) = real                        # noqa: SLF001
+
+
+def t_fill_never_rewrites_a_token_a_value_brought() -> None:
+    """A selector holding a token another value fills survives `fill`.
+
+    The substitution ran in a loop over the GROWING expression, so a value's
+    own text was rescanned: a selector with `[data-k="__CAP__"]` came out as
+    `[data-k="10"]` — a scroll then acted on an element that does not exist —
+    and a legitimate `#__NEXT_DATA__` was REFUSED as an unfilled placeholder.
+    Both the leftover scan and the substitution run over the TEMPLATE now.
+    """
+    template = "sel=__SELECTOR__ cap=__CAP__"
+    assert dom.fill(template, selector="#__NEXT_DATA__", cap="5") == \
+        "sel=#__NEXT_DATA__ cap=5"
+    assert dom.fill(template, selector='[id="__INITIAL_STATE__"]', cap="5") \
+        == 'sel=[id="__INITIAL_STATE__"] cap=5'
+    # a value that SPELLS another placeholder is the caller's text, not one
+    out = dom.fill(template, selector='[data-k="__CAP__"]', cap="5")
+    assert out == 'sel=[data-k="__CAP__"] cap=5', out
+    assert out.count("__CAP__") == 1, out
+    # a template that really is missing a placeholder is still refused
+    refusal(lambda: dom.fill("only __CAP__", cap="5", selector="x"),
+            "bad-args")
+    refusal(lambda: dom.fill("__A__ and __B__", a="1"), "bad-args")
+    # ...and through the matcher VERB: the page is handed the caller's own
+    # selector byte for byte, while the placeholder is filled normally
+    seen: list[str] = []
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    page = _ScriptedPage(lambda expression: (
+        seen.append(expression) or _matches_data(_element_row())))
+    real = (dom._resolve, dom._session, dom._frame_summary)        # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                     # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                         # noqa: SLF001
+    dom._frame_summary = (lambda row, tab_row, session=None: {})   # noqa: SLF001
+    try:
+        reply = dom.find(selector="#__NEXT_DATA__")
+        assert len(reply["matches"]) == 1, reply
+        assert "#__NEXT_DATA__" in seen[-1], seen[-1]
+        dom.find(selector='[data-k="__CAP__"]', cap=7)
+        out = seen[-1]
+        assert '[data-k=\\"__CAP__\\"]' in out, out
+        assert out.count("__CAP__") == 1, out      # only the caller's own
+        assert "cap = 7" in out, out               # the placeholder WAS filled
+    finally:
+        (dom._resolve, dom._session,                               # noqa: SLF001
+         dom._frame_summary) = real
+
+
+def t_a_wheel_that_moved_only_x_is_moved() -> None:
+    """A wheel mapped to `scrollLeft` MOVED — even though y never changed.
+
+    The verdict compared only the document's y, so a carousel or a
+    horizontally scrolled page answered "nothing moved" and refused
+    `scroll-not-verified` about a page that moved (a review found it). The
+    reply carries the x pair beside the y pair for the same reason: a
+    `moved: true` with no y has to be explainable.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    before = {"x": 0, "y": 0, "max": 400, "nested": []}
+    after = {"x": 42, "y": 0, "max": 400, "nested": []}
+    reads = {"n": 0}
+
+    def route(expression: str) -> object:
+        if "nested" in expression:
+            reads["n"] += 1
+            return dict(before if reads["n"] == 1 else after)
+        return {}
+
+    page = _ScriptedPage(route)
+    real = (dom._resolve, dom._session, dom._matches_in,          # noqa: SLF001
+            scroll_lib.poll)                                      # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                        # noqa: SLF001
+    dom._matches_in = lambda session, needle, css, cap: _matches_data()  # noqa: SLF001
+    try:
+        with _capped_poll(scroll_lib):
+            reply = dom.scroll(by=200)
+        assert reply["moved"] is True, reply
+        assert reply["document"]["x_before"] == 0, reply
+        assert reply["document"]["x_after"] == 42, reply
+        assert reply["document"]["before"] == 0, reply
+        assert reply["document"]["after"] == 0, reply
+        wheels = [c for c in page.calls
+                  if c["method"] == "Input.dispatchMouseEvent"]
+        assert len(wheels) == 1 and wheels[0]["deltaY"] == 200, wheels
+    finally:
+        (dom._resolve, dom._session, dom._matches_in,             # noqa: SLF001
+         scroll_lib.poll) = real                                  # noqa: SLF001
+
+
+def t_wait_rejects_a_negative_idle_window_and_measures_monotonically() -> None:
+    """A negative `--idle-ms` INVERTS the predicate, so it is refused.
+
+    `now - ended < -N` is never true, so a negative window made `--for idle`
+    pass on its FIRST sample — the opposite of what was asked — and the
+    refusal happens before any browser is touched (the CLI reaches it too).
+    The reply's `waited_s` is then measured on the MONOTONIC clock the
+    deadline is enforced with: the clock is armed to answer 100.0 and 104.0,
+    so a regression to `time.time()` reports a different number instead of
+    hiding inside a rounding difference.
+    """
+    rc, _out, err = run_cli(["tab", "wait", "--for", "idle", "--idle-ms", "-5"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    assert "0 or more" in err, err
+    refusal(lambda: dom.wait("idle", idle_ms=-5), "bad-args")
+
+    class _Clock:
+        """`time`, with `monotonic` answering a scripted sequence."""
+
+        def __init__(self, *values: float) -> None:
+            self.values = list(values)
+            self.n = 0
+
+        def monotonic(self) -> float:
+            value = self.values[min(self.n, len(self.values) - 1)]
+            self.n += 1
+            return value
+
+    queries = import_module("browser_control.lib.dom.queries")
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (dom._resolve, dom._document_ws, cdp.evaluate_until,   # noqa: SLF001
+            queries.time)
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._document_ws = lambda port, target: f"ws://page/{target}"  # noqa: SLF001
+    cdp.evaluate_until = (                            # type: ignore[assignment]
+        lambda url, expression, accept, timeout, interval=0.4: (True, 2))
+    queries.time = _Clock(100.0, 104.0)                # type: ignore[assignment]
+    try:
+        reply = dom.wait("load", timeout=7.5)
+        assert reply["samples"] == 2, reply
+        assert reply["waited_s"] == 4.0, reply   # 104.0 - 100.0, monotonic
+        assert reply["waited_s"] <= 7.5, reply
+    finally:
+        (dom._resolve, dom._document_ws, cdp.evaluate_until,      # noqa: SLF001
+         queries.time) = real                      # type: ignore[assignment]
+
+
+def t_png_size_needs_the_whole_file() -> None:
+    """A PNG is accepted only when the WHOLE file says it is one.
+
+    A signature and plausible dimensions are not a picture: a file that stops
+    after a REAL IHDR chunk (33 bytes — exactly what the format's own header
+    describes) and one cut before its IEND were both read as images with
+    dimensions, so "the file's own header vouches for it" vouched for a
+    truncated write (a review flagged it). The positive case is here so the
+    refusals cannot pass by refusing everything.
+    """
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (len(body).to_bytes(4, "big") + kind + body
+                + binascii.crc32(kind + body).to_bytes(4, "big"))
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = chunk(b"IHDR", (10).to_bytes(4, "big") + (20).to_bytes(4, "big")
+                 + bytes([8, 6, 0, 0, 0]))
+    # a COMPLETE IHDR chunk and nothing else is not a PNG
+    assert images_lib.png_size(sig + ihdr) == []
+    # ...nor is a chunk header promising more with the file cut off
+    assert images_lib.png_size(sig + ihdr + b"\x00\x00\x00\x00IDAT") == []
+    whole = _png(10, 20)
+    assert images_lib.png_size(whole) == [10, 20]
+    # the IEND is what makes it whole: the same bytes without it are not one
+    assert images_lib.png_size(whole[:-12]) == []
+
+
+def t_x_reader_validates_its_numbers_before_it_navigates() -> None:
+    """A bad `--cap`/`--chars`/`--max-scrolls` refuses with NO navigation.
+
+    Every numeric option is parsed and bounded ABOVE the first `nav` (and the
+    two waits after it): before the fix a typo was found after the navigation,
+    so a bad argument had already moved the caller's tab and stalled up to
+    35 s before refusing. `nav` and `wait` are recorders here, and the
+    assertion is that NEITHER was called — a refusal that navigates first is
+    the defect, whatever its message says.
+    """
+    from browser_control import plugin_api                          # noqa: PLC0415
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    calls: list[tuple] = []
+    real = {name: getattr(plugin_api, name) for name in ("nav", "wait")}
+    plugin_api.nav = lambda url, tab="", browser="": (              # type: ignore[assignment]
+        calls.append(("nav", url)) or {"ok": True})
+    plugin_api.wait = lambda *a, **k: (                             # type: ignore[assignment]
+        calls.append(("wait",)) or {"ok": True})
+    try:
+        for argv, phrase in (
+                (["x", "search", "q", "--cap", "0"],
+                 "--cap must be at least 1"),
+                (["x", "search", "q", "--chars", "0"],
+                 "--chars must be at least 1"),
+                (["x", "search", "q", "--max-scrolls", "-1"],
+                 "--max-scrolls must be 0 or more"),
+                (["x", "search", "q", "--cap", "nope"],
+                 "--cap needs a number")):
+            calls.clear()
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
+            assert calls == [], (argv, calls)
+    finally:
+        for name, fn in real.items():
+            setattr(plugin_api, name, fn)
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_help_is_audited_and_never_gated() -> None:
+    """`help` is an INVOCATION: it writes its audit line, and no gate stops it.
+
+    The contract is one line per call, `help` included — it used to return
+    before the log existed — so the line is read back from a log of its own.
+    And the gate never consults it (nor `selftest`): a gate that blocks its own
+    explanation is a trap, so `--deny write` and `--deny *` must both still
+    print the surface with exit 0.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "actions.jsonl")
+        os.environ["BROWSER_CONTROL_LOG"] = path
+        try:
+            rc, out, _err = run_cli(["help"])
+        finally:
+            os.environ["BROWSER_CONTROL_LOG"] = SUITE_LOG
+            audit.LOG.begin()
+        assert rc == 0 and "browser-control-cli" in out, (rc, out[:80])
+        with open(path, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        assert len(rows) == 1, rows
+        assert rows[0]["action"] == "help", rows
+        assert rows[0]["ok"] is True, rows
+    # the gate is never consulted — in either spelling of the verb
+    for argv in (["help", "--deny", "write"], ["--deny", "*", "--help"],
+                 ["--deny", "read,write,code,file,egress", "help"]):
+        rc, out, _err = run_cli(argv)
+        assert rc == 0, (argv, rc)
+        assert "browser-control-cli" in out, (argv, out[:80])
+
+
+def t_end_of_flags_reaches_the_verb() -> None:
+    """`--` ends the flags: a TEXT starting with `-` reaches the verb intact.
+
+    `tab type -- -hello` and `tab js -- -1` are the two spellings the usage
+    text promises, and the marker itself is consumed (never a positional). A
+    flag BEFORE the marker is unchanged: it still needs its value, and a
+    flag-shaped token before it is still refused — the marker protects what
+    follows it, not what precedes it.
+    """
+    calls: list[tuple] = []
+    real = (dom.type_text, dom.js)                                 # noqa: SLF001
+    dom.type_text = lambda text, tab="", browser="", delay_s=None: (  # type: ignore[assignment]
+        calls.append(("type", text)) or {"ok": True})
+    dom.js = lambda expression, tab="", browser="": (               # type: ignore[assignment]
+        calls.append(("js", expression)) or {"ok": True})
+    try:
+        for argv in (["tab", "type", "--", "-hello"],
+                     ["tab", "js", "--", "-1"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+        assert calls == [("type", "-hello"), ("js", "-1")], calls
+    finally:
+        (dom.type_text, dom.js) = real                             # noqa: SLF001
+    # a flag before the marker is still a flag: it needs its value...
+    for argv, phrase in ((["tab", "type", "--tab"], "--tab needs a value"),
+                         (["tab", "js", "--tab"], "--tab needs a value"),
+                         (["tab", "type", "-hello", "--", "-x"],
+                          "unknown flag")):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+        assert phrase in err, (argv, err)
+
+
+def t_the_frame_census_judges_its_port() -> None:
+    """The frame census opens its OWN websocket, so it re-judges the port.
+
+    `frames_of` builds the census connection and the target-list call from a
+    port the caller resolved a moment earlier. A port rebound to another
+    process would answer with somebody else's frames, so the holder is judged
+    immediately before the connection (`verify_port_owner`) — and a port this
+    call never verified for any profile authorises nothing: the refusal comes
+    before a single byte is sent (a review measured the census connecting to a
+    stranger with zero owner checks).
+    """
+    real_eval, real_targets = cdp.evaluate, cdp.frame_targets
+    calls: list[str] = []
+    cdp.evaluate = (lambda *a, **k:                     # type: ignore[assignment]
+                    calls.append("evaluate") or [])
+    cdp.frame_targets = (lambda *a, **k:                 # type: ignore[assignment]
+                         calls.append("frame_targets") or [])
+    try:
+        refusal(lambda: dom.frames_of(47999, "PAGE_A"), "cdp-not-local")
+        assert calls == [], calls
+    finally:
+        cdp.evaluate = real_eval                        # type: ignore[assignment]
+        cdp.frame_targets = real_targets                # type: ignore[assignment]
+
+
 def main() -> int:
     global SUITE_LOG
     # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
@@ -6710,6 +8411,8 @@ def main() -> int:
         ("the press lands at the proven point", t_click_presses_at_the_proven_point),
         ("frames and points: scopes, syntax, verbs", t_frames_and_points),
         ("frames bind to their tab", t_frames_bind_to_their_tab),
+        ("the frame census judges its port",
+         t_the_frame_census_judges_its_port),
         ("a same-process frame reads without caller code",
          t_same_process_frames_read_without_caller_code),
         ("selftest answers the policy question",
@@ -6873,6 +8576,59 @@ def main() -> int:
          t_scroll_index_proves_the_indexed_element),
         ("a seeded instance directory is 0700",
          t_seed_destination_parent_is_0700),
+        ("a click's `changed` compares the page state",
+         t_click_changed_compares_the_page_state),
+        ("stop refuses on a known tab count, --force goes through",
+         t_stop_refuses_a_known_tab_count),
+        ("tab wait names its predicate, deadline and samples",
+         t_wait_names_its_predicate_and_reports_its_samples),
+        ("tab check in the wanted state sends no click",
+         t_check_already_in_the_wanted_state_sends_no_click),
+        ("tab select refuses a control that did not move",
+         t_select_refuses_a_control_that_does_not_move),
+        ("tab type sends three key events per character",
+         t_type_sends_three_events_per_character),
+        ("a click refuses before it presses",
+         t_a_click_refuses_before_it_presses),
+        ("the close read-back names what is missing",
+         t_wait_tabs_names_what_is_missing),
+        ("profile info/logins/seed/reset argv",
+         t_cli_profile_grammar),
+        ("the last unproduced refusal codes are produced",
+         t_the_last_unproduced_refusal_codes),
+        ("the HTTP read deadline holds against a dribbling peer",
+         t_http_read_deadline_holds_against_a_dribbling_peer),
+        ("a hostile port or pid file is no answer",
+         t_a_hostile_port_or_pid_file_is_no_answer),
+        ("a crafted cookie store is capped, not fatal",
+         t_a_crafted_cookie_store_is_capped_not_fatal),
+        ("a directory at the lock path refuses seed and reset",
+         t_a_directory_at_the_lock_path_refuses_seed_and_reset),
+        ("a plugin's BaseException cannot choose the exit",
+         t_a_plugin_baseexception_cannot_choose_the_exit),
+        ("a relative plugin entry imports nothing from the CWD",
+         t_a_relative_plugin_path_imports_nothing),
+        ("egress is a class the gate enforces",
+         t_egress_is_a_class_the_gate_actually_enforces),
+        ("the opened-tab match walks its ladder", t_wait_url_walks_its_ladder),
+        ("tab media --index reads the element it drove",
+         t_media_index_reads_the_element_the_action_drove),
+        ("a partial text landing is named, not certified",
+         t_a_partial_text_landing_is_named_not_certified),
+        ("fill never rewrites a token a value brought",
+         t_fill_never_rewrites_a_token_a_value_brought),
+        ("a wheel that moved only x is moved",
+         t_a_wheel_that_moved_only_x_is_moved),
+        ("a negative --idle-ms is refused; waited_s is monotonic",
+         t_wait_rejects_a_negative_idle_window_and_measures_monotonically),
+        ("png_size needs the whole file",
+         t_png_size_needs_the_whole_file),
+        ("the x plugin validates before it navigates",
+         t_x_reader_validates_its_numbers_before_it_navigates),
+        ("help is audited and never gated",
+         t_help_is_audited_and_never_gated),
+        ("-- reaches the verb with the literal value",
+         t_end_of_flags_reaches_the_verb),
     ):
         check(name, fn)
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed, {len(SKIP)} skipped")

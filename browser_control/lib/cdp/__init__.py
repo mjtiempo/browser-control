@@ -34,6 +34,7 @@ from browser_control.lib.cdp.rpc import (  # noqa: F401
     EVAL_RESULT_CAP,
     PAGE_ENABLE_S,
     PARKED_BUDGET_S,
+    UNDEFINED,
     _await_reply,
     _page_enable,
     _value_of,

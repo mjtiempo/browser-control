@@ -19,6 +19,11 @@ from browser_control.lib.errors import (
 )
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
+PNG_IHDR_LEN = 13       # the IHDR chunk body: width, height, and 5 more bytes
+#: What a PNG must have after the signature: the IHDR length+type+body+CRC
+#: (33 bytes) and at least ONE following chunk header (8) — a 24-byte file that
+#: stops after the width and height is a signature with a promise in it.
+PNG_HEAD_BYTES = 8 + 4 + 4 + PNG_IHDR_LEN + 4 + 8
 MAX_PX = 100_000        # a dimension no screenshot of this page can have
 
 __all__ = ["MAX_PX", "PNG_SIG", "expected_pixels", "output_path", "png_size",
@@ -31,8 +36,19 @@ def png_size(data: bytes) -> list[int]:
     The file is judged by its bytes, not by the answer that produced it: a
     screenshot whose header disagrees with the page's own geometry is refused
     before it is written anywhere.
+
+    A signature plus a size is not a PNG: the IHDR chunk must be the 13 bytes
+    the format says it is, at least one chunk header must follow it, and the
+    file must END with the IEND chunk — a truncated or truncated-after-the-
+    header file used to be read as a picture with its dimensions (a review
+    flagged it). Real `Page.captureScreenshot` output has all three.
     """
-    if len(data) < 24 or not data.startswith(PNG_SIG) or data[12:16] != b"IHDR":
+    if (len(data) < PNG_HEAD_BYTES or not data.startswith(PNG_SIG)
+            or data[8:12] != PNG_IHDR_LEN.to_bytes(4, "big")
+            or data[12:16] != b"IHDR"
+            # the trailing IEND: length 0, type, CRC — the last 12 bytes
+            or data[-12:-8] != b"\x00\x00\x00\x00"
+            or data[-8:-4] != b"IEND"):
         return []
     return [int.from_bytes(data[16:20], "big"),
             int.from_bytes(data[20:24], "big")]

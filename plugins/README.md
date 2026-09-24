@@ -31,10 +31,17 @@ PLUGIN = {
             "run": run,                # (rest, browser) -> one JSON reply dict
             "classes": ("read",),      # capability classes the gate enforces
             "usage": "mysite search QUERY [--cap N]",
+            # optional: this action acts on a page's CONTENT, so the caller's
+            # global `--frame` applies to it (without this, `--frame` refuses
+            # for a plugin verb exactly as it does for `list` or `open`)
+            # "frames": True,
         },
     },
 }
 ```
+
+An action that browses declares `egress` in its `classes`: it hands a URL to
+the browser, so `--deny egress` must be able to stop it.
 
 `run(rest, browser)` receives the argv **after** the global flags were
 stripped (`--browser`, `--profile`, `--frame`, `--allow`, `--deny`) and the
@@ -48,16 +55,20 @@ hermetic check scans `plugins/` for an unregistered one.
 The supported surface is `browser_control.plugin_api` (`fail`,
 `ControlError`, `errors`, `pop`, `switch`, `text_arg`, `int_arg`, `float_arg`,
 `tab_arg`, `nav`, `wait`, `extract`, `focus`, `type_text`, `press`, `click`,
-`scroll`, `PLUGIN_API`) — import that, not `browser_control.lib` at large.
+`scroll`, `frame`, `PLUGIN_API`) — import that, not `browser_control.lib` at
+large.
 `pop` and `switch` are the CLI's OWN argv readers: `rest, cap = pop(rest,
 "--cap", "mysite search")` and `rest, given = switch(rest, "--latest")` parse
 a plugin's arguments the way the built-ins are parsed, missing-value refusal
-included. `tab_arg` is the `--tab SPEC` reader beside them: it refuses an
-empty `--tab ""` rather than reading it as "the only page tab", exactly as
-the built-in page verbs do. `focus`, `type_text`, `press`,
+included — including the bare `--` end-of-flags marker, so `mysite search --
+-spam` searches for `-spam`. `tab_arg` is the `--tab SPEC` reader beside them:
+it refuses an empty `--tab ""` rather than reading it as "the only page tab",
+exactly as the built-in page verbs do. `focus`, `type_text`, `press`,
 `click` and `scroll` are the drive-it-by-hand verbs: `scroll` sends one real
 wheel event, which is how a lazy or virtualized list (`x_reader.py`) is made
-to render past its first window. The capability classes a
+to render past its first window. `frame` sets, clears or reads the frame scope
+(a plugin that sets one for its own read must RESTORE it: `saved =
+frame(); frame("0"); … ; frame(saved)`). The capability classes a
 plugin declares must come from the closed vocabulary (`read`, `write`, `code`,
 `file`, `egress`), and the gate applies to them exactly as it does to the
 built-ins (`--deny read mysite …` refuses `not-allowed`).
@@ -127,8 +138,12 @@ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
   really swap, and merges by URL until the target is met, no Next is left, or
   the `--max-pages N` budget (default 3, max 10) runs out. The `loading` block
   says how many `pages`/`clicks` that took and which `stop` cause ended it
-  (`cap`, `no-next`, `max-pages`, `no-growth`, `click-failed`); every result
-  row carries the 1-based `page` it came from.
+  (`cap`, `no-next`, `max-pages`, `no-growth`, `click-failed`, `wait-failed`);
+  every result row carries the 1-based `page` it came from. Only a
+  `wait-timeout` on the Next control means "there is no next page"
+  (`no-next`); any other refusal (a closed tab, a dead browser) stops as
+  `wait-failed`, names the refusal in `loading.wait_error` and sets
+  `truncated` — a pagination failure is never reported as the end of the list.
 * The selector map is ORDERED candidates, each asking only for cards that HAVE
   a heading (`:has(h3)`), so counts are results rather than the panels around
   them. The first candidate the page renders — `#search div.MjjYud:has(h3)`,
@@ -136,7 +151,10 @@ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
   `textarea[name="q"]` then `input[name="q"]` — is the one extraction runs
   with, and the reply's `selectors` block names it. A zero-result reply can
   therefore say whether the map found nothing (`matched: false`) or the page
-  really showed none.
+  really showed none; `selectors.next`/`next_matched` are the same pair for the
+  pagination control.
 
-It declares `read`+`write` (it navigates for writes and types into the page),
-so `--deny write google search …` refuses it like any built-in.
+It declares `read`+`write`+`egress` (it navigates for writes, types into the
+page, and the browser reaches the network for Google), so
+`--deny write google search …` and `--deny egress google search …` refuse it
+like any built-in.

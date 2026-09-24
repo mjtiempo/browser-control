@@ -16,10 +16,14 @@ PID_FILE = ".pid"
 LOCK_FILE = ".browser-control.lock"
 LOCK_DIR = ".locks"
 LOCK_NAME_LIMIT = 40        # the readable tail of a lock file name
+#: the key the ROOT's own lock is derived from. It ends in a separator, which
+#: `os.path.relpath` never produces for a path under the root, so no profile
+#: path can spell it (see `lock_path`).
+ROOT_KEY = "_root" + os.sep
 
 __all__ = ["DEFAULT_ROOT", "LOCK_DIR", "LOCK_FILE", "LOCK_NAME_LIMIT",
-           "MARKER", "PID_FILE", "ROOT_ENV", "ensure_root", "expand",
-           "is_managed", "lock_path", "mark", "marked", "norm",
+           "MARKER", "PID_FILE", "ROOT_ENV", "ROOT_KEY", "ensure_root",
+           "expand", "is_managed", "lock_path", "mark", "marked", "norm",
            "pid_file", "profile_dir", "root"]
 
 MARKER = ".browser-control.profile"
@@ -142,17 +146,22 @@ def lock_path(profile: str) -> str:
     profiles that share a basename (`<root>/chrome` and `<root>/a/chrome`)
     never share a lock; `_lock_name` is the injective, bounded spelling of
     that derivation (the old `os.sep` fold collided `a/b` with `a__b`). The
-    root keeps its own lock as `_root`, so no profile name can collide with
-    it.
+    root keeps its own lock under `ROOT_KEY` — a sentinel ending in a
+    separator, which `relpath` never produces for a path under the root, so no
+    profile name can spell it: a profile literally named `<root>/_root` used
+    to key exactly `_root` like the root, so `instance_locks` flocked the SAME
+    file twice and refused `profile-busy` after the wait naming the caller's
+    own pid (a review measured it). `_lock_name`'s digest is what keeps the two
+    files apart even though the readable tails look alike.
     """
     target = expand(profile)
     base = root()
     rel = os.path.relpath(target, base)
     if rel == os.curdir:
-        key = "_root"
+        key = ROOT_KEY
     elif rel == os.pardir or rel.startswith(os.pardir + os.sep):
         # a caller-named path outside the root: key it by the whole path
-        key = target.strip(os.sep) or "_root"
+        key = target.strip(os.sep) or ROOT_KEY
     else:
         key = rel
     return os.path.join(base, LOCK_DIR, _lock_name(key) + ".lock")

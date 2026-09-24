@@ -229,22 +229,14 @@ def run(rest: list[str], browser: str) -> dict:
     query = text_arg(args, "x search").strip()
     if not query:
         fail(errors.ERR_BAD_ARGS, "x search: an empty QUERY is not a search")
-
-    url = _search_url(query, latest=(not top))
-    plugin_api.nav(url, tab=tab, browser=browser)
-    # X keeps long-lived connections, and the extraction below is the real
-    # read-back: a page that never reports "idle" is not fatal here.
-    with contextlib.suppress(ControlError):
-        plugin_api.wait("idle", timeout=WAIT_S, tab=tab, browser=browser)
-    # ...but idle does NOT mean rendered: X builds the result list after the
-    # network quiets, so wait for the first post itself. No results (or a
-    # wall) times out, and the collection below then answers zero, honestly.
-    with contextlib.suppress(ControlError):
-        plugin_api.wait("element", selector=POST, timeout=POST_WAIT_S,
-                 tab=tab, browser=browser)
-    # the parse and its "needs a number" refusal are the core's (`int_arg`);
-    # only this verb's bounds stay — an absent flag is the default, a value
-    # below the floor is refused, and one above the top clamps
+    # EVERY numeric option is parsed and bounds-checked HERE, above the first
+    # navigation. The parse and its "needs a number" refusal are the core's
+    # (`int_arg`); only this verb's bounds stay — an absent flag is the default,
+    # a value below the floor is refused, and one above the top clamps. A typo
+    # used to be found AFTER `nav` and two `wait`s, so a bad argument had
+    # already moved the caller's tab and stalled up to 35 s before refusing;
+    # `google search` validates before its nav and the core verbs validate argv
+    # before resolving a tab, and now this one does too.
     cap_n = (int_arg(cap, "x search: --cap")
              if cap is not None else DEFAULT_CAP)
     if cap_n < 1:
@@ -265,6 +257,19 @@ def run(rest: list[str], browser: str) -> dict:
         fail(errors.ERR_BAD_ARGS,
              f"x search: --max-scrolls must be 0 or more, got {max_scrolls}")
     max_scrolls = min(max_scrolls, MAX_SCROLLS)
+
+    url = _search_url(query, latest=(not top))
+    plugin_api.nav(url, tab=tab, browser=browser)
+    # X keeps long-lived connections, and the extraction below is the real
+    # read-back: a page that never reports "idle" is not fatal here.
+    with contextlib.suppress(ControlError):
+        plugin_api.wait("idle", timeout=WAIT_S, tab=tab, browser=browser)
+    # ...but idle does NOT mean rendered: X builds the result list after the
+    # network quiets, so wait for the first post itself. No results (or a
+    # wall) times out, and the collection below then answers zero, honestly.
+    with contextlib.suppress(ControlError):
+        plugin_api.wait("element", selector=POST, timeout=POST_WAIT_S,
+                 tab=tab, browser=browser)
 
     posts, loading, truncated = _collect(tab, browser, cap_n, chars_n,
                                          max_scrolls)
@@ -291,10 +296,10 @@ PLUGIN = {
     "actions": {
         "x": {
             "run": run,
-            # nav resolves the tab for_write=True and this verb wheels the
-            # page, so the honest declaration is read+write: a `--allow read`
-            # gate would otherwise authorise a write
-            "classes": ("read", "write"),
+            # nav resolves the tab for_write=True, this verb wheels the page,
+            # and the browser reaches the network for X, so the honest
+            # declaration is read+write+egress (`--deny egress` stops it)
+            "classes": ("read", "write", "egress"),
             "usage": ("x search QUERY [--latest|--top] [--cap N] [--chars N] "
                       "[--max-scrolls N] [--tab SPEC] — the page's rendered "
                       "posts as records; --cap is a TARGET and the timeline "

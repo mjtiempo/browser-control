@@ -26,7 +26,11 @@ handler returns, or refuses with `errors.fail(...)`. The supported seam is
 Loading is FAIL-OPEN for the CLI: a plugin that does not import, declares the
 wrong API, or collides with a verb already taken is recorded as a typed
 `PluginError` and skipped — the CLI keeps working, and the action it would have
-served is simply not available. `PluginSet.load()` is the one loader;
+served is simply not available. That includes a plugin that tries to END the
+process while it is imported (`sys.exit`), or one interrupted with
+`KeyboardInterrupt`: `import_module` catches `BaseException` and `PluginSet.load`
+never raises, so a plugin can never choose this CLI's exit status, empty its
+stdout, or skip its audit line. `PluginSet.load()` is the one loader;
 `lib/plugins/discovery.py` owns the search path and `lib/plugins/spec.py` owns
 validation.
 
@@ -68,12 +72,40 @@ class PluginSet:
 
     @classmethod
     def load(cls, reserved: set[str] | None = None) -> PluginSet:
-        """Load every plugin under the search path. Never raises.
+        """Load every plugin under the search path. NEVER raises.
 
         `reserved` is the set of top-level verbs already taken (the CLI's own
         handlers); a plugin action with one of those names is refused and named.
+
+        This is the plugin BOUNDARY, so the guarantee is unconditional: a
+        plugin file is local code, and whatever it does at import — including
+        `sys.exit(0)`, which used to make every invocation exit 0 with empty
+        stdout and no audit line — comes back as a typed error in `errors`
+        instead of an exception. `discovery.import_module` catches
+        `BaseException` for the import itself, each file is guarded here as
+        well, and the whole body is wrapped so even the loader cannot raise.
+        A plugin directory named RELATIVELY is refused by `discovery` and
+        reported here: it would import from whatever the current directory
+        holds.
         """
         found = cls()
+        try:
+            found._load(reserved)
+        except BaseException as e:                             # noqa: BLE001
+            # belt and braces: `_load` guards every step, and this is the
+            # promise its callers rely on — a set comes back, always
+            found.errors.append(PluginError(
+                "<plugin loader>",
+                f"the loader itself failed: {type(e).__name__}: {e}",
+                "import"))
+        return found
+
+    def _load(self, reserved: set[str] | None) -> None:
+        """`load`'s body: fill this set from the search path, refusing per file."""
+        for entry, why in discovery.refused():
+            # a path we would not search is REPORTED, never silently dropped:
+            # `selftest` is where the caller finds out it was skipped
+            self.errors.append(PluginError(entry, why, "path"))
         taken = set(reserved or ())
         for directory in discovery.dirs():
             if not os.path.isdir(directory):
@@ -84,23 +116,31 @@ class PluginSet:
                 # a plugin directory that cannot be read is REPORTED, not fatal:
                 # loading is fail-open, and `selftest` is where the caller finds
                 # out that something on the search path did not load.
-                found.errors.append(
+                self.errors.append(
                     PluginError(directory, f"cannot list: {e}", "import"))
                 continue
             for name in names:
                 if name.startswith("_") or not name.endswith(".py"):
                     continue
                 path = os.path.join(directory, name)
-                module, why = discovery.import_module(path)
-                if module is None:
-                    found.errors.append(PluginError(path, why, "import"))
+                try:
+                    module, why = discovery.import_module(path)
+                    if module is None:
+                        self.errors.append(PluginError(path, why, "import"))
+                        continue
+                    installed, info = register(module, path, self.errors, taken)
+                except BaseException as e:                     # noqa: BLE001
+                    # a hostile PLUGIN dict (an object whose iteration exits,
+                    # a `classes` list that raises) is a refused plugin too
+                    self.errors.append(PluginError(
+                        path,
+                        f"the plugin declaration failed: "
+                        f"{type(e).__name__}: {e}", "schema"))
                     continue
-                installed, info = register(module, path, found.errors, taken)
                 for action in installed:
-                    found.actions[action.verb] = action
+                    self.actions[action.verb] = action
                 if info is not None:
-                    found.plugins.append(info)
-        return found
+                    self.plugins.append(info)
 
     def reset(self, other: PluginSet) -> None:
         """Become `other` — the CLI's holder for one invocation's plugins.

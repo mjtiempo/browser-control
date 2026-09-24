@@ -16,7 +16,7 @@ from browser_control.lib.coerce import (
     as_int,
 )
 from browser_control.lib.dom.queries import (
-    FIND_CAP,
+    FIND_MAX_MATCHES,
 )
 from browser_control.lib.dom.scripts import (
     ELEMENT_EXPR,
@@ -150,7 +150,12 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
                       "deltaY": delta, "button": "none", "buttons": 0})
         after = _settle(session, x, y, before)
         steps = 1
+        # BOTH axes: a page that maps the wheel to `scrollLeft` (a carousel, a
+        # horizontally scrolled document) moves without y changing, and this
+        # verdict used to report "nothing moved" for a page that moved (a
+        # review found it)
         moved = (as_int(after.get("y")) != as_int(before.get("y"))
+                 or as_int(after.get("x")) != as_int(before.get("x"))
                  or after.get("nested") != before.get("nested"))
         if not moved:
             # a delta was asked for and nothing took it: already at that end
@@ -175,8 +180,10 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
                           "button": "none", "buttons": 0})
             steps = step + 1
             moved = _settle(session, x, y, after)
-            if (moved.get("y"), moved.get("nested")) == (after.get("y"),
-                                                         after.get("nested")):
+            # x as well as y: a page that only moves horizontally must not look
+            # like a wall and stop the steps early
+            if (moved.get("y"), moved.get("x"), moved.get("nested")) == (
+                    after.get("y"), after.get("x"), after.get("nested")):
                 after = moved
                 break                     # nothing moved: an edge, or a wall
             after = moved
@@ -187,12 +194,18 @@ def _wheel(session: cdp.Session, row: dict, tab_row: dict, by: int | None,
                  f"max {as_int(after.get('max'))} after {steps} wheel step(s) — "
                  "the bottom/top was not reached (a sticky scroller, or a "
                  "point that is over something that does not scroll)")
-    moved_document = as_int(after.get("y")) != as_int(before.get("y"))
+    moved_document = (as_int(after.get("y")) != as_int(before.get("y"))
+                      or as_int(after.get("x")) != as_int(before.get("x")))
     moved_nested = after.get("nested") != before.get("nested")
     return {"ok": True, "moved": moved_document or moved_nested,
             "document": {"before": as_int(before.get("y")),
                          "after": as_int(after.get("y")),
-                         "max": as_int(after.get("max"))},
+                         "max": as_int(after.get("max")),
+                         # the other axis, beside the y pair: a reply that
+                         # hides it cannot explain a `moved: true` that moved
+                         # no y (a review found it)
+                         "x_before": as_int(before.get("x")),
+                         "x_after": as_int(after.get("x"))},
             "nested": {"before": before.get("nested"),
                        "after": after.get("nested")},
             "point": [x, y], "steps": steps,
@@ -220,7 +233,10 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
         return 0 <= i < len(rows) and bool(rows[i].get("in_viewport"))
 
     _attempts, found = poll(
-        lambda: _pkg._matches_in(session, needle, css, FIND_CAP),
+        # FIND_MAX_MATCHES: the index this poll proves is the index `tab find
+        # --cap N` printed, and that verb shows up to FIND_MAX_MATCHES of them
+        # (a review found --index 20 unfindable here while `find` showed it)
+        lambda: _pkg._matches_in(session, needle, css, FIND_MAX_MATCHES),
         timeout=SCROLL_MOVE_S, interval=POLL_FAST,
         accept=indexed_in_viewport)
     rows = _pkg._well_formed(found.get("matches") or [], ("tag", "box"))

@@ -10,8 +10,8 @@ It is a READER. The text is the page's own rendered text through
 `plugin_api.text` — no caller code, no interpreter — and `length` still reports
 what the page held before `--chars`, so `truncated` is the page's own answer to
 "was there more", exactly as `tab text` gives it. The navigation is why the
-declared classes include `write`: a `--allow read` gate must not authorise a
-verb that browses.
+declared classes include `write`, and the URLs are why they include `egress`: a
+`--allow read` gate must not authorise a verb that browses.
 
 A page that fails does not take the call down — each URL's refusal is listed in
 `errors` beside the pages that answered, because a caller reading a list wants
@@ -19,9 +19,13 @@ the rest of it. When NOTHING could be read the verb refuses with the first
 error's own code: a call that did nothing must not look like a call that did.
 
 An empty `text` with a `frames` census is the one reading that looks like
-"there is nothing there", so the census rides along when the page has frames.
-A same-process frame's document is read by the global `--frame` (it needs no
-target to attach to), and `--tab` picks the tab when several are open.
+"there is nothing there", so the census rides along when the page has frames,
+and when exactly ONE same-process frame holds the words this verb reads that
+frame's document itself and NAMES it (`read_frame`) — no second call, and no
+caller code. The global `--frame` also works here: this action declares
+`"frames": True`, so the CLI accepts the scope for it and every read the verb
+makes happens inside the document the caller named. `--tab` picks the tab when
+several are open.
 
 Install: copy this file into ``~/.local/share/browser-control/plugins/`` (or
 any directory in ``BROWSER_CONTROL_PLUGIN_PATH``).
@@ -53,25 +57,38 @@ MAX_URLS = 20
 
 
 def _urls(rest: list[str], verb: str) -> list[str]:
-    """Every positional URL, or a refusal naming what is wrong.
+    """Every positional URL, in order — NONE is dropped.
 
     `--chars`, `--timeout` and `--tab` are taken out before this, so anything
     left that starts with `-` is a flag nobody reads — reading the page anyway
-    would be the tool guessing what the caller meant.
+    would be the tool guessing what the caller meant. A bare `--` ends the
+    options (the marker is consumed, as the core's readers do): every token
+    after it is a URL, so a URL starting with `-` is reachable.
+
+    An EMPTY word is kept, not filtered out: it is a URL the caller gave, and
+    the url/`nav` path refuses it by name (`refusing '' as a URL`), which is
+    what every other reader in this tool does with an empty value. Dropping it
+    silently turned `page read ""` into "needs at least one URL" and hid it
+    inside a list of good ones.
     """
-    unknown = [word for word in rest if word.startswith("-")]
-    if unknown:
-        fail(errors.ERR_BAD_ARGS,
-             f"{verb}: unknown option {unknown[0]!r} — this verb takes URLs, "
-             "--chars N, --timeout S and --tab SPEC")
-    urls = [word for word in rest if word]
-    if not urls:
+    out: list[str] = []
+    for index, word in enumerate(rest):
+        text = str(word)
+        if text == "--":
+            out.extend(str(later) for later in rest[index + 1:])
+            break
+        if text.startswith("-"):
+            fail(errors.ERR_BAD_ARGS,
+                 f"{verb}: unknown option {text!r} — this verb takes URLs, "
+                 "--chars N, --timeout S and --tab SPEC")
+        out.append(text)
+    if not out:
         fail(errors.ERR_BAD_ARGS, f"{verb}: needs at least one URL")
-    if len(urls) > MAX_URLS:
+    if len(out) > MAX_URLS:
         fail(errors.ERR_BAD_ARGS,
-             f"{verb}: {len(urls)} URLs is over the {MAX_URLS} this verb reads "
+             f"{verb}: {len(out)} URLs is over the {MAX_URLS} this verb reads "
              "in one call — split the list")
-    return urls
+    return out
 
 
 def _frame_words(data: dict, chars: int, tab: str, browser: str) -> dict:
@@ -85,17 +102,21 @@ def _frame_words(data: dict, chars: int, tab: str, browser: str) -> dict:
     A caller reading a list should not need a second call to learn that a page
     that plainly has words is not empty.
 
-    Anything else — no frames, several of them, or one this browser cannot
-    attribute — returns nothing and leaves the honest empty answer alone.
+    The scope is SAVED and restored, never simply cleared: the caller may have
+    set the global `--frame` for this whole call (this action declares
+    `frames`), and clearing it here would drop their scope for every URL after
+    this one. Anything else — no frames, several of them, or one this browser
+    cannot attribute — returns nothing and leaves the honest empty answer alone.
     """
     frames = data.get("frames") or {}
     if frames.get("total") != 1 or frames.get("same_process") != 1:
         return {}
+    previous = plugin_api.frame()
     plugin_api.frame("0")
     try:
         inner = plugin_api.text(chars=chars, tab=tab, browser=browser)
     finally:
-        plugin_api.frame("")
+        plugin_api.frame(previous)
     if not str(inner.get("text") or "").strip():
         return {}
     return {"text": inner.get("text"), "length": inner.get("length"),
@@ -151,13 +172,18 @@ def run(rest: list[str], browser: str) -> dict:
     args, tab = tab_arg(args, "page read")
     urls = _urls(args, "page read")
     # the readers and their "needs a number" refusals are the CORE's (`int_arg`,
-    # `float_arg`); only the defaults this verb alone knows stay here
-    chars = int_arg(chars_flag, "page read --chars") if chars_flag \
+    # `float_arg`); only the defaults this verb alone knows stay here. The test
+    # is `is not None`, never truthiness: `--chars ""` is a flag the caller
+    # GAVE with an empty value, and the rest of the tool refuses one (`_tab_arg`,
+    # `_parse_globals`, `_one`, `_classes_of` all do) — reading it as "absent"
+    # silently used the default instead
+    chars = int_arg(chars_flag, "page read --chars") if chars_flag is not None \
         else DEFAULT_CHARS
     if chars < 1:
         fail(errors.ERR_BAD_ARGS,
              f"page read: --chars must be at least 1, got {chars}")
-    timeout = float_arg(timeout_flag, "page read --timeout") if timeout_flag \
+    timeout = float_arg(timeout_flag,
+                        "page read --timeout") if timeout_flag is not None \
         else DEFAULT_TIMEOUT_S
     if not 0 < timeout < 3600:
         fail(errors.ERR_BAD_ARGS,
@@ -180,8 +206,9 @@ def run(rest: list[str], browser: str) -> dict:
             "note": ("each page is this CLI's own `tab text` answer for one "
                      "URL: `length` is what the page held before `--chars`, "
                      "and text that is empty beside a `frames` census means "
-                     "the words are in a frame — a same-process one reads "
-                     "with the global `--frame`)")}
+                     "the words are in a frame — the ONE same-process frame "
+                     "is read automatically and named in `read_frame`, and "
+                     "the global `--frame` scopes every read this verb makes")}
 
 
 PLUGIN = {
@@ -191,9 +218,14 @@ PLUGIN = {
     "actions": {
         "page": {
             "run": run,
-            # it navigates (a write) and reads: declaring only `read` would let
-            # `--allow read` authorise a verb that browses
-            "classes": ("read", "write"),
+            # it navigates (a write) and reads, and the browser reaches the
+            # network for each URL: declaring only `read` would let `--allow
+            # read` authorise a verb that browses
+            "classes": ("read", "write", "egress"),
+            # this action acts on a page's CONTENT, so the global `--frame`
+            # applies to it: `_authorise` accepts the scope because of this
+            # declaration, and the reply names the scope it ran under
+            "frames": True,
             "usage": ("page read URL... [--chars N] [--timeout S] [--tab SPEC]"
                       " — each URL's rendered text as a record, with `length`/"
                       "`truncated` from the page's own answer; one URL's "

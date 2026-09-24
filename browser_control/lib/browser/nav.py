@@ -22,6 +22,9 @@ from browser_control.lib.browser.constants import (
     READY_EXPR,
     RELOAD_TIMEOUT_S,
 )
+from browser_control.lib.browser.machine import (
+    row_port,
+)
 from browser_control.lib.browser.readback import (
     page_eval,
     page_session,
@@ -79,19 +82,26 @@ def _same_page(left: object, right: object) -> bool:
     return str(left or "").rstrip("/") == str(right or "").rstrip("/")
 
 def _eval(profile: str, target_id: str, expression: str,
-          timeout: float = 15.0) -> Any:
-    """Evaluate one expression on that tab's own connection."""
-    return page_eval(profile, target_id, expression, timeout)
+          timeout: float = 15.0, port: int = 0) -> Any:
+    """Evaluate one expression on that tab's own connection.
 
-def _href(profile: str, target_id: str) -> str:
+    `port` is the endpoint the VERB already resolved (`row_port` of the row it
+    acted on): a browser started with an explicit
+    `--remote-debugging-port=N` writes no port file, so every read-back below
+    is aimed at the port its own row reports.
+    """
+    return page_eval(profile, target_id, expression, timeout, port)
+
+def _href(profile: str, target_id: str, port: int = 0) -> str:
     """The tab's address, or "" when it cannot be read (mid-navigation)."""
     try:
-        return str(_eval(profile, target_id, "location.href", timeout=5) or "")
+        return str(_eval(profile, target_id, "location.href", timeout=5,
+                         port=port) or "")
     except ControlError:
         return ""
 
 def _wait_document(profile: str, target_id: str,
-                   timeout: float = NAV_TIMEOUT_S) -> bool:
+                   timeout: float = NAV_TIMEOUT_S, port: int = 0) -> bool:
     """Poll until the document is complete AND parsed, or the deadline.
 
     Every sample is bounded by what is left of the budget: a page that stops
@@ -102,22 +112,23 @@ def _wait_document(profile: str, target_id: str,
     def probe() -> bool:
         with contextlib.suppress(ControlError):
             return _eval(profile, target_id, READY_EXPR,
-                         timeout=max(0.5, end - time.monotonic())) == "complete+body"
+                         timeout=max(0.5, end - time.monotonic()),
+                         port=port) == "complete+body"
         return False
 
     return bool(poll(probe, timeout=timeout, interval=POLL_LOAD)[1])
 
-def _ready(profile: str, target_id: str) -> bool:
+def _ready(profile: str, target_id: str, port: int = 0) -> bool:
     """Is the current document complete and parsed, right now?"""
     try:
-        return _eval(profile, target_id, READY_EXPR,
-                     timeout=5) == "complete+body"
+        return _eval(profile, target_id, READY_EXPR, timeout=5,
+                     port=port) == "complete+body"
     except ControlError:
         return False
 
 def _wait_move(profile: str, target_id: str, before_url: str,
                before_origin: float | None,
-               timeout: float = NAV_MOVE_S) -> bool:
+               timeout: float = NAV_MOVE_S, port: int = 0) -> bool:
     """Did the tab LEAVE the document it was on?
 
     This is the first question, and `readyState` cannot answer it: the page
@@ -128,11 +139,11 @@ def _wait_move(profile: str, target_id: str, before_url: str,
     address — either one is the move.
     """
     def probe() -> bool:
-        origin = _time_origin(profile, target_id)
+        origin = _time_origin(profile, target_id, port)
         if origin is not None and before_origin is not None \
                 and origin != before_origin:
             return True
-        now = _href(profile, target_id)
+        now = _href(profile, target_id, port)
         # `before_url and …`: with an unreadable before, `_same_page(now, "")`
         # is always false, so the move used to be reported as PROVEN by a
         # tautology (a review measured it). An unknown before is handled by the
@@ -142,7 +153,8 @@ def _wait_move(profile: str, target_id: str, before_url: str,
     return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])
 
 def _wait_url_change(profile: str, target_id: str, before: str,
-                     timeout: float = HISTORY_TIMEOUT_S) -> bool:
+                     timeout: float = HISTORY_TIMEOUT_S,
+                     port: int = 0) -> bool:
     """Did the tab's address leave `before` within the deadline?
 
     `before` must be KNOWN (`before and …`): with an unreadable address,
@@ -152,12 +164,12 @@ def _wait_url_change(profile: str, target_id: str, before: str,
     the AFTER state instead.
     """
     def probe() -> bool:
-        now = _href(profile, target_id)
+        now = _href(profile, target_id, port)
         return bool(now and before and not _same_page(now, before))
 
     return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])
 
-def _time_origin(profile: str, target_id: str) -> float | None:
+def _time_origin(profile: str, target_id: str, port: int = 0) -> float | None:
     """The document's `performance.timeOrigin`, or None when unreadable.
 
     It changes exactly when a NEW document is created, which is the only
@@ -165,15 +177,16 @@ def _time_origin(profile: str, target_id: str) -> float | None:
     """
     try:
         return float(_eval(profile, target_id, "performance.timeOrigin",
-                           timeout=5))
+                           timeout=5, port=port))
     except (ControlError, TypeError, ValueError):
         return None
 
 def _wait_new_document(profile: str, target_id: str, before: float,
-                       timeout: float = RELOAD_TIMEOUT_S) -> bool:
+                       timeout: float = RELOAD_TIMEOUT_S,
+                       port: int = 0) -> bool:
     """Is there a document whose timeOrigin differs from `before`?"""
     def probe() -> bool:
-        now = _time_origin(profile, target_id)
+        now = _time_origin(profile, target_id, port)
         return now is not None and now != before
 
     return bool(poll(probe, timeout=timeout, interval=POLL_SLOW)[1])
@@ -197,9 +210,10 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
     target = _pkg.safe_url(url)
     row, tab_row = _pkg._one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
-    before = _href(profile, target_id)
-    before_origin = _time_origin(profile, target_id)
-    with page_session(profile, target_id) as session:
+    port = row_port(row)
+    before = _href(profile, target_id, port)
+    before_origin = _time_origin(profile, target_id, port)
+    with page_session(profile, target_id, port=port) as session:
         try:
             reply = session.call("Page.navigate", {"url": target})
         except ControlError as e:
@@ -217,16 +231,17 @@ def nav(url: str, tab: str = "", browser: str = "") -> dict:
     # where every other path polls)
     moved: bool | None = None if not before else _wait_move(profile, target_id,
                                                             before,
-                                                            before_origin)
+                                                            before_origin,
+                                                            port=port)
     if moved is None:
         def probe() -> bool:
-            url_read = _href(profile, target_id)
+            url_read = _href(profile, target_id, port)
             return bool(url_read and _same_page(target, url_read))
 
         poll(probe, timeout=NAV_MOVE_S, interval=POLL_SLOW)
-    loaded = _wait_document(profile, target_id) if moved else _ready(profile,
-                                                                     target_id)
-    url_read = _href(profile, target_id)
+    loaded = _wait_document(profile, target_id, port=port) if moved \
+        else _ready(profile, target_id, port)
+    url_read = _href(profile, target_id, port)
     if url_read.startswith("chrome-error://") or refused:
         fail(ERR_NAV_FAILED,
              f"the browser could not load {target!r}"
@@ -264,8 +279,9 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
         fail(ERR_BAD_ARGS, f"history: {direction!r} is not back or forward")
     row, tab_row = _pkg._one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
-    before = _href(profile, target_id)
-    tab_ws = page_ws(profile, target_id)
+    port = row_port(row)
+    before = _href(profile, target_id, port)
+    tab_ws = page_ws(profile, target_id, port)
     listing = cdp.call(tab_ws, "Page.getNavigationHistory")
     entries = listing.get("entries") if isinstance(listing, dict) else None
     index = as_int(listing.get("currentIndex")) if isinstance(listing, dict) \
@@ -281,11 +297,11 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
              f"there is no {direction} entry to move to")
     cdp.call(tab_ws, "Page.navigateToHistoryEntry",
              {"entryId": (entries[wanted] or {}).get("id")})
-    if not _wait_url_change(profile, target_id, before):
+    if not _wait_url_change(profile, target_id, before, port=port):
         if not before:
             # the address could not be read BEFORE, so "it changed" has no
             # oracle: what proves the move is the tab answering on a real page
-            after = _href(profile, target_id)
+            after = _href(profile, target_id, port)
             if not after or after.startswith("chrome-error://"):
                 fail(ERR_NAV_NOT_VERIFIED,
                      f"this tab's address could not be read before {direction} "
@@ -295,7 +311,7 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
                  f"the tab is still at {before!r} after {direction} — the "
                  "browser moved to a history entry whose address did not "
                  "change (a same-document entry), or the page re-set it")
-    url_read = _href(profile, target_id)
+    url_read = _href(profile, target_id, port)
     if url_read.startswith("chrome-error://"):
         fail(ERR_NAV_FAILED,
              f"the {direction} entry did not load — the tab is on the "
@@ -318,7 +334,8 @@ def activate(tab: str = "", browser: str = "") -> dict:
     """
     row, tab_row = _pkg._one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
-    with page_session(profile, target_id) as session:
+    port = row_port(row)
+    with page_session(profile, target_id, port=port) as session:
         before = str(session.evaluate("document.visibilityState") or "")
         session.call("Page.bringToFront")
         def probe() -> str:
@@ -356,15 +373,18 @@ def reload_page(tab: str = "", browser: str = "") -> dict:
     """
     row, tab_row = _pkg._one_tab(tab, browser, for_write=True)
     profile, target_id = str(row["profile"]), str(tab_row["id"])
-    before = _time_origin(profile, target_id)
+    port = row_port(row)
+    before = _time_origin(profile, target_id, port)
     if before is None:
         fail(ERR_RELOAD_NOT_VERIFIED,
              f"tab {target_id[:10]}… did not report a document time — there "
              "is nothing to compare a reload against")
-    _eval(profile, target_id, "location.reload(); 'reloading'", timeout=10)
-    if not _wait_new_document(profile, target_id, before):
+    _eval(profile, target_id, "location.reload(); 'reloading'", timeout=10,
+          port=port)
+    if not _wait_new_document(profile, target_id, before, port=port):
         fail(ERR_RELOAD_NOT_VERIFIED,
              f"no new document within {RELOAD_TIMEOUT_S:g}s — the page may "
              "block the reload, or it is still loading")
     return {"ok": True, "tab": f"id:{target_id}", "reloaded": True,
-            "url_read": _href(profile, target_id), "browser": _pkg._brief(row)}
+            "url_read": _href(profile, target_id, port),
+            "browser": _pkg._brief(row)}

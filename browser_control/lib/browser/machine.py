@@ -1,11 +1,14 @@
 """machine — the census: every browser here, and the rows verbs report.
 
-`browsers()` walks /proc once; the projections (`brief`, `_row`,
-`_endpoint_details`) are what `list`, `info` and `tab list` return.
+`browsers()` walks /proc once — the memo below is what makes that true for the
+whole census rather than only for its first row; the projections (`brief`,
+`_row`, `_endpoint_details`) are what `list`, `info` and `tab list` return.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from browser_control.lib import (
@@ -33,70 +36,231 @@ from browser_control.lib.proc import (
     exe_path,
     is_headless_cmd,
     main_processes,
+    pid_on_marker,
 )
+
+# The process list ONE census is reading, or None outside a census. The memo
+# is the answer to a measured cost: every reachable row verified itself
+# through `find_pid`, which walked /proc AGAIN (3 walks for 2 browsers), and
+# `list`/`tab list` census more than once. It is opened and closed by
+# `census_processes`, so the list never outlives the census that read it: a
+# caller that censuses twice sees /proc twice, which is what keeps "the
+# browser exited mid-verb" a REPORTED fact rather than a hidden one.
+_PROCS: list[tuple[int, str, str]] | None = None
+
+
+@contextlib.contextmanager
+def census_processes(procs: list[tuple[int, str, str]] | None = None,
+                     ) -> Iterator[list[tuple[int, str, str]]]:
+    """Hold ONE /proc process list open for the duration of one census.
+
+    Re-entrant, and a nested window REUSES the outer list unless it is handed
+    one: `list_tabs` opens the window for its whole reply so its two censuses
+    share one walk, while a bare `browsers()` opens its own. The window is
+    closed on the way out — even on a refusal — so nothing downstream reads a
+    process list from a census that has already answered.
+    """
+    global _PROCS
+    saved = _PROCS
+    if procs is None and saved is None:
+        procs = main_processes()
+    if procs is not None:
+        _PROCS = procs
+    try:
+        yield _PROCS if _PROCS is not None else []
+    finally:
+        _PROCS = saved
+
+
+def profile_pid(profile: str) -> int:
+    """The pid running ON this profile, from the census' own process list.
+
+    `proc.find_pid` is the same rule over a fresh walk; this one answers from
+    the list the census in progress already read, so verifying N rows costs
+    ONE walk. Outside a census it walks, exactly like `find_pid`.
+    """
+    if not profile:
+        return 0
+    procs = _PROCS if _PROCS is not None else main_processes()
+    for pid, _exe, cmd in procs:
+        if pid_on_marker(pid, cmd, profile):
+            return pid
+    return 0
+
+
+def row_port(row: dict) -> int:
+    """The CDP port the endpoint of a browser ROW answers on.
+
+    The row is the only place the file-vs-cmdline question is already
+    resolved (`browsers()`), so a verb that holds a row never re-reads the
+    port file: the file is a SECOND oracle, and for a browser started with an
+    explicit `--remote-debugging-port=N` it is the wrong one — Chrome writes
+    `DevToolsActivePort` only when the port is 0. Resolving it ONCE per verb is
+    also what keeps a later re-read from aiming a write at a port that changed
+    in between (the verify-then-use gap `owners.verify_ws_owner` closes at the
+    connection itself).
+    """
+    return as_int(endpoint_of(row).get("port"))
+
+
+def driver_port(profile: str) -> int:
+    """The port to drive `profile` on: the port file when it ANSWERS AND
+    VERIFIES, else the port the process itself names, else the file's.
+
+    The ONE resolver for a caller that has a profile but no row. A browser
+    this CLI started is launched with `--remote-debugging-port=0`, so the OS
+    picks the port and the browser writes `DevToolsActivePort` — the file
+    answers and, when its holder is really this profile's browser, it is used.
+    A browser started by hand with an explicit `--remote-debugging-port=N`
+    writes NO file, so `cdp.port_of` answers 0 for it: the process's own
+    cmdline is the oracle then, which is exactly what `browsers()` reads into
+    the row.
+
+    ANSWERING is not OWNING. The file survives a SIGKILL and its port can be
+    REUSED, so a file whose port answers can be a stranger's listener; this
+    used to return that port on the strength of the answer alone, and every
+    caller behind it then aimed at the stranger while the browser's own
+    `--remote-debugging-port=N` was never even probed (a review measured a
+    file naming 9333 held by a python process while the browser's 9222
+    answered: `driver_port` returned 9333 and `attach` refused `no-browser`
+    about the browser that was right there). The file's port is returned only
+    when the kernel says its holder IS this profile's browser; otherwise the
+    census answers with the port the PROCESS names (`browsers`, which resolves
+    it the same way and in the same order), and when nothing answers the
+    file's port is still returned — the honest `cdp-not-local` /
+    `cdp-unreachable` refusal that follows is the one callers already handled.
+    """
+    file_port = as_int(cdp.port_of(profile))
+    if file_port and cdp.answers(file_port) \
+            and _pkg.endpoint_owner(profile, file_port).get("verified"):
+        return file_port
+    want = norm(str(profile or ""))
+    if want:
+        for row in _pkg.browsers():
+            if norm(str(row.get("profile") or "")) != want:
+                continue
+            port = row_port(row)
+            if port:
+                return port
+    return file_port
 
 
 def browsers() -> list[dict]:
     """Every Chromium-family browser RUNNING here, ours or the user's.
 
-    One /proc pass over the main processes: each with the profile it runs on
-    (`--user-data-dir`, else the default data directory for that executable)
-    and whether a DevTools endpoint answers for it — which is what makes it
-    drivable. `managed` says the profile is one this CLI owns and `attached`
-    that it was attached for tab writes, so the answer is about the whole
-    machine rather than our own corner of it; `headless` says it runs with no
-    window, read from the process's own cmdline (`proc.is_headless_cmd`) —
-    the mode is a fact about the process, not about this CLI's flags.
+    One /proc pass over the main processes — held open for the whole census
+    (`census_processes`), so the identity check of every row reads the list
+    this walk produced instead of walking again: each with the profile it runs
+    on (`--user-data-dir`, else the default data directory for that
+    executable) and whether a DevTools endpoint answers for it — which is what
+    makes it drivable. `managed` says the profile is one this CLI owns and
+    `attached` that it was attached for tab writes, so the answer is about the
+    whole machine rather than our own corner of it; `headless` says it runs
+    with no window, read from the process's own cmdline
+    (`proc.is_headless_cmd`) — the mode is a fact about the process, not about
+    this CLI's flags.
+
+    The PORT is resolved the same way `driver_port` resolves it, and in that
+    order: the profile's port file when it ANSWERS, else the port the process
+    itself names on its own command line. A file that does not answer is not
+    evidence of anything (it can be a leftover of a dead run), and preferring
+    it made `list` report a live, answering browser as unreachable and
+    `attach --port N` refuse `no-browser` about a browser that was right
+    there. The row reports the port that ANSWERED — never one that was merely
+    written down. A process whose ports all stay silent is still a row (with
+    `reachable: false`): a census reports the machine, it does not drop what
+    it cannot reach.
+
+    ANSWERING is not OWNING, so when the file's port answers and the kernel
+    says its holder is NOT this profile's browser, the port the process names
+    on its own `--remote-debugging-port=N` is the next oracle — the browser
+    may have written a stale file (it survives a SIGKILL, and its port can be
+    reused) while its OWN endpoint answers all along. The row then reports
+    that port, judged on its own merits, and `port_from` says WHICH oracle
+    answered (`"file"` or `"cmdline"`), so a reader can tell a browser
+    verified through its port file from one verified through its own argv.
+    Without the second oracle the file's stranger WAS the row: `_drivable`
+    refused `cdp-not-local`, `tab list` filed the live browser under
+    `unverified`, `driver_port` answered the stranger's port and `attach
+    --port N` refused `no-browser` about the browser that was right there (a
+    review measured all of it). It is one probe per candidate: the file's
+    port once, and the named port once, and only when the file both answered
+    and failed to verify.
     """
     rows: list[dict] = []
     attached = attachments_lib.STORE.records()
-    for pid, exe, cmd in main_processes():
-        flag = cmdline_value(cmd, "--user-data-dir")
-        profile = flag or _pkg._default_profile(exe)
-        port = cdp.port_of(profile) if profile else 0
-        if not port:
-            port = as_int(cmdline_value(cmd, "--remote-debugging-port"))
-        reachable = cdp.answers(port)
-        endpoint: dict = {"port": port, "reachable": reachable,
-                          "verified": False}
-        if reachable:
-            # WHO holds the port: the row reports the pid and exe the kernel
-            # says own the listening socket, and `verified` says whether that
-            # process is this browser. Nothing here DRIVES an unverified row.
-            owner = _pkg.endpoint_owner(profile, port)
-            endpoint["verified"] = bool(owner["verified"])
-            endpoint["listener"] = {"pid": owner["pid"],
-                                    "exe": owner["exe"]}
-            if owner["verified"]:
-                try:
-                    endpoint["tabs"] = len(cdp.page_rows_at(port))
-                except ControlError as e:
-                    # a browser that died, or stalled, between the probe and
-                    # this second GET: a census row is a REPORT, not a gate —
-                    # one vanished browser must not take `list` and every
-                    # shared resolver down with it (see `tabs_of`, which
-                    # reports the same way). None is "no count", never "no
-                    # tabs"
-                    endpoint["tabs"] = None
-                    endpoint["reason"] = e.message
-            else:
-                endpoint["reason"] = str(owner["reason"])
-        rows.append({"pid": pid, "exe": exe,
-                     "path": exe_path(pid),
-                     "profile": profile,
-                     "profile_from": ("flag" if flag else
-                                      ("default" if profile else "")),
-                     "managed": is_managed(profile),
-                     "attached": norm(profile) in attached,
-                     "headless": is_headless_cmd(cmd, exe),
-                     "cdp": endpoint})
+    # ONE walk, held open for every row below: `endpoint_owner` resolves the
+    # profile's pid through `profile_pid`, which reads THIS list
+    with census_processes() as procs:
+        for pid, exe, cmd in procs:
+            flag = cmdline_value(cmd, "--user-data-dir")
+            profile = flag or _pkg._default_profile(exe)
+            file_port = as_int(cdp.port_of(profile)) if profile else 0
+            named_port = as_int(cmdline_value(cmd, "--remote-debugging-port"))
+            port = file_port
+            port_from = "file" if file_port else ""
+            reachable = bool(file_port) and cdp.answers(file_port)
+            owner: dict = {}
+            if reachable:
+                # WHO holds the file's port: an answer is not an identity, so
+                # the verdict decides whether it is this browser's endpoint
+                owner = _pkg.endpoint_owner(profile, port)
+                if not owner["verified"] and named_port \
+                        and named_port != file_port and cdp.answers(named_port):
+                    port, port_from = named_port, "cmdline"
+                    owner = _pkg.endpoint_owner(profile, port)
+            if not reachable and named_port and named_port != file_port:
+                # the file did not answer: the process's OWN flag is the next
+                # oracle, and the port that answers is the one reported
+                port, port_from = named_port, "cmdline"
+                reachable = cdp.answers(named_port)
+            endpoint: dict = {"port": port, "reachable": reachable,
+                              "verified": False, "port_from": port_from}
+            if reachable:
+                # the row reports the pid and exe the kernel says own the
+                # listening socket, and `verified` says whether that process is
+                # this browser. Nothing here DRIVES an unverified row.
+                if not owner:
+                    owner = _pkg.endpoint_owner(profile, port)
+                endpoint["verified"] = bool(owner["verified"])
+                endpoint["listener"] = {"pid": owner["pid"],
+                                        "exe": owner["exe"]}
+                if owner["verified"]:
+                    try:
+                        endpoint["tabs"] = len(cdp.page_rows_at(port))
+                    except ControlError as e:
+                        # a browser that died, or stalled, between the probe
+                        # and this second GET: a census row is a REPORT, not a
+                        # gate — one vanished browser must not take `list` and
+                        # every shared resolver down with it (see `tabs_of`,
+                        # which reports the same way). None is "no count",
+                        # never "no tabs"
+                        endpoint["tabs"] = None
+                        endpoint["reason"] = e.message
+                else:
+                    endpoint["reason"] = str(owner["reason"])
+            rows.append({"pid": pid, "exe": exe,
+                         "path": exe_path(pid),
+                         "profile": profile,
+                         "profile_from": ("flag" if flag else
+                                          ("default" if profile else "")),
+                         "managed": is_managed(profile),
+                         "attached": norm(profile) in attached,
+                         "headless": is_headless_cmd(cmd, exe),
+                         "cdp": endpoint})
     # ours first, then the attached ones, then whatever can be driven, by pid
     return sorted(rows, key=lambda r: (not r["managed"], not r["attached"],
                                        not endpoint_of(r)["verified"], r["pid"]))
 
 def list_browsers() -> dict:
-    """`list`: every browser running here, drivable or not."""
-    rows = _pkg.browsers()
+    """`list`: every browser running here, drivable or not.
+
+    ONE census, and one /proc walk with it: the window is opened here so every
+    `browsers()` behind this reply reads the same process list (a nested
+    window reuses the outer one).
+    """
+    with census_processes():
+        rows = _pkg.browsers()
     return {"ok": True, "count": len(rows),
             "drivable": sum(1 for r in rows if endpoint_of(r)["verified"]),
             "browsers": rows}
@@ -155,6 +319,7 @@ class Endpoint:
     listener: dict | None = None
     tabs: int | None = None
     reason: str = ""
+    port_from: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> Endpoint:
@@ -166,7 +331,8 @@ class Endpoint:
                              else None),
                    tabs=(as_int(data["tabs"])
                          if data.get("tabs") is not None else None),
-                   reason=str(data.get("reason") or ""))
+                   reason=str(data.get("reason") or ""),
+                   port_from=str(data.get("port_from") or ""))
 
 
 @dataclass(frozen=True)
@@ -212,7 +378,7 @@ def _who(rows: list[dict]) -> str:
     """The browsers in a message, named so a caller can act on them."""
     return "; ".join(f"{r['exe']} on {r['profile']}" for r in rows)
 
-def _writable(browser: str = "") -> list[dict]:
+def _writable(browser: str = "", rows: list[dict] | None = None) -> list[dict]:
     """The browsers a WRITE may target: the ones this CLI manages, plus the
     attached ones.
 
@@ -225,21 +391,25 @@ def _writable(browser: str = "") -> list[dict]:
     throwaway Chrome whose only sin was publishing a debugging port, which
     then gained a tab it never asked for. `_one_tab` and `_writable_profile`
     name the stranger and refuse instead of picking it.
-    """
-    return [r for r in _drivable(browser, strict=False) if may_write(r)]
 
-def _readable(browser: str = "") -> list[dict]:
+    `rows` is a census the CALLER already made, so one verb censuses once.
+    """
+    return [r for r in _drivable(browser, strict=False, rows=rows)
+            if may_write(r)]
+
+def _readable(browser: str = "", rows: list[dict] | None = None) -> list[dict]:
     """The browsers a READ may target: ours and attached first, else every
     drivable one.
 
     Reading a stranger's tab list is not the same act as typing into it, so a
     read reaches what a write may not — but "ours first" is what keeps an
     unqualified read from refusing `tab-ambiguous` when the user's own browser
-    happens to run beside ours.
+    happens to run beside ours. `rows` is a census the caller already made.
     """
-    return _writable(browser) or _drivable(browser)
+    return _writable(browser, rows) or _drivable(browser, rows=rows)
 
-def _drivable(browser: str = "", strict: bool = True) -> list[dict]:
+def _drivable(browser: str = "", strict: bool = True,
+              rows: list[dict] | None = None) -> list[dict]:
     """The running browsers that answer CDP AND are the browsers they claim.
 
     `browser` narrows to the one named — its executable, or the basename of
@@ -253,8 +423,13 @@ def _drivable(browser: str = "", strict: bool = True) -> list[dict]:
     `strict` makes an endpoint that answered but did NOT verify a refusal
     (`cdp-not-local`) rather than a silent omission — `list` wants the row, a
     drive wants the refusal. Nothing is ever driven from an unverified row.
+
+    `rows` is a census the caller ALREADY made — `tab list` answers both of its
+    halves from one (`census_processes` keeps the /proc walk single); without
+    one this censuses for itself.
     """
-    answering = [r for r in _pkg.browsers() if endpoint_of(r).get("reachable")]
+    answering = [r for r in (rows if rows is not None else _pkg.browsers())
+                 if endpoint_of(r).get("reachable")]
     verified = [r for r in answering if endpoint_of(r).get("verified")]
     matches = _narrow(verified, browser)
     if browser and matches:
@@ -324,21 +499,25 @@ def list_tabs(browser: str = "") -> dict:
     A browser whose endpoint did not VERIFY is not listed under `browsers`
     (nothing of it is driven or counted) — it appears under `unverified`, with
     the pid and exe that actually hold the port, because a row that silently
-    vanished would be a claim of absence.
+    vanished would be a claim of absence. The whole reply is ONE census
+    (the window opened here), so the `unverified` half does not walk /proc a
+    second time either.
     """
-    groups: list[dict] = []
-    total = 0
-    for row in _drivable(browser, strict=False):
-        tabs, error = _pkg._tabs_of(row)
-        group = {**_pkg._brief(row), "tabs": tabs, "count": len(tabs)}
-        if error:
-            group["error"] = error
-        total += len(tabs)
-        groups.append(group)
+    with census_processes():
+        rows = _pkg.browsers()
+        groups: list[dict] = []
+        total = 0
+        for row in _drivable(browser, strict=False, rows=rows):
+            tabs, error = _pkg._tabs_of(row)
+            group = {**_pkg._brief(row), "tabs": tabs, "count": len(tabs)}
+            if error:
+                group["error"] = error
+            total += len(tabs)
+            groups.append(group)
+        suspects = _narrow([r for r in rows
+                            if endpoint_of(r).get("reachable")
+                            and not endpoint_of(r).get("verified")], browser)
     reply: dict = {"ok": True, "count": total, "browsers": groups}
-    suspects = _narrow([r for r in _pkg.browsers()
-                        if endpoint_of(r).get("reachable")
-                        and not endpoint_of(r).get("verified")], browser)
     if suspects:
         reply["unverified"] = [
             {**_pkg._brief(r), "listener": endpoint_of(r).get("listener"),

@@ -7,12 +7,16 @@ most" rule and the `--flag VALUE`/`--flag=value` readers live in
 a plugin the same readers without importing the CLI — and are re-exported here,
 so no call site moves. This module keeps the readers whose shape is a VERB's:
 the single positional, the optional needle, the no-argument and URL rules, and
-the `--port`/`--pid`/`--tab`/global-flag grammar.
+the `--port`/`--pid`/`--tab`/global-flag grammar. `_head_of` is the subcommand
+reader beside them: a LEADING bare `--` means the rest is positional, so no
+token after it names a subcommand.
 """
 from __future__ import annotations
 
 from browser_control.lib.argv import (  # noqa: F401
+    MARKER,
     _float,
+    _head_of,
     _int,
     _no_flags,
     _one_text_at_most,
@@ -30,8 +34,12 @@ from browser_control.lib.errors import (
 
 
 def _one(rest: list[str], verb: str, required: bool = False) -> str:
-    """The verb's single positional argument, or a refusal."""
-    _no_flags(rest, verb)
+    """The verb's single positional argument, or a refusal.
+
+    The `--` rule is `_no_flags`': `tab activate -- -weird` activates the tab
+    named `-weird` instead of refusing an unknown flag.
+    """
+    rest = _no_flags(rest, verb)
     if len(rest) > 1:
         fail(ERR_BAD_ARGS, f"{verb}: one argument at most, got {len(rest)}")
     if not rest:
@@ -51,9 +59,10 @@ def _needle(rest: list[str], verb: str) -> str | None:
     """The optional single TEXT a matcher verb takes, or a refusal.
 
     The unknown-flag scan and the "one TEXT at most" rule in ONE place — six
-    verbs used to spell both out (RF-31).
+    verbs used to spell both out (RF-31) — including the `--` that makes a
+    TEXT starting with `-` reachable (`tab find -- -spam`).
     """
-    _no_flags(rest, verb)
+    rest = _no_flags(rest, verb)
     if len(rest) > 1:
         fail(ERR_BAD_ARGS, _one_text_at_most(verb, len(rest)))
     return rest[0] if rest else None
@@ -90,11 +99,28 @@ def _opt_int(value: str | None, what: str) -> int | None:
 def _selector(rest: list[str], verb: str, allow: tuple[str, ...]) -> dict:
     """`--port N | --pid N | --profile DIR`, plus `--list`/`--all` where a
     verb allows them. Pure argv work: an unknown flag is refused, and the
-    combinations that mean two different things are refused too."""
+    combinations that mean two different things are refused too.
+
+    A bare `--` ends the flags and these verbs take no positionals, so the
+    first token after it is refused BY NAME as an argument. The marker used to
+    be merely skipped, so `attach -- --list` listed and `close -- --port 5`
+    closed by port: the caller's `--` said "everything after this is an
+    argument" and the verb read it as a flag anyway (a review measured both).
+    A trailing marker with nothing after it is still consumed, and every
+    pre-marker reading is unchanged.
+    """
     out = {"port": 0, "pid": 0, "list": False, "all": False}
     index = 0
     while index < len(rest):
         arg = str(rest[index])
+        if arg == MARKER:
+            if index + 1 < len(rest):
+                fail(ERR_BAD_ARGS,
+                     f"{verb}: {str(rest[index + 1])!r} is an ARGUMENT, not a "
+                     f"flag — a bare {MARKER} ends the flags and this verb "
+                     "takes no positionals")
+            index += 1
+            continue
         if arg == "--list" and "list" in allow:
             out["list"] = True
             index += 1
@@ -162,8 +188,12 @@ def _flags(args: list[str]) -> tuple[list[str], dict[str, str | None]]:
     how `--allow ""` used to mean "allow everything".
 
     The pulling is the shared `_scan` — the same reader `_pop`/`_pop_all` use —
-    in ONE pass, because the value of a bare flag is the next token whatever it
-    looks like. `--allow`/`--deny` are the two the reader refuses to see twice
+    in ONE pass, because the value of a bare flag is the next token. That token
+    may be a VERB flag, but not a spelling of a GLOBAL one: `--frame
+    --deny=egress` used to swallow the policy into `frame` with no refusal and
+    no gate, so `_scan` refuses it (`_refuse_flag_value`) — keyed on this
+    table, so the deliberate `--tab --for` decoy is untouched.
+    `--allow`/`--deny` are the two the reader refuses to see twice
     (`refuse_repeat`): the per-verb repeatable flags have the opposite contract,
     last-wins, which for a capability class is the unsafe direction.
     """

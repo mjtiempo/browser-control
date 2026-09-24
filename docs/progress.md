@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **the CLI surface is delivered, packaged, and covered by a committed
-battery.** `python3 tests/test_unit.py` → 75 passed, 0 failed; the live battery
+battery.** `python3 tests/test_unit.py` → 165 passed, 0 failed; the live battery
 (`tests/live_test.py`) runs against a real browser — run it before a release,
 and remember skip ≠ pass.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
@@ -12,6 +12,69 @@ exists, what it does *not* do yet, and what comes next.
 > `lib/dom/`, `lib/profile/`, `lib/plugins/` and `cli/`; an older path maps to
 > its package (`lib/cdp.py` → `lib/cdp/`, `lib/browser.py` → `lib/browser/`,
 > `lib/dom.py` → `lib/dom/`).
+
+## 0. The adversarial review round (latest revision)
+
+Seven independent adversarial reviews (transport, lifecycle, DOM oracles,
+profile/secrets, CLI/plugins, tests) found — and this revision fixed — the
+defects below. The theme is the project's own stance applied to itself: where
+a read-back, a deadline, a lock or a bound was *claimed*, it is now enforced.
+
+- **Two unbounded hangs / OOMs**: the CDP endpoint probe now honours its
+  wall-clock deadline against a peer that dribbles bytes (it blocked forever in
+  `HTTPResponse.close()`), and `port_of`/`pid_of` read a bounded REGULAR file
+  (`O_NOFOLLOW|O_NONBLOCK`, ≤ 64 bytes) — a FIFO hung them and a symlink to
+  `/dev/zero` raised `MemoryError`.
+- **Oracle lies**: `tab media --index N` now reads back the element it drove
+  (an unrelated player's clock used to certify the write); `insert`/`type`
+  report a SHORT landing as `verified: false` with `inserted`; `tab click`'s
+  `changed`, `close`'s `tabs-open` guard and `tab wait`'s timeout are pinned by
+  tests (a review proved all three shipped green when broken).
+- **Fail-open seams closed**: a plugin that raises `SystemExit`/
+  `KeyboardInterrupt` can no longer end the process (exit 0 with no JSON); an
+  unopenable lock refuses `profile-unusable` instead of proceeding unlocked;
+  `--deny egress` now denies the verbs that reach the network.
+- **Bounds that were not bounds**: a crafted credential store is read with a
+  hard row cap and truncated values; `extract` checks its budget before pushing
+  a row and caps `--field`; oversize CDP replies are `result-too-large`, not a
+  transport error; the PNG oracle requires a complete file.
+- **One oracle per fact**: the CDP port is resolved once per verb (a browser
+  started with an explicit `--remote-debugging-port=N` writes no
+  `DevToolsActivePort`, so the census falls back to the process's own flag) and
+  the port's holder is re-judged immediately before each connection; `seed`'s
+  read-back compares against the sizes recorded as the copy ran.
+- Smaller: `open` reports a redirected startup page instead of SIGTERMing the
+  browser it started; frames report an unbound target as `null`/`matched:
+  false` and bind by elimination; `--` ends the flags; a relative
+  `BROWSER_CONTROL_PLUGIN_PATH` is refused; `help` writes its audit line;
+  `scroll` sees a horizontal move; `insert`/`type` accept a frame or canvas
+  focus (the documented `verified: false` path) instead of refusing `no-focus`.
+
+The SAME seven reviews then ran a second pass over the fixes. Everything they
+re-opened is fixed too, and the round-2 findings are the ones worth naming:
+
+- `tab media` binds every read to a CONCRETE element (the index the preferred
+  read settled on, not the "preferred" rule re-evaluated after the action), and
+  a page that swaps the element under the verb refuses instead of certifying
+  from the new one's clock.
+- A LENGTH that did not change is an UNCLEAR verdict, not a refusal:
+  `Input.insertText` REPLACES a selection, so a landed write can leave a field
+  the same length or shorter. Only a focus the probe PROVES takes no text
+  refuses `insert-not-verified`/`type-not-verified`.
+- `verify_port_owner` re-judges the port at EVERY page websocket, including
+  `tab wait --for js` and the frame census (the two doors the first round
+  missed); a port rebound to a stranger refuses before a byte is sent.
+- The port oracle is "answers AND verifies": a stale `DevToolsActivePort` held
+  by somebody else no longer shadows the browser's own
+  `--remote-debugging-port`.
+- The same-URL frames case is refused rather than paired by row order; a
+  symlinked `Default/` is reported as a location with a reason; `profile logins`
+  has a wall-clock budget on the store read (a crafted store that used to OOM
+  now cannot hang it either); the credential-store copy lives under this CLI's
+  own 0700 root and stale copies are swept; a FIFO at the log path can no
+  longer block a verb; `page read`'s frame scope, a bad `--cap` before any
+  navigation, an audited `help`, and a value that is itself a flag
+  (`--frame --deny=egress`) are all refused rather than silently dropped.
 
 ## 1. What exists
 
@@ -43,7 +106,7 @@ the other verbs own the browser.
 
 | Verb | Does | Verified by (the read-back) |
 | --- | --- | --- |
-| `open [URL...] [--headless] [--profile DIR]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs; `--headless` starts it with NO WINDOW (`--headless=new`), which every verb then drives through the same CDP surface; `--profile DIR` names the INSTANCE, so one root can hold several (two Chrome profiles, two sessions) | the endpoint must **answer**, then every opened tab must be in the tab list; the reply reports `headless` — the mode launched on a fresh start, the mode the RUNNING browser is in on an adoption, read from its own cmdline (asking `--headless` when a windowed browser is already up refuses `bad-args` rather than overrule the argv) |
+| `open [URL...] [--headless] [--profile DIR]` | starts the managed browser (or adopts the running one) and opens every URL given — the first as the startup page when starting fresh, the rest as tabs; `--headless` starts it with NO WINDOW (`--headless=new`), which every verb then drives through the same CDP surface; `--profile DIR` names the INSTANCE, so one root can hold several (two Chrome profiles, two sessions) | the endpoint must **answer**, then the startup page is matched by an explicit ladder — the requested URL, else the same HOST answering (an `http→https` upgrade, a canonicalised or redirected path), else the first real page row — and each `opened` entry carries `matched`: false plus a `note` naming both addresses when the browser landed somewhere else. A URL the browser changed is a FACT TO REPORT, never a reason to stop the healthy browser (`no-page-tab` is reserved for an empty tab list, a review measured the SIGTERM); the reply also reports `headless` — the mode launched on a fresh start, the mode the RUNNING browser is in on an adoption, read from its own cmdline (asking `--headless` when a windowed browser is already up refuses `bad-args` rather than overrule the argv) |
 | `close [--force] [--port N\|--pid N\|--profile DIR]` | stops the browser this CLI started — or, when NAMED, exactly that one, which is how another tool's browser goes | the pid dies **and** the endpoint stops answering; never SIGKILLs, never signals a pid whose own cmdline does not name that profile, and refuses `tabs-open` while page tabs are open unless `--force`; a named browser must be a live, answering, VERIFIED Chromium-family process |
 | `list` | **every** Chromium-family browser running here — ours or the user's, drivable or not — with pid, exe, profile, whether the profile is ours, whether CDP answers, whether the endpoint VERIFIED, and (when it did) the listener pid/exe the kernel names (+ its tab count) | one `/proc` pass, a CDP probe on the port each one names, and the socket's owner from `/proc/net/tcp` + `/proc/<pid>/fd` |
 | `info` | the browser this CLI would drive (or the one `--browser` names) and its endpoint — `cdp.version`, `protocol`, `user_agent`, tab count; `running: false` names the profile `open` would use | `/proc` + `/json/version` read from the browser itself |
@@ -58,29 +121,29 @@ the other verbs own the browser.
 | `tab back` / `tab forward` | moves the tab's history | the address actually changed (`nav-not-verified` when it did not) |
 | `tab reload` | reloads one tab | `performance.timeOrigin` changed: a NEW document, not a guess |
 | `tab js EXPR` | evaluates an expression — the escape hatch, and it can write; the reply is the page's OWN value, so a string that parses as JSON stays that string | **unverified** (`verified: false`), the value capped at 64 k (`result-too-large`), a page exception is `js-error`, a page that stops answering `eval-timeout` |
-| `tab wait --for load\|idle\|element\|js` | polls ONE predicate to a wall-clock deadline | `{ok, for, waited_s, samples}` or `wait-timeout` naming what and how long; one connection for the whole poll |
+| `tab wait --for load\|idle\|element\|js` | polls ONE predicate to a wall-clock deadline | `{ok, for, waited_s, samples}` or `wait-timeout` naming what and how long; one connection for the whole poll, `waited_s` measured on the MONOTONIC clock the deadline uses, no sample started past the deadline, and a negative `--idle-ms` refused (`bad-args`) rather than silently inverting the idle predicate |
 | `tab find TEXT \| --selector CSS` | a human target → visible elements, in **page** coordinates | `no-match` (naming the candidate count) · `no-viewport` when the tab has no viewport · each match carries `point` and `viewport` (viewport coordinates), `in_viewport`, `hit` (a real hit-test), `hit_element`, `clipped` |
 | `tab text [--selector CSS]` | the rendered text | truncated **in the page**, so the reply is bounded and `length` still reports the full size |
 | `tab click TEXT \| --selector CSS [--index N]` | **real input** (`Input.dispatchMouseEvent` move+press+release) at the element's viewport centre | `occluded` when the point reaches something else · `no-viewport-target` when it is off-screen (with the remedy) · `ambiguous-element` for several matches · the reply carries `changed` (url/title/focus/scroll before and after) |
 | `tab scroll --by N \| --edge top\|bottom \| TEXT` | **real wheel input** (`mouseWheel`) or `DOM.scrollIntoViewIfNeeded` for one element | `scroll-not-verified` when a requested edge was not reached, or a wheel moved nothing and the document was not already at that end; the reply names which scroller moved (`document` / `nested`) |
 | `tab focus TEXT \| --selector CSS [--index N]` | the DOM focus (the CARET, not the tab's frontmost position) — `DOM.focus` | `document.activeElement === el`; `focus-not-verified` names why (the protocol says "not focusable", a disabled control) |
 | `tab press KEY` | one key event at the focus — `Input.dispatchKeyEvent` | the dispatch is verified and the reply says `verified: false`: the effect belongs to the page (`tab text`/`tab info`/`tab js` read it); an unknown key is `bad-args` naming the table |
-| `tab insert TEXT` | `Input.insertText` — ONE atomic event | the focused field's **length grew** (`verified: true`), a readable field that did not change refuses `insert-not-verified`, an unreadable one (frame/canvas) reports `verified: false`; `no-focus` when nothing is focused |
+| `tab insert TEXT` | `Input.insertText` — ONE atomic event | the focused field's **length grew by ALL of the text** (`verified: true`), and the reply carries `inserted` (the delta); a landing SHORTER than the text (a `maxlength`, an input handler that filters) is `verified: false` with a note naming the shortfall, never a certified write; a readable field that did not change refuses `insert-not-verified`, an unreadable one (frame/canvas) reports `verified: false`; `no-focus` only when nothing is focused |
 | `tab type TEXT` | real per-character key events (`keyDown`, `char`, `keyUp`) on one connection | same oracle and codes as `insert` (`type-not-verified`) |
 | `tab upload FILE [--selector CSS] [--index N]` | `DOM.setFileInputFiles` (an objectId, so shadow roots work) | `input.files` read back: one file, same name **and size**; `no-file`/`upload-not-verified` |
-| `tab media state\|play\|pause [--index N]` | drives the `<video>`/`<audio>` element (no CDP playback method exists — see 5.7) | `play` needs the **clock to move** (a source-less element reports `paused: false` and never plays a frame), `pause` needs `paused: true`; `no-media` when there is none, `media-blocked` with the page's own reason when the promise rejects |
-| `tab frames [--tab SPEC]` | this page's iframes, and which can be driven (a cross-origin frame is a target of its own; `--frame` reaches it; a same-process frame has no target and `--frame` reads its document) | the DOM's own iframe census, correlated with the `/json` iframe targets; `no-frame` names what exists · `frame-ambiguous` names the indices · input into a same-process frame refuses `frame-not-separate` (the reads work) |
+| `tab media state\|play\|pause [--index N]` | drives the `<video>`/`<audio>` element (no CDP playback method exists — see 5.7) | `play` needs the **clock to move** (a source-less element reports `paused: false` and never plays a frame), `pause` needs `paused: true` — and the clock read is the element the ACTION drove (`--index` binds every read to it, so an unrelated player's clock can no longer certify the write; an index the page cannot satisfy refuses `bad-args` naming the count); `no-media` when there is none, `media-blocked` with the page's own reason when the promise rejects |
+| `tab frames [--tab SPEC]` | this page's iframes, and which can be driven (a cross-origin frame is a target of its own; `--frame` reaches it; a same-process frame has no target and `--frame` reads its document) | the DOM's own iframe census, correlated with the `/json` iframe targets; an unbound SEPARATE frame reports `target: null, matched: false` (never a bare `""` claiming it has no target when the browser merely did not say), exactly one unmatched row and one unclaimed target are bound by elimination (`matched: "elimination"`), and anything ambiguous refuses; `no-frame` names what exists · `frame-ambiguous` names the indices · input into a same-process frame refuses `frame-not-separate` (the reads work) |
 | `tab activate [SPEC]` | brings a tab forward (it raises its window) | the page reports itself **visible**; `activate-not-verified` says why not |
 | `tab hover TEXT \| --selector CSS [--index N] \| --at X,Y` | puts the pointer on an element (`:hover`) | the element-at-point probe; `hover-not-verified` when the page does not report the hover |
 | `tab check TEXT \| --selector CSS [--index N] [--uncheck]` | checks/unchecks a box or radio with **real input** | `checked` flipped, bounded poll; `check-not-verified`, `not-checkable` |
 | `tab select TEXT \| --selector CSS --value V [--index N]` | chooses one `<option>` with real arrow keys | the selected value/index read back; `select-not-verified`, `not-a-select`, `ambiguous-option` |
 | `tab dialog [state\|accept\|dismiss] [--text V]` | reads, accepts or dismisses a JavaScript dialog | `accept`/`dismiss` verify by the renderer returning; `state` may answer `open: null` (a suppressed dialog cannot be seen — §4.9); `no-dialog`, `dialog-not-verified` |
-| `tab screenshot PATH \| --path PATH [--full] [--force] [--tab SPEC]` | writes a PNG of the page | the file's **own PNG header** and size, not the page's geometry; `screenshot-not-verified`, `file-exists` (without `--force`) |
-| `tab extract --each CSS --field NAME=SPEC [--cap N] [--chars N] [--visible] [--unique FIELD]` | a page's repeated items as records; CSS only, no code (a `read`) | the page's own DOM text/attributes, sliced **in the page**; same oracle as `find`/`text`, no claim beyond "this is what the page showed" |
+| `tab screenshot PATH \| --path PATH [--full] [--force] [--tab SPEC]` | writes a PNG of the page | the file's **own PNG header** and size, not the page's geometry — a COMPLETE PNG is required (signature, a 13-byte IHDR with its CRC, a following chunk and a trailing IEND: a header-only stub is refused, a review measured it accepted as real); `screenshot-not-verified`, `file-exists` (without `--force`) |
+| `tab extract --each CSS --field NAME=SPEC [--cap N] [--chars N] [--visible] [--unique FIELD]` | a page's repeated items as records; CSS only, no code (a `read`) | the page's own DOM text/attributes, sliced **in the page**; same oracle as `find`/`text`, no claim beyond "this is what the page showed" — the reply budget is checked BEFORE a row is pushed (so `truncated` means the budget, not the budget plus one row) and the field count is bounded (`bad-args` past the maximum) |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 | `profile info [--profile DIR]` | the managed profiles: weight, age, whether a browser is on one, whether it is attached | one filesystem read |
-| `profile logins [--site HOST] [--cap N]` | the hosts a profile's cookie store names (with expiry) and how many saved logins — **counts and names only, never values** | the profile's own `Cookies`/`Login Data` read from a COPY; a store that cannot be read is `readable: false` with the reason, its rows unknown, not zero |
-| `profile seed --from DIR [--force] [--dry]` | copies a source profile's logins into a managed one (no caches, no lock files); an existing target refuses unless `--force`, and `--force` WIPES it first — what is left is the source, never a mix of two; `--dry` counts both | what landed is read back from the login stores, not from file sizes; the `--force` wipe is verified gone before the copy runs |
+| `profile logins [--site HOST] [--cap N]` | the hosts a profile's cookie store names (with expiry) and how many saved logins — **counts and names only, never values** | the profile's own `Cookies`/`Login Data` read from a COPY, with a hard row cap and per-value truncation: a capped read says so (`capped: true`, `rows_limit`) instead of being read out unbounded (a crafted store drove the old read to `MemoryError`); a store that cannot be read is `readable: false` with the reason, its rows unknown, not zero; a symlinked store is never read through |
+| `profile seed --from DIR [--force] [--dry]` | copies a source profile's logins into a managed one (no caches, no lock files); an existing target refuses unless `--force`, and `--force` WIPES it first — what is left is the source, never a mix of two; `--dry` counts both AND reports `would_refuse` (`profile-exists`/`not-managed`) so a green dry run cannot gate a call that will refuse; a source that reaches the target through a SYMLINK is refused by real path | what landed is read back against the sizes recorded AS IT WAS COPIED (never a re-stat of a live source, which made a running browser's own writes look like files that "did not land"), with files whose source changed mid-copy reported as `changed`; the `--force` wipe is verified gone before the copy runs; the marker lands before the copy, so a failed seed is still cleanable |
 | `profile reset [--force]` | wipes a managed profile, logins included | the profile is emptied and recreated; `reset-not-verified`/`reset-failed` name a wipe that did not land |
 
 Reads span every drivable browser; **writes go to a managed one (a profile
@@ -101,7 +164,7 @@ and a live managed browser wins. Two live managed browsers refuse
 
 ## 2. Evidence
 
-**Hermetic** — `python3 tests/test_unit.py` → **75 passed, 0 failed**: URL
+**Hermetic** — `python3 tests/test_unit.py` → **165 passed, 0 failed**: URL
 policy, tab-spec resolution (incl. `tab-ambiguous`), launch flags (incl. the
 headless ones), headless detection from a cmdline, profile
 keyed by the resolved binary, port-file edge cases, `/json` reading against a
@@ -563,7 +626,13 @@ uses `_pid_file()` and sets the root for the duration of those calls.
 The port came from a FILE (`DevToolsActivePort` in the profile), and a file can
 be stale or its port can be taken by something else. Before this, a stranger
 answering there would have received our clicks, keystrokes, uploads and
-screenshots. Now:
+screenshots. Now the PORT ITSELF has one resolver per verb: the census uses
+the file only when it ANSWERS and otherwise the port the process names on its
+own `--remote-debugging-port` (Chrome writes the file only when the port is
+0, so a browser started with an explicit port writes none), the row's port is
+threaded down to every page verb, and the port's holder is re-judged
+immediately before each connection (`verify_ws_owner`) because the endpoint
+can be rebound between the check and the traffic. The ownership chain is:
 
 1. port → the LISTENING socket's inode (`/proc/net/tcp` + `tcp6`);
 2. inode → the process holding it (`/proc/<pid>/fd` for `socket:[inode]`);
@@ -608,11 +677,11 @@ reads and `tab wait --for js` runs caller code:
 
 | class | means | how many |
 | --- | --- | --- |
-| `read` | reads state; /proc and loopback CDP only | 11 |
-| `write` | changes the page, the browser, or this CLI's authorization | 27 |
+| `read` | reads state; /proc and loopback CDP only | 15 |
+| `write` | changes the page, the browser, or this CLI's authorization | 29 |
 | `code` | runs caller-supplied code: `tab js`, `tab wait --for js` | 2 |
-| `file` | touches a path the CALLER named: `tab screenshot`, `tab upload` | 2 |
-| `egress` | would reach the network — nothing yet; the plugin tier will | 0 |
+| `file` | touches a path the CALLER named: `tab screenshot`, `tab upload` | 3 |
+| `egress` | would reach the network: hands a URL to the browser (`open`, `tab`, `tab nav`) or runs caller code that can `fetch` (`tab js`, `tab wait --for js`); the shipped site plugins declare it | 5 |
 
 `file` is about the caller's data, not infrastructure: every verb may append to
 the action log and `open` writes a profile, which is the tool's own business.
@@ -672,8 +741,12 @@ double-taken).
 
 A caller that cannot take it waits (up to 20 s, a cold launch's budget), then
 refuses `profile-busy` naming the pid, verb and start time the holder wrote
-into the file. A filesystem that cannot lock at all is a `warning` in the reply,
-not a silent nothing — and not a failure either.
+into the file. A lock that cannot be OPENED or TAKEN at all (a directory or a
+symlink at the lock path, a filesystem without `flock`) refuses
+`profile-unusable` naming the path and the OS error. The earlier form carried
+that failure as a `warning` inside an `ok: true` reply and ran the
+check-then-act with no lock at all — two `open`s onto one profile, and
+`seed`/`reset` unlocked (a review measured it).
 
 The check found a real bug, which is the point of adding one: the losing call
 read the port BEFORE taking the lock, so inside it `cdp.reachable(profile)` was
@@ -683,7 +756,8 @@ inside the lock, and a zero port is not treated as an endpoint to judge.
 
 Evidence: hermetic (a held lock makes the second caller wait 0.3 s and refuse
 `profile-busy` naming `pid … (open)`; it is free again afterwards with nothing
-to clean up; an unopenable path is a warning, never a failure); battery (two
+to clean up; an unopenable path REFUSES `profile-unusable` naming the path);
+battery (two
 `open`s launched at once on one root → **one started, one adopted the same
 pid, both URLs in the tab list, exactly one live browser for that profile** —
 and the whole battery then closes what it started).
@@ -862,8 +936,10 @@ Three decisions worth recording:
 * **Fail closed.** An action with no classes is refused as unclassified, and a
   policy naming a class that does not exist is `bad-args` — a typo in a policy
   must not quietly allow what it was written to stop.
-* **`selftest` is never gated.** It is the verb that reports the policy, and a
-  gate that blocks its own explanation is a trap.
+* **`selftest` and `help` are never gated.** `selftest` is the verb that
+  reports the policy, and a gate that blocked its own explanation would be a
+  trap; `help` prints the usage and performs no action. Both are still AUDITED:
+  every invocation writes its one line, gate or no gate.
 * **The MODE decides.** `tab wait --for js` is code+write while `tab wait`
   reads, `tab dialog accept` writes while `state` reads — so the gate resolves
   the action from argv, and `tab dialog` with no mode maps to `state`
@@ -903,9 +979,9 @@ made this plumbing rather than new verbs:
 | --- | --- |
 | `tab frames [--tab SPEC]` | every frame of the page: index, url, name, box, `same_process`, `visible`, and the CDP `target` it can be driven through |
 | `--frame VALUE` (global, like `--profile`) | a URL substring or an index from `tab frames`; `dom._session` attaches to that frame's target, so `text`/`find`/`click`/`js`/… run inside it |
-| the frame census in reads | `tab text` and `tab find` carry `frames: {total, separate, same_process, visible}`, so a read that omits frame content SAYS so |
+| the frame census in reads | `tab text` and `tab find` carry `frames: {total, separate, same_process, visible, bound}`, so a read that omits frame content SAYS so — `separate` is the CENSUS fact (the page says the frame is not same-process) while `bound` counts the frames a `--frame` can actually attach to, and a frame the browser cannot attribute is `target: null, matched: false`, never a bare `""` claiming it has no target |
 | `tab click\|hover --at X,Y` | real input at a POINT, for what no selector can reach (a canvas): `verified: false`, with `under` reporting what the point actually reaches |
-| `frame-ambiguous` / `no-frame` / `frame-not-separate` | several frames match → the indices are named; none → what exists is named; a frame sharing the page's PROCESS has no target to drive, and the refusal says what to do instead (`tab js` reads it; `--at` hits it) |
+| `frame-ambiguous` / `no-frame` / `frame-not-separate` | several frames match → the indices are named; none → what exists is named; a frame sharing the page's PROCESS has no target to drive, and the refusal says what to do instead (`tab text`/`tab extract --frame N` read it; `--at` hits it) |
 
 How common frames are, measured on this machine (6 pages): 0 on static content
 (example.com, MDN, GitHub login), and — exactly where an agent has to ACT — 2 on

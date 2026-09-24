@@ -19,7 +19,8 @@ on the command line.
 | `profile logins` | what logins are in a profile — hosts, names, counts, never values |
 | `profile seed` | copy a source profile's logins into a managed one |
 | `profile reset` | wipe a managed profile, logins included |
-| `selftest` | prove the install; the one verb that is never gated |
+| `selftest` | prove the install, and report the policy in force; one of the TWO verbs the gate never consults |
+| `help` (`-h` / `--help`) | this text plus the plugin usage lines; never gated like `selftest`, and still audited |
 
 ## Page level — `tab`
 

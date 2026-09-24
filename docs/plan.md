@@ -291,7 +291,8 @@ unclear oracle into a claim of absence.**
     `flock` (and `attach`/`detach` one for the root's records) across their whole
     check-then-act, so `started: true` happens exactly once; a caller that
     cannot be served waits, then refuses `profile-busy` naming the holder, and a
-    filesystem that cannot lock is reported as a warning rather than ignored.
+    filesystem that cannot lock REFUSES (`profile-unusable`): a guard whose
+    failure mode is "proceed anyway" is no guard.
 11. **The surface can be GATED.** `--allow`/`--deny` (or
     `BROWSER_CONTROL_ALLOW`/`DENY`) refuse a verb whose capability classes fail
     the policy, `not-allowed` naming the rule; it fails closed on an

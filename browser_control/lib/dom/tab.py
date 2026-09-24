@@ -15,6 +15,13 @@ from browser_control.lib import dom as _pkg
 from browser_control.lib import (
     scope as scope_state,
 )
+from browser_control.lib.browser.machine import (
+    row_port,
+)
+from browser_control.lib.browser.owners import (
+    verify_port_owner,
+    verify_ws_owner,
+)
 from browser_control.lib.coerce import (
     as_int,
 )
@@ -53,7 +60,20 @@ def _document_ws(port: int, page_target: str) -> str:
     (`Tab.root`). Every other verb — each write, and `find`, whose hit test
     asks the page what is under a point — resolves through `_frame_target` and
     keeps refusing `frame-not-separate`.
+
+    The port's HOLDER is re-judged before anything below is built
+    (`owners.verify_port_owner`): this is the one websocket the DOM tier builds
+    outside `readback.page_ws`/`page_session`, and `tab wait` hands it straight
+    to `cdp.evaluate_until`, which EXECUTES the caller's expression on it —
+    while the frame census reached through `_frame_target` opens its own
+    connection on the same port. That call has no profile (a port and a target
+    id, nothing else), so the port is judged against the profile it last
+    verified for; a port that changed holder since is refused, exactly as
+    `page_session` refuses it. Measured before this: `tab wait --for js` ran
+    the caller's JavaScript on a stranger's websocket, with the reply saying
+    `ok` and not one owner verdict asked for (a review found it).
     """
+    verify_port_owner(as_int(port))
     current = scope_state.current()
     resolved = current.resolved_frame()
     if resolved and resolved.get("same_process"):
@@ -79,8 +99,18 @@ def page_session(row: dict, tab_row: dict, *,
     frame's own handler and the frame reports the new state.
     `page_domain=False` is the parked-dialog case: a dialog already up cannot be
     announced, and enabling the domain is what blocks on a parked tab.
+
+    The PORT is the row's own (`machine.row_port`): a browser started with an
+    explicit `--remote-debugging-port=N` writes no `DevToolsActivePort`, so
+    reading the port file would answer 0 and every DOM verb would refuse
+    `cdp-unreachable` at a browser that is right there. Its holder is re-judged
+    immediately before the connection (`verify_ws_owner`): keystrokes and
+    caller JS must not go to a process that took the port over since the row
+    was verified.
     """
-    port = cdp.port_of(str(row["profile"]))
+    profile = str(row["profile"])
+    port = row_port(row) or as_int(cdp.port_of(profile))
+    verify_ws_owner(profile, port)
     return cdp.Session(_document_ws(port, str(tab_row["id"])),
                        page_domain=page_domain)
 

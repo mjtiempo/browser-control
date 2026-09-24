@@ -20,7 +20,15 @@ The vocabulary is closed and small:
 * ``write``  — changes the page, the browser, or this CLI's own authorization
 * ``code``   — runs code the caller supplied (the declared escape hatch)
 * ``file``   — touches a path the CALLER named (a screenshot, an upload)
-* ``egress`` — would reach the network (nothing today: the plugin tier will)
+* ``egress`` — would reach the network: it hands a URL to the browser
+  (`open`, `tab`, `tab nav`) or runs caller code that can `fetch` (`tab js`,
+  `tab wait --for js`). A caller-written plugin action declares its own
+  classes, and the shipped ones that browse declare it too
+
+`egress` means what it says: `--deny egress` refuses those actions with
+`not-allowed` instead of being accepted as a no-op. What it does NOT cover is
+the loopback CDP traffic every verb sends to the browser it drives — that is
+the tool's own transport, not a reach the caller chose.
 
 `file` is about the caller's data, not about infrastructure: every verb may
 append to the action log, and `open` writes a profile, which is the tool's own
@@ -37,21 +45,24 @@ CLASSES = ("egress", "file", "code", "read", "write")
 #: a top-level verb (`open`), a tab subcommand (`tab nav`), or a subcommand
 #: whose MODE changes the answer (`tab wait --for js`).
 ACTIONS: dict[str, tuple[str, ...]] = {
-    # browser level
-    "open": ("write",),
+    # browser level. `open` hands a URL (or the default homepage) to a browser,
+    # so it holds `egress` — as do the tab verbs that navigate and the
+    # caller-code verbs, whose JavaScript can fetch anything
+    "open": ("write", "egress"),
     "close": ("write",),
     "list": ("read",),
     "info": ("read",),
     "attach": ("write",),
     "detach": ("write",),
     "selftest": ("read",),
-    # tabs
-    "tab": ("write",),
+    # tabs: `tab` opens a tab per URL (about:blank included: the verb is the
+    # URL path), and `tab nav` navigates
+    "tab": ("write", "egress"),
     "tab list": ("read",),
     "tab frames": ("read",),
     "tab info": ("read",),
     "tab close": ("write",),
-    "tab nav": ("write",),
+    "tab nav": ("write", "egress"),
     "tab back": ("write",),
     "tab forward": ("write",),
     "tab reload": ("write",),
@@ -68,7 +79,7 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "tab upload": ("write", "file"),
     "tab screenshot": ("read", "file"),
     # the parts that are not simply a write: a read is a read, caller code is
-    # code, and a mode can decide between them
+    # code (and can reach the network), and a mode can decide between them
     "tab dialog state": ("read",),
     "tab dialog accept": ("write",),
     "tab dialog dismiss": ("write",),
@@ -79,8 +90,8 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "tab text": ("read",),
     "tab extract": ("read",),
     "tab wait": ("read",),
-    "tab wait --for js": ("code", "write"),
-    "tab js": ("code", "write"),
+    "tab wait --for js": ("code", "write", "egress"),
+    "tab js": ("code", "write", "egress"),
     # profiles
     "profile info": ("read",),
     "profile logins": ("read",),

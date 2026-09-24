@@ -25,7 +25,8 @@ from browser_control.lib.dom.keys import (
     key_event,
 )
 from browser_control.lib.dom.queries import (
-    FIND_CAP,
+    FIND_MAX_MATCHES,
+    PAGE_BOUNDED_CAP,
 )
 from browser_control.lib.dom.result import (
     PageState,
@@ -86,7 +87,11 @@ def _target(needle: str, css: str, index: int | None,  # noqa: ANN202
     page = _pkg.Tab.open(tab, browser, for_write=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
-        data = _pkg._matches_in(session, needle, css, FIND_CAP)
+        # FIND_MAX_MATCHES, not the 10 `find` prints by default: `tab find
+        # --cap 50` can show index 20, and an action that scanned only 10
+        # refused it with a count the same tool had just contradicted (a review
+        # found it). The page still bounds the reply; this is its window.
+        data = _pkg._matches_in(session, needle, css, FIND_MAX_MATCHES)
         element = _pkg._pick(data, needle, css, index, row=row,
                              tab_row=tab_row)
         yield session, data, element, row, tab_row
@@ -143,6 +148,99 @@ def _at_point_click(session: cdp.Session, x: int, y: int) -> dict:
     """A move, a press and a release at a viewport point, and what is there."""
     click_point(session, x, y)
     return {"under": _pkg._under_point(session, x, y)}
+
+def _head(described: object) -> str:
+    """The identity inside ONE `describe()`-style string: its `role#id` head.
+
+    `describe()` (scripts.py) spells an element `role#id label`, and the label
+    after the first space carries a control's VALUE, its option text and its
+    state — exactly what an action is meant to change — so identity stops at
+    the first space (a `<select>`'s label IS its selected option). A probe that
+    sends a `path` (tag, id and the element's position in the tree) is stronger
+    and `_identity` prefers it.
+    """
+    return str(described or "").strip().split(" ", 1)[0]
+
+def _identity(probe: dict) -> str:
+    """The identity ONE probe reply carries for the element it re-resolved.
+
+    `path` first when the reply has one, else the describe-style field a probe
+    reports (`name`/`active`/`under`); "" when it reports none at all.
+    """
+    for key in ("path", "name", "active", "under"):
+        head = _head(probe.get(key))
+        if head:
+            return head
+    return ""
+
+def _same_control(first: dict, second: dict) -> bool:
+    """Does a later probe report the SAME element an earlier one did?
+
+    The read-back re-resolves the spec by INDEX, so a page that re-renders
+    between the action and the sample hands the verdict a different control's
+    state — a review scripted exactly that: the check probe picked `input#a`,
+    the poll's next sample answered `input#b` checked, and the reply certified
+    `verified: true` about `input#a`. False only when both reports carry an
+    identity and they DIFFER: a probe that reports none leaves nothing to
+    compare, and the verb's own state check stands as before.
+    """
+    first_id, second_id = _identity(first), _identity(second)
+    if not first_id or not second_id:
+        return True
+    return first_id == second_id
+
+def _still_the_pick(described: object, element: dict) -> bool:
+    """Do a describe-style string and a match ROW name the same element?
+
+    What the two share: the role (`role(el)`, which a row carries as `role`, or
+    as its `tag` when the page set no ARIA role) and the label (`describe()`
+    slices it to 40, a row to 120). The ID is the one identity field a row does
+    not carry, so a same-role, same-label sibling is as far as this can tell —
+    a role or label that DIFFERS is another control, and the read-back must
+    never certify one of those. A page that rewrites the field's own label under
+    the verb (an `onfocus` default) is refused too: the read-back cannot tell
+    that apart from a swap, and this verb refuses over a claim it cannot support.
+    """
+    text = str(described or "").strip()
+    if not text:
+        return True                     # nothing reported: no evidence either way
+    head, _, label = text.partition(" ")
+    role, _, _id = head.partition("#")
+    want_role = str(element.get("role") or element.get("tag") or "").lower()
+    return bool(role) and role.lower() == want_role \
+        and label == str(element.get("text") or "")[:40]
+
+def _reads_as_the_pick(described: object, element: dict) -> bool:
+    """Does a probe's describe name the element the action was AIMED at?
+
+    Strongest reading first: when the pick's own describe is known — the
+    matcher measured `hit_element` at the picked element's centre, and that
+    string's role and label are the row's own — the probe must name the same
+    `role#id`, which is what catches a page that swapped `input#a` for a
+    same-looking `input#b` at the same index. Otherwise (the point reached a
+    child, or the element was outside the viewport when it was picked) the
+    roles and labels are compared, all a row and a `describe()` share.
+    """
+    text = str(described or "").strip()
+    if not text:
+        return True                     # nothing reported: no evidence either way
+    aimed = str(element.get("hit_element") or "").strip()
+    if _head(aimed) and _still_the_pick(aimed, element):
+        return _head(text) == _head(aimed)
+    return _still_the_pick(text, element)
+
+def _changed_under(element: dict, read_back: object, aimed: object) -> str:
+    """What every element verb says when the read-back speaks of another
+    element: both sides, because "it changed" alone cannot be acted on.
+
+    The identity fields are the page's own, so they are flattened and capped
+    on the way into the refusal; each verb keeps its OWN code (the code is what
+    a caller branches on).
+    """
+    return (f"{_pkg._describe(element)} changed under the verb: the action "
+            f"aimed at {foreign(aimed, 60)!r} but the read-back reports "
+            f"{foreign(read_back, 60)!r} — a state that belongs to another "
+            "element cannot certify this one")
 
 def _click_at(row: dict, tab_row: dict, at: str) -> dict:
     """`tab click --at X,Y`: real input at a POINT, for what a selector cannot
@@ -294,6 +392,17 @@ def hover(text: str | None = None, selector: str | None = None,
              "point) — the "
              "page may re-render, or the element moved between the read and "
              "the move")
+    # the read-back re-resolves the spec by INDEX and proves `:hover` about
+    # whatever it got: without this the verdict certified a re-rendered element
+    # as the one that was picked. Both sides here are the SAME measurement
+    # (`describe()` of `document.elementFromPoint` at the aim point), taken
+    # before the move by the matcher (`hit_element`) and after it by the probe
+    # (`under`), so their `role#id` heads are compared directly
+    if _head(probe.get("under")) and _head(element.get("hit_element")) \
+            and _head(probe["under"]) != _head(element["hit_element"]):
+        fail(ERR_HOVER_NOT_VERIFIED,
+             _changed_under(element, probe.get("under"),
+                            element.get("hit_element")))
     return {"ok": True, "hovered": True, "verified": True,
             "element": _pkg._element(element), "point": [x, y],
             "under": probe.get("under"),
@@ -310,10 +419,22 @@ def _check_state(session: cdp.Session, needle: str, css: str,
     return probe if isinstance(probe, dict) else {}
 
 def _checkable(probe: dict, element: dict) -> None:
-    """Refuse what a click cannot make checked, naming what it is."""
+    """Refuse what a click cannot make checked, naming what it is.
+
+    A control that is GONE from the document is not "a thing that cannot be
+    checked": the probe answers `found: false` for it, and the refusal says so
+    in the words the sibling verbs use (a review found `select` reporting a
+    vanished element as "is a select, not a `<select>`" — the check analogue
+    lost the control's own type the same way). `not-checkable` stays for a real
+    control of the wrong kind or a disabled one.
+    """
+    if probe.get("found") is False:
+        fail(ERR_NO_MATCH,
+             f"{_pkg._describe(element)} left the document before it could be "
+             "checked")
     if not probe.get("checkable"):
-        kind = str(probe.get("tag") or element.get("tag") or "element")
-        type_ = str(probe.get("type") or "")
+        kind = foreign(probe.get("tag") or element.get("tag") or "element", 20)
+        type_ = foreign(probe.get("type"), 20)
         label = f"{kind}[{type_}]" if type_ else kind
         fail(ERR_NOT_CHECKABLE,
              f"{_pkg._describe(element)} is {label} — `tab check` drives a "
@@ -332,6 +453,13 @@ def check(text: str | None = None, selector: str | None = None,
     oracle is the control's own `checked`. Already in the wanted state means
     NO click: a click would toggle it away, so the reply is `changed: false`
     and the read-back still stands behind it.
+
+    The probe re-resolves the spec by index, so the state it reports is only
+    this control's while it still IS this control: the read-back must name the
+    element that was picked (and, after the click, the same element the
+    pre-click probe named), or the verb refuses instead of certifying another
+    control's `checked` (a review scripted `input#a` picked and `input#b`
+    answering the poll).
     """
     needle, css = _pkg._query_args(text, selector, "tab check")
     want = not uncheck
@@ -339,6 +467,10 @@ def check(text: str | None = None, selector: str | None = None,
                                                        row, tab_row):
         before = _check_state(session, needle, css, index)
         _checkable(before, element)
+        if not _reads_as_the_pick(before.get("name"), element):
+            fail(ERR_CHECK_NOT_VERIFIED,
+                 _changed_under(element, before.get("name"),
+                                element.get("hit_element")))
         if bool(before.get("checked")) == want:
             return {"ok": True, "checked": want, "changed": False,
                     "verified": True, "element": _pkg._element(element),
@@ -351,10 +483,15 @@ def check(text: str | None = None, selector: str | None = None,
         _attempts, after = poll(
             lambda: _check_state(session, needle, css, index),
             timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,
-            accept=lambda state: bool(state.get("checked")) == want)
+            accept=lambda state: _same_control(before, state)
+            and bool(state.get("checked")) == want)
+    if not _same_control(before, after):
+        fail(ERR_CHECK_NOT_VERIFIED,
+             _changed_under(element, _identity(after), _identity(before)))
     if bool(after.get("checked")) != want:
         fail(ERR_CHECK_NOT_VERIFIED,
-             f"{_pkg._describe(element)} reports checked={after.get('checked')} "
+             f"{_pkg._describe(element)} reports "
+             f"checked={foreign(after.get('checked'), 20)} "
              f"after the click at viewport {[x, y]} — the page may have "
              "re-set it, or the control is not the one that reacted")
     return {"ok": True, "checked": want, "changed": True, "verified": True,
@@ -410,7 +547,11 @@ def select(text: str | None = None, selector: str | None = None,
     `change` handler with `isTrusted: true`, exactly as a user's choice does.
     `--value` names an option by its value first, then by its exact label; the
     read-back is the control's own value and selectedIndex, so a page that
-    ignores or re-sets the choice refuses instead of claiming success.
+    ignores or re-sets the choice refuses instead of claiming success. The
+    probe re-resolves the spec by index, so the read-back must also still BE
+    the control that was picked: a `<select>` that re-rendered into another one
+    holding the wanted option is not this verb's success (the pre-key probe and
+    every poll sample must name the same `role#id`).
     """
     needle, css = _pkg._query_args(text, selector, "tab select")
     wanted = str(value or "")
@@ -421,8 +562,16 @@ def select(text: str | None = None, selector: str | None = None,
     with _target(needle, css, index, tab, browser) as (session, data, element,
                                                        row, tab_row):
         probe = _select_probe(session, needle, css, index, wanted)
+        if probe.get("found") is False:
+            # a VANISHED control is not "a thing that is not a <select>": the
+            # old message told the caller "select#s is a select, not a
+            # `<select>`" (a review found it), and the sibling verbs already
+            # say what happened in words
+            fail(ERR_NO_MATCH,
+                 f"{_pkg._describe(element)} left the document before the "
+                 "choice could be made")
         if not probe.get("is_select"):
-            kind = str(probe.get("tag") or element.get("tag") or "?")
+            kind = foreign(probe.get("tag") or element.get("tag") or "?", 20)
             fail(ERR_NOT_A_SELECT,
                  f"{_pkg._describe(element)} is a {kind}, not a <select> — this "
                  "verb picks one option, and only a <select> has options")
@@ -449,6 +598,10 @@ def select(text: str | None = None, selector: str | None = None,
                  f"{matched} options in {_pkg._describe(element)} match "
                  f"{wanted!r}: {candidates} — their VALUES are what tell them "
                  "apart")
+        if not _reads_as_the_pick(probe.get("name"), element):
+            fail(ERR_SELECT_NOT_VERIFIED,
+                 _changed_under(element, probe.get("name"),
+                                element.get("hit_element")))
         target = as_int(probe.get("target"), -1)
         selected = as_int(probe.get("selected"), -1)
         delta = target - selected
@@ -475,16 +628,20 @@ def select(text: str | None = None, selector: str | None = None,
         _attempts, after = poll(
             lambda: _select_probe(session, needle, css, index, wanted),
             timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,
-            accept=lambda got: as_int(got.get("selected"), -1) == target)
+            accept=lambda got: _same_control(probe, got)
+            and as_int(got.get("selected"), -1) == target)
+    if not _same_control(probe, after):
+        fail(ERR_SELECT_NOT_VERIFIED,
+             _changed_under(element, _identity(after), _identity(probe)))
     if as_int(after.get("selected"), -1) != target \
             or str(after.get("value")) != str(probe.get("target_value")):
         fail(ERR_SELECT_NOT_VERIFIED,
              f"{_pkg._describe(element)} reports "
-             f"value={after.get('value')!r} at index "
-             f"{after.get('selected')!r} after {abs(delta)} arrow key(s) — "
-             f"the wanted option is index {target} "
-             f"(value {probe.get('target_value')!r}); the page may ignore the "
-             "key events, or re-set the control")
+             f"value={foreign(after.get('value'), 60)!r} at index "
+             f"{foreign(after.get('selected'), 20)} after {abs(delta)} arrow "
+             f"key(s) — the wanted option is index {target} "
+             f"(value {foreign(probe.get('target_value'), 60)!r}); the page may "
+             "ignore the key events, or re-set the control")
     return {"ok": True, "selected": True, "changed": True, "verified": True,
             "trusted": True, "element": _pkg._element(element),
             "value": after.get("value"), "label": probe.get("target_label"),
@@ -505,7 +662,11 @@ def focus(text: str | None = None, selector: str | None = None,
     so it works on a background tab and while a layer surface owns the pointer;
     it does scroll the element into view, which is why an element outside the
     viewport is a perfectly good target. `DOM.focus` is the CDP method, and the
-    read-back is the page's own active element.
+    read-back is the page's own active element — which must still be the
+    element that was picked: `DOM.focus` and the probe each re-resolve the spec
+    by index, so the `active` describe is checked against the pick before it
+    certifies (a re-rendered control that grabbed the caret is not this verb's
+    focus).
     """
     needle, css = _pkg._query_args(text, selector, "tab focus")
     with _target(needle, css, index, tab, browser) as (session, data, element,
@@ -521,6 +682,11 @@ def focus(text: str | None = None, selector: str | None = None,
              f"{foreign(probe.get('active'), 60) or 'nothing'} has it instead "
              "(a disabled "
              "control, or an element that cannot be focused)")
+    if str(probe.get("tag") or "").lower() != str(element.get("tag") or "").lower() \
+            or not _reads_as_the_pick(probe.get("active"), element):
+        fail(ERR_FOCUS_NOT_VERIFIED,
+             _changed_under(element, probe.get("active"),
+                            element.get("hit_element") or _pkg._describe(element)))
     return {"ok": True, "focused": True, "element": _pkg._element(element),
             "active": probe.get("active"), "tab": f"id:{tab_row['id']}",
             "browser": browser_lib.brief(row)}
@@ -549,16 +715,24 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     page = _pkg.Tab.open(tab, browser, for_write=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
+        # `PAGE_BOUNDED_CAP`: `CANDIDATES_EXPR` bounds the reply IN THE PAGE —
+        # `__CAP__` rows, each with `describe()`/label text already sliced — so
+        # this is a page-bounded read and takes the same transport rule as
+        # `find`/`text`/`extract` (see `queries.PAGE_BOUNDED_CAP`), rather than
+        # the default 64 k cap that a page with a huge `id` would trip
         data = session.evaluate(
-            _pkg._match_args(CANDIDATES_EXPR, "", css, cap=str(FIND_CAP)))
+            _pkg._match_args(CANDIDATES_EXPR, "", css,
+                             cap=str(FIND_MAX_MATCHES)),
+            cap=PAGE_BOUNDED_CAP)
         element = _pkg._pick(data if isinstance(data, dict) else {},
-                        "", css, index, row=row, tab_row=tab_row)
+                        "", css, index, row=row, tab_row=tab_row,
+                        rendered=False)
         handle = session.handle(_pkg._match_args(ELEMENT_EXPR, "", css, index,
                                             visible=False))
         if not handle:
             fail(ERR_NO_MATCH,
-                 f"tab upload: {element.get('tag')} left the document before "
-                 "the file could be set")
+                 f"tab upload: {foreign(element.get('tag'), 20)} left the "
+                 "document before the file could be set")
         session.call("DOM.setFileInputFiles",
                      {"files": [file_path], "objectId": handle})
         got = session.evaluate(_pkg._match_args(FILES_EXPR, "", css, index,
@@ -571,8 +745,8 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     if len(files) != 1 or first.get("name") != name \
             or as_int(first.get("size"), -1) != size:
         fail(ERR_UPLOAD_NOT_VERIFIED,
-             f"tab upload: the page holds {files!r}, not one file named "
-             f"{name!r} of {size} bytes")
+             f"tab upload: the page holds {foreign(files, 120)!r}, not one "
+             f"file named {name!r} of {size} bytes")
     return {"ok": True, "file": file_path,
             "input": {"selector": css, "files": files},
             "tab": f"id:{tab_row['id']}",

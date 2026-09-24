@@ -50,7 +50,9 @@ browser-control-cli selftest --classes    # what every action may reach
 ```
 
 `selftest` reports browsers found, loaded plugins, capability classes, and the
-policy in force. It is the one verb that is never gated. If `browsers` is empty,
+policy in force. It is one of the TWO verbs the gate does not consult — `help`
+is the other, and both are still audited (`help` writes its audit line like
+every invocation). If `browsers` is empty,
 `open` will refuse `no-browser` until one is installed.
 
 ## Canonical session
@@ -234,7 +236,8 @@ browser-control-cli --allow read tab text
 - `tab extract` is `read` only — a `--deny code` session can still extract.
 - `tab screenshot` is `read`+`file`; `tab upload` and `profile seed` are
   `write`+`file`.
-- `selftest` is never gated.
+- `selftest` and `help` are the TWO verbs the gate never consults — neither
+  performs an action — and both are still audited.
 
 ## What the reply proves (quick table)
 

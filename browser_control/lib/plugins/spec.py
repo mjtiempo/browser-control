@@ -4,6 +4,16 @@ Validation reports a KIND with every error (`api`, `collision`, `import`, ...),
 so a report consumer can tell a bad API version from a verb collision without
 parsing prose. The rule that matters stays: a plugin action is refused unless it
 declares at least one capability class the gate knows.
+
+An action may also declare `"frames": True`: it acts inside the `--frame` scope
+the CLI sets for the invocation, which the CLI refuses for every verb that does
+not declare it (`cli.main._authorise`). The declaration is the plugin's own,
+like its classes — nothing here verifies that the action really reads inside a
+frame — but it IS validated like every other field: the value has to be a real
+boolean, because `bool()` read `"frames": "false"` (any truthy non-bool,
+including the string `"false"`) as an ENABLED scope, the opposite of what the
+author declared (a review found it). A declaration that is not a boolean is
+refused with `kind="schema"`, so the action never reaches the surface.
 """
 from __future__ import annotations
 
@@ -29,6 +39,9 @@ class PluginAction:
     usage: str
     plugin: str
     path: str
+    #: does this action act inside the caller's global `--frame` scope?
+    #: declared as a real boolean (`"frames": True`), never a truthy string
+    frames: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,10 +115,25 @@ def register(module: object, path: str, errors: list[PluginError],
                       "action needs at least one of "
                       + ", ".join(capabilities.CLASSES), "classes"))
             continue
+        # `frames` opts the action into the caller's `--frame` scope, so it is
+        # read as a BOOLEAN and nothing else: `bool(spec.get("frames"))` turned
+        # `"frames": "false"` — and every other truthy non-bool — into an
+        # ENABLED scope, the opposite of the author's declaration (a review
+        # found it). A declaration that is not a real boolean is a schema
+        # refusal, reported like every other malformed field, and the action is
+        # skipped BEFORE its verb name is claimed.
+        frames = spec.get("frames", False)
+        if not isinstance(frames, bool):
+            errors.append(PluginError(
+                path, f"{name}: {verb!r} declares frames {frames!r}; the key "
+                      "is a real boolean (`true`/`false`) — it opts the "
+                      "action into the caller's --frame scope", "schema"))
+            continue
         taken.add(verb)
         installed.append(PluginAction(
             verb=verb, run=spec["run"], classes=classes,
-            usage=str(spec.get("usage") or verb), plugin=name, path=path))
+            usage=str(spec.get("usage") or verb), plugin=name, path=path,
+            frames=frames))
     info = None
     if installed:
         info = PluginInfo(name=name, path=path,
