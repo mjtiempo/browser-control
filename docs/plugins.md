@@ -128,9 +128,57 @@ $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
 - The browser must be running with a drivable tab: `open --headless URL` first
   (or `attach` to your own).
 
-Both shipped site verbs declare `egress` as well as `read`/`write`: they hand
-URLs to the browser, so `--deny egress` refuses them. The class vocabulary and
-the rest of the gate are in [Trust](trust.md).
+Every shipped site verb declares `egress` as well as `read`/`write`: they
+hand URLs to the browser, so `--deny egress` refuses them. The class vocabulary
+and the rest of the gate are in [Trust](trust.md).
+
+## Shipped: `slack message` — one permalink, one call
+
+The walk this replaces is a whole session's worth of CLI processes: navigate,
+discover the desktop-app launch stub, click its link, wait for the client,
+scrape the DOM for a message by its timestamp, notice the payload was split
+across several messages, stitch them, click the reply bar, read the thread.
+
+```console
+$ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
+    slack message https://<workspace>.slack.com/archives/C…/p1790340351996489 --thread
+{"ok": true, "channel": "C…", "ts": "1790340351.996489",
+ "sender": "AWS Notifications", "posted_at": "2026-09-25T12:45:51Z",
+ "chunked": true, "parts": [{"ts": "1790340351.996489", "text": "…"}, …]}
+```
+
+- Usage: `slack message PERMALINK [--thread] [--chars N] [--timeout S]
+  [--tab SPEC]`. The permalink is the one a message's own "Copy link" gives
+  (`…/archives/<CHANNEL>/p<TS>`); the client's own
+  `/client/<TEAM>/<CHANNEL>/<ts>` address is accepted too.
+- **The launch stub is detected by the ADDRESS, not by `load`.** A workspace
+  permalink answers with "We've redirected you to the desktop app" — a document
+  that is already `complete`, so `tab wait --for load` passes on it. The plugin
+  waits for the client's address (`--for url --match …`) and clicks the stub's
+  own link only when the address never left it; `loading.stub_clicked` says
+  which path ran.
+- **`parts` is one payload, not one message.** Slack cuts a message at ~4 000
+  characters and posts the overflow as the next message (measured: four
+  messages, 3 730–3 835 characters, 20–60 ms apart), and renders the AUTHOR
+  once per group — the overflow messages have an EMPTY sender cell. The walk
+  reads Slack's own grouping, joins with NO separator (the cut lands
+  mid-token), and stops at the first different sender or a gap over a second.
+- **A permalink INTO a payload names its gap.** The client mounts nothing above
+  a deep-linked message, so such a payload's head is not on the page: the reply
+  carries `head_missing: true` (and `truncated`), with a note naming the fix —
+  open the payload's FIRST message — instead of passing the tail off as the
+  whole payload.
+- **`--thread` reads the replies beside the page's own claim.** It clicks the
+  message's reply bar (`:has()` names the bar OF that message) and reads the
+  pane; `claimed` is the bar's own number next to `count`, what the pane
+  actually rendered, so a virtualized thread cannot look complete. A message
+  that renders no bar answers `claimed: 0` with a note rather than clicking at
+  nothing.
+- `--chars` bounds each part (default 4000, max 20000 — `tab extract`'s own
+  per-field ceiling); `--timeout` (default 30 s) gates the render. Every
+  argument is validated before the first navigation.
+- The browser must be logged in to the workspace on the tab's profile — seed
+  the managed profile with `profile seed` first, or drive an attached session.
 
 ## Writing one
 

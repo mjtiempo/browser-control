@@ -205,12 +205,19 @@ a managed/attached browser. Reply: `value` (the page's OWN value — a string
 that parses as JSON is still that string), `verified: false`, `note`. Use
 `({a: 1})` for an object; `JSON.stringify(...)` only when the string is wanted.
 
-### `tab wait --for load | idle | element | js [--selector CSS] [--expr EXPR] [--timeout S] [--idle-ms MS] [--tab SPEC]`
+### `tab wait --for load | idle | element | url | js [--selector CSS] [--expr EXPR] [--match SUBSTR] [--timeout S] [--idle-ms MS] [--tab SPEC]`
 
 Poll ONE predicate to a wall-clock deadline. `--for element` requires
-`--selector`; `--for js` requires `--expr` and is class `code`. Reply: `for`,
-`waited_s`, `samples`. Deadline missed → `wait-timeout` naming what and how
-long. Default timeout 15 s; `--idle-ms` default 500.
+`--selector`; `--for url` requires `--match` and passes when the address
+CONTAINS it (a substring, never a pattern — `--match ''` is refused because
+`indexOf('')` is 0 in every page, so it would pass on the first sample);
+`--for js` requires `--expr` and is class `code`. Reply: `for`, `waited_s`,
+`samples`. Deadline missed → `wait-timeout` naming what and how long. Default
+timeout 15 s; `--idle-ms` default 500.
+
+`--for url` is how an app taking the tab over is told from a launch stub still
+showing: a stub's document is already `complete`, so `--for load` passes on it,
+while the address is the one fact a client-side redirect cannot hide.
 
 ### `tab click TEXT | --selector CSS [--index N] [--tab SPEC]` / `tab click --at X,Y [--tab SPEC]`
 

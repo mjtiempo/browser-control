@@ -246,17 +246,19 @@ def cmd_tab_text(rest: list[str], browser: str) -> dict:
                     tab=spec, browser=browser)
 
 def cmd_tab_wait(rest: list[str], browser: str) -> dict:
-    """`tab wait --for load|idle|element|js …` — poll one predicate."""
+    """`tab wait --for load|idle|element|url|js …` — poll one predicate."""
     rest, spec = _tab_flag(rest, "tab wait")
     rest, mode = _pop(rest, "--for", "tab wait")
     rest, selector = _pop(rest, "--selector", "tab wait")
     rest, expr = _pop(rest, "--expr", "tab wait")
+    rest, match = _pop(rest, "--match", "tab wait")
     rest, timeout = _pop(rest, "--timeout", "tab wait")
     rest, idle = _pop(rest, "--idle-ms", "tab wait")
     _none(rest, "tab wait")
     if mode is None:
-        fail(ERR_BAD_ARGS, "tab wait: --for is required (load|idle|element|js)")
-    return dom.wait(mode, selector=selector, expr=expr,
+        fail(ERR_BAD_ARGS,
+             "tab wait: --for is required (load|idle|element|url|js)")
+    return dom.wait(mode, selector=selector, expr=expr, match=match,
                     timeout=_float(timeout, "tab wait --timeout")
                     if timeout is not None else dom.WAIT_DEFAULT_S,
                     idle_ms=_int(idle, "tab wait --idle-ms")

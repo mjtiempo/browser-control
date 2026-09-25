@@ -80,6 +80,38 @@ The declared classes are **declarations**, not a sandbox — the same stance the
 core's own capability table takes. Install plugins the way you install the
 tool itself.
 
+## Shipped: `slack_reader.py`
+
+Read a Slack message — and its thread — from the permalink a message's own
+"Copy link" gives:
+
+```bash
+BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
+    slack message https://<workspace>.slack.com/archives/<CHANNEL>/p<TS> --thread
+```
+
+* **The launch stub is detected by the ADDRESS, not by `load`.** A workspace
+  permalink answers with a desktop-app stub whose document is already
+  `complete` (`tab wait --for load` passes on it), so the plugin waits for the
+  client's address (`--for url --match …`) and clicks the stub's own link only
+  when the address never left the stub; `loading.stub_clicked` says which path
+  ran.
+* **`parts` is one payload, not one message.** Slack cuts a message at ~4 000
+  characters and posts the overflow as the next message, and renders the
+  author ONCE per group (the overflow messages have an empty sender cell).
+  The walk reads Slack's own grouping and joins with no separator, because the
+  cut lands mid-token.
+* **`--thread` reads the replies beside the page's own claim.** `claimed` is
+  the reply bar's number; `count` is what the pane actually rendered — a
+  virtualized thread cannot look complete.
+* **A permalink INTO a payload names its gap.** The client mounts nothing above
+  a deep-linked message, so the reply says `head_missing: true` (and
+  `truncated`) instead of passing the tail off as the whole payload.
+
+`--chars` (default 4000, max 20000) bounds each part; `--timeout` (default
+30 s) gates the render. The browser must be logged in to the workspace on the
+tab's profile.
+
 ## Shipped: `x_reader.py`
 
 Read-only X search, built on `tab extract` — with `--cap` as a TARGET rather

@@ -1547,6 +1547,40 @@ Evidence: 121 hermetic checks green, pyright 0, `ruff check .` 0, live battery
 **62 passed, 0 failed, 0 skipped**, and the two real X runs above (the
 bitcoin-price search, google-chrome-stable on this host).
 
+### 5.35 A Slack permalink as one call — the stub, the chunks, and the tail
+
+Reading one error out of a Slack permalink took about thirty CLI invocations
+by hand (§5.34's research round): navigate, find the desktop-app launch stub,
+click its link, wait for the client, scrape the DOM for a message by its
+`data-ts`, notice the payload was split across four messages, stitch them,
+click the reply bar, read the thread pane. Two things came out of it:
+
+* **`tab wait --for url --match SUBSTR`.** The stub's document is COMPLETE, so
+  `--for load` passed while the address never left the stub — the session's own
+  shell loop polled `tab info` to see the address change. One more
+  `WAIT_EXPRS` entry and one flag make "the app took the tab" a verb. `--match
+  ''` is refused on purpose: `indexOf('')` is 0 in every page, so an empty
+  substring would pass on the wait's first sample.
+* **`slack message PERMALINK [--thread]`** (`plugins/slack_reader.py`) — the
+  whole walk as one action, with three measured facts baked in: the stub is
+  detected by ADDRESS and its own link clicked only when the address never left
+  it; Slack splits a payload at ~4 000 characters and renders the AUTHOR once
+  per group, so the overflow messages have an empty sender cell and "the same
+  sender" is Slack's own grouping (measured: four messages, 3 730–3 835 chars,
+  20–60 ms apart); and because the client mounts NOTHING above a deep-linked
+  message, a permalink into the middle of a payload answers `head_missing`
+  with a note naming the fix rather than passing the tail off as the whole
+  payload.
+
+Evidence: 166 hermetic checks green (the offline test drives the stub click,
+both walk directions, the virtualized window and every refusal), `pyright` 0,
+`ruff check .` 0, and live on the RavenTrack workspace with
+google-chrome-stable 153.0.8010.52: the 8:45 PM error permalink returns all
+FOUR parts joined to 15 124 characters — 3 860 more than the manual session
+managed — Liam's permalink returns the four-reply devops thread it has
+(`claimed: 4`, `count: 4`), and the third chunk's permalink returns its tail
+with `head_missing: true`.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs

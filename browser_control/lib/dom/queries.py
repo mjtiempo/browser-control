@@ -294,11 +294,14 @@ def _idle_window(value: object) -> int:
         fail(ERR_BAD_ARGS, _idle_offence(value))
     try:
         number = float(str(value).strip())
-    except (TypeError, ValueError):
+        if not math.isfinite(number) or number < 0:
+            fail(ERR_BAD_ARGS, _idle_offence(value))
+        return int(number)
+    except (TypeError, ValueError, OverflowError):
+        # `fail` is not caught here (ControlError is not one of these): the
+        # refusal above is the answer, and this arm covers only what `float`
+        # and `int` can throw on their own
         fail(ERR_BAD_ARGS, _idle_offence(value))
-    if not math.isfinite(number) or number < 0:
-        fail(ERR_BAD_ARGS, _idle_offence(value))
-    return int(number)
 
 def _idle_offence(value: object) -> str:
     """The one refusal `_idle_window` makes, naming the caller's own value."""
@@ -307,7 +310,7 @@ def _idle_offence(value: object) -> str:
 
 def wait(mode: str, selector: str | None = None, expr: str | None = None,
          timeout: float = WAIT_DEFAULT_S, idle_ms: int = IDLE_DEFAULT_MS,
-         tab: str = "", browser: str = "") -> dict:
+         tab: str = "", browser: str = "", match: str | None = None) -> dict:
     """`tab wait`: poll ONE predicate to a wall-clock deadline.
 
     One budget for the whole wait (`cdp.evaluate_until` keeps ONE connection),
@@ -318,16 +321,27 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
     name = _pkg.mode_of(mode)
     if name not in WAIT_EXPRS:
         fail(ERR_BAD_ARGS,
-             f"tab wait: --for is load|idle|element|js, got {mode!r}")
+             f"tab wait: --for is load|idle|element|url|js, got {mode!r}")
     if name == "element" and not selector:
         fail(ERR_BAD_ARGS, "tab wait: --for element needs --selector CSS")
     if name == "js" and not expr:
         fail(ERR_BAD_ARGS, "tab wait: --for js needs --expr EXPRESSION")
+    if name == "url" and match is None:
+        fail(ERR_BAD_ARGS, "tab wait: --for url needs --match SUBSTRING")
+    if name == "url" and not str(match):
+        # `indexOf('')` is 0 in EVERY page: an empty substring passes on the
+        # wait's first sample, which is the opposite of waiting for an address
+        fail(ERR_BAD_ARGS,
+             "tab wait: --for url: --match '' matches every address — "
+             "give the substring you are waiting for")
     if name != "element" and selector:
         fail(ERR_BAD_ARGS,
              f"tab wait: --selector is only for --for element (not {name})")
     if name != "js" and expr:
         fail(ERR_BAD_ARGS, f"tab wait: --expr is only for --for js (not {name})")
+    if name != "url" and match is not None:
+        fail(ERR_BAD_ARGS,
+             f"tab wait: --match is only for --for url (not {name})")
     try:
         seconds = float(timeout)
     except (TypeError, ValueError):
@@ -349,6 +363,8 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
         values["expr"] = str(expr or "false")
     if "__IDLE_MS__" in template:
         values["idle_ms"] = str(idle)
+    if "__MATCH__" in template:
+        values["match"] = json.dumps(str(match or ""))
     expression = fill(template, **values)
     # MONOTONIC, like the deadline it is measured against: a wall-clock step
     # mid-wait made `waited_s` disagree with the budget that was enforced
@@ -369,7 +385,7 @@ def wait(mode: str, selector: str | None = None, expr: str | None = None,
              "so the wait would pass before anything settled (await it in the "
              "page, or set a flag and poll that)")
     if not value:
-        what = selector or expr or ""
+        what = selector or expr or match or ""
         fail(ERR_WAIT_TIMEOUT,
              f"tab wait --for {name}"
              + (f" {what!r}" if what else "")

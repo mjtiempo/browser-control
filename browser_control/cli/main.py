@@ -153,9 +153,12 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  NAME=SELECTOR (innerText), NAME=SELECTOR@attr
                                  or NAME=@attr (the match itself); CSS only,
                                  no code, values sliced and budgeted
-  tab wait --for load|idle|element|js [--selector CSS] [--expr EXPR]
-           [--timeout S] [--idle-ms MS] [--tab SPEC]
-                                 poll a predicate to a wall-clock deadline
+  tab wait --for load|idle|element|url|js [--selector CSS] [--expr EXPR]
+           [--match SUBSTR] [--timeout S] [--idle-ms MS] [--tab SPEC]
+                                 poll a predicate to a wall-clock deadline;
+                                 `--for url` waits for --match in the address,
+                                 which is how an app taking the tab over is
+                                 told from a launch stub still showing
   tab click TEXT|--selector CSS [--index N] [--tab SPEC]
                                  real input (CDP) at the element's centre
   tab click --at X,Y [--tab SPEC]

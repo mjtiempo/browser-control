@@ -430,6 +430,7 @@ _JS_PLACEHOLDERS = {"__MODE__": '"text"', "__NEEDLE__": '"x"',
                     "__VISIBLE__": "true", "__CAP__": "1",
                     "__VALUE__": '"v"', "__X__": "1", "__Y__": "1",
                     "__EXPR__": "true", "__IDLE_MS__": "100",
+                    "__MATCH__": '"app.slack.com"',
                     "__SCHEMA__": '{"each":"a"}',
                     # the root a read is rooted at: the page, or (from a verb
                     # that takes one) a same-process FRAME's document
@@ -1130,10 +1131,10 @@ def t_cli_dom_grammar() -> None:
 
     def fake_wait(mode: str, selector: str | None = None,
                   expr: str | None = None, timeout: float = 15.0,
-                  idle_ms: int = 500, tab: str = "",
-                  browser: str = "") -> dict:
+                  idle_ms: int = 500, tab: str = "", browser: str = "",
+                  match: str | None = None) -> dict:
         calls.append(("wait", mode, selector, expr, timeout, idle_ms, tab,
-                      browser))
+                      browser, match))
         return {"ok": True}
 
     originals = (dom.js, dom.find, dom.text, dom.wait)
@@ -1149,7 +1150,10 @@ def t_cli_dom_grammar() -> None:
                      ["tab", "wait", "--for", "element", "--selector", ".x",
                       "--timeout", "5"],
                      ["tab", "wait", "--for", "js", "--expr", "true",
-                      "--idle-ms", "100", "--tab", "id:ABC"]):
+                      "--idle-ms", "100", "--tab", "id:ABC"],
+                     ["tab", "wait", "--for", "url",
+                      "--match", "app.slack.com/client/",
+                      "--timeout", "20"]):
             rc, _out, err = run_cli(argv)
             assert rc == 0, (argv, rc, err)
         assert calls == [
@@ -1160,9 +1164,11 @@ def t_cli_dom_grammar() -> None:
             ("text", None, dom.TEXT_CAP, "", ""),
             ("text", "#main", 50, "", ""),
             ("wait", "element", ".x", None, 5.0, dom.IDLE_DEFAULT_MS, "",
-             ""),
+             "", None),
             ("wait", "js", None, "true", dom.WAIT_DEFAULT_S, 100,
-             "id:ABC", ""),
+             "id:ABC", "", None),
+            ("wait", "url", None, None, 20.0, dom.IDLE_DEFAULT_MS, "", "",
+             "app.slack.com/client/"),
         ], calls
     finally:
         dom.js, dom.find, dom.text, dom.wait = originals  # type: ignore[assignment]
@@ -1176,7 +1182,10 @@ def t_cli_dom_grammar() -> None:
                  ["tab", "wait", "--for", "nope"],
                  ["tab", "wait", "--for", "element"],
                  ["tab", "wait", "--for", "js"],
+                 ["tab", "wait", "--for", "url"],
+                 ["tab", "wait", "--for", "url", "--match", ""],
                  ["tab", "wait", "--for", "load", "--selector", ".x"],
+                 ["tab", "wait", "--for", "load", "--match", ".x"],
                  ["tab", "wait", "--for", "load", "--timeout", "0"]):
         rc, _out, err = run_cli(argv)
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
@@ -3110,6 +3119,216 @@ def t_page_plugin_offline() -> None:
         for name, value in real.items():
             setattr(plugin_api, name, value)
         dom.frame = real_dom_frame                   # type: ignore[assignment]
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_slack_plugin_offline() -> None:
+    """`slack message`: the launch stub, the overflow walk, and the thread.
+
+    Measured on the real client and pinned here: a workspace permalink answers
+    with a desktop-app stub whose own link opens the client (the ADDRESS is the
+    oracle — `--for load` passes on the stub's complete document), one payload
+    arrives as several messages that close together, and the reply bar's own
+    count is kept beside what the pane rendered so a virtualized thread cannot
+    look complete.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    ts, chunk2, chunk3 = ("1790340351.996489", "1790340352.017179",
+                          "1790340352.036479")
+    chunk4 = "1790340352.054869"
+    later = "1790340801.628679"          # a different sender, minutes on
+    other = "1790342993.293459"          # the same sender, 44 minutes on
+    navs: list[str] = []
+    clicks: list[str] = []
+    scrolls: list[str] = []
+    waits: list[tuple] = []
+    state = {"bar": "4 replies", "window": "full"}
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        navs.append(url)
+        return {"ok": True, "moved": True}
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 15.0,
+                  idle_ms: int = 500, tab: str = "", browser: str = "",
+                  match: str | None = None) -> dict:
+        waits.append((mode, selector, match))
+        if mode == "url":
+            # the measured stub: the address never left the permalink, so the
+            # plugin must fall back to the stub's own link
+            raise ControlError("wait-timeout", "still on the permalink")
+        return {"ok": True}
+
+    def fake_click(text: str | None = None, selector: str | None = None,
+                   index: int | None = None, tab: str = "", browser: str = "",
+                   at: str | None = None) -> dict:
+        clicks.append(str(selector or text))
+        return {"ok": True, "clicked": True}
+
+    def fake_scroll(by: int | None = None, edge: str | None = None,
+                    text: str | None = None, selector: str | None = None,
+                    index: int | None = None, at: str | None = None,
+                    tab: str = "", browser: str = "") -> dict:
+        scrolls.append(str(selector or text))
+        return {"ok": True}
+
+    def fake_extract(each: str = "", fields: list[str] | None = None,
+                     cap: int = 10, chars: int = 1000,
+                     visible: bool = False, unique: str = "",
+                     tab: str = "", browser: str = "") -> dict:
+        # every rendered container, in Slack's grouping shape: the overflow
+        # messages have an EMPTY sender cell (the author is rendered once per
+        # group) — the walk must read that as "the same sender"
+        rows = {
+            ts: {"ts": ts, "sender": "AWS Notifications",
+                 "claimed": state["bar"],
+                 "text": "Error detected ... (SUM(poker_"},
+            chunk2: {"ts": chunk2, "sender": "", "claimed": "",
+                     "text": "bonus) + SUM(bingo_bonus)"},
+            chunk3: {"ts": chunk3, "sender": "", "claimed": "",
+                     "text": "wagered) from player_reports"},
+            chunk4: {"ts": chunk4, "sender": "", "claimed": "",
+                     "text": ", and its tail"},
+            later: {"ts": later, "sender": "Liam", "claimed": "4 replies",
+                    "text": "^^ @devops"},
+            other: {"ts": other, "sender": "AWS Notifications",
+                    "claimed": "", "text": "Error detected on a later topic"},
+            "1790342044.879719": {"ts": "1790342044.879719",
+                                  "sender": "Scott", "text": "Checking"},
+            "1790343068.484759": {"ts": "1790343068.484759",
+                                  "sender": "Paul",
+                                  "text": "Its been seen"},
+        }
+        # a row carries ONLY the fields the caller asked for: this is what
+        # catches a plugin that forgets to request the message body
+        names = [str(spec).partition("=")[0] for spec in (fields or [])]
+
+        def keep(chosen: list[str]) -> dict:
+            return {"ok": True, "truncated": False,
+                    "matches": [{key: rows[name][key] for key in rows[name]
+                                 if key in names} for name in chosen]}
+
+        if each.startswith('[data-qa="threads_flexpane"]'):
+            return keep([ts, "1790342044.879719", "1790343068.484759"])
+        if each == '[data-qa="message_container"]':
+            chosen = list(rows)
+            if state["window"] == "from-chunk3":
+                # the measured mount: a deep link renders the target onward,
+                # NOTHING above it — so the payload's header is not in the
+                # window at all
+                chosen = [name for name in chosen
+                          if float(name) >= float(chunk3)]
+            return keep(chosen)
+        # every other form names the messages it wants by ts: the target's own
+        # selector, and the one comma-joined list of overflow messages
+        return keep(re.findall(r'data-ts="([^"]+)"', each))
+
+    real = {name: getattr(plugin_api, name)
+            for name in ("nav", "wait", "click", "scroll", "extract")}
+    plugin_api.nav = fake_nav                        # type: ignore[assignment]
+    plugin_api.wait = fake_wait                      # type: ignore[assignment]
+    plugin_api.click = fake_click                    # type: ignore[assignment]
+    plugin_api.scroll = fake_scroll                  # type: ignore[assignment]
+    plugin_api.extract = fake_extract                # type: ignore[assignment]
+    try:
+        link = ("https://raventrack.slack.com/archives/C02Q99A8VGS/"
+                f"p{ts.replace('.', '')}")
+        rc, out, err = run_cli(["slack", "message", link, "--thread"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert navs == [link], navs
+        # the stub was clicked (the URL never left the permalink), then the
+        # reply bar — whose selector names the bar OF THAT message
+        assert clicks == ['a[href*="/messages/"]',
+                          '[data-qa="message_container"]'
+                          f':has([data-ts="{ts}"]) '
+                          '[data-qa="reply_bar_count"]'], clicks
+        assert scrolls == clicks[1:], scrolls
+        assert data["channel"] == "C02Q99A8VGS", data
+        assert data["ts"] == ts and data["sender"] == "AWS Notifications"
+        assert data["posted_at"] == "2026-09-25T12:45:51Z", data
+        # one payload, three messages: the walk stopped at the sender change
+        # and never reached the same sender's 44-minutes-later message
+        assert data["chunked"] is True, data
+        assert [part["ts"] for part in data["parts"]] == [ts, chunk2, chunk3,
+                                                          chunk4]
+        assert data["text"] == ("Error detected ... (SUM(poker_"
+                                 "bonus) + SUM(bingo_bonus)"
+                                 "wagered) from player_reports"
+                                 ", and its tail"), data
+        assert data["loading"] == {"stub_clicked": True}, data
+        # the pane mounts the parent too — it is not a reply — and the bar's
+        # own count says the read is short of the claim
+        assert data["thread"]["claimed"] == 4, data["thread"]
+        assert data["thread"]["count"] == 2, data["thread"]
+        assert data["thread"]["truncated"] is True, data["thread"]
+        assert data["thread"]["replies"][0]["sender"] == "Scott"
+        # a message with no reply bar is answered, not clicked at
+        clicks.clear()
+        state["bar"] = ""
+        rc, out, _err = run_cli(["slack", "message", link, "--thread"])
+        assert rc == 0, rc
+        bare = json.loads(out)
+        assert clicks == ['a[href*="/messages/"]'], clicks
+        assert bare["thread"]["claimed"] == 0 and bare["thread"]["count"] == 0
+        # the client's own address form parses to the same message
+        state["bar"] = "4 replies"
+        client = ("https://app.slack.com/client/T01L482HGTY/C02Q99A8VGS/" + ts)
+        rc, out, _err = run_cli(["slack", "message", client, "--timeout", "9"])
+        assert rc == 0 and json.loads(out)["ts"] == ts, (rc, out)
+        # a permalink INTO the middle of a payload walks back to its start:
+        # the overflow message's own sender cell is empty, and the group's
+        # name is on the header above it
+        mid = ("https://raventrack.slack.com/archives/C02Q99A8VGS/"
+               f"p{chunk3.replace('.', '')}")
+        rc, out, err = run_cli(["slack", "message", mid])
+        assert rc == 0, (rc, err)
+        payload = json.loads(out)
+        assert payload["sender"] == "AWS Notifications", payload
+        assert payload["head_missing"] is False, payload
+        assert [part["ts"] for part in payload["parts"]] == [ts, chunk2,
+                                                              chunk3,
+                                                              chunk4], payload
+        assert payload["text"] == data["text"], payload
+        # ...and when the client rendered NOTHING above the target (measured),
+        # the tail is NAMED as a tail instead of passed off as the payload
+        state["window"] = "from-chunk3"
+        rc, out, err = run_cli(["slack", "message", mid])
+        assert rc == 0, (rc, err)
+        tail = json.loads(out)
+        assert tail["sender"] == "", tail
+        assert tail["head_missing"] is True, tail
+        assert tail["truncated"] is True, tail
+        assert [part["ts"] for part in tail["parts"]] == [chunk3,
+                                                          chunk4], tail
+        assert "STARTED ABOVE" in tail["note"], tail
+        state["window"] = "full"
+        # every refusal lands in argv, before the first navigation
+        for argv, phrase in (
+                (["slack"], "slack: the subcommand is required"),
+                (["slack", "message"], "TEXT is required"),
+                (["slack", "message", "https://example.com/x"],
+                 "is not a Slack message address"),
+                (["slack", "message", link, "--chars", "0"],
+                 "--chars must be at least 1"),
+                (["slack", "message", link, "--timeout", "0"],
+                 "--timeout must be between"),
+                (["slack", "message", link, link],
+                 "one TEXT at most")):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
+        assert navs == [link, link, client, mid, mid], navs
+    finally:
+        for name, value in real.items():
+            setattr(plugin_api, name, value)
         if keep is None:
             os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
         else:
@@ -5507,7 +5726,7 @@ def t_plugin_seam_hands_out_the_core_readers() -> None:
     assert plugin_api.float_arg is argv_lib._float
     assert plugin_api.text_arg is argv_lib._text_arg
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for plugin in ("google_search.py", "x_reader.py"):
+    for plugin in ("google_search.py", "x_reader.py", "slack_reader.py"):
         source = Path(repo, "plugins", plugin).read_text(encoding="utf-8")
         assert "def _number" not in source, plugin
     # the refusals are the core's, and they land in argv before any browser:
@@ -8435,6 +8654,7 @@ def main() -> int:
         ("google plugin types, never builds a query URL",
          t_google_plugin_offline),
         ("page plugin reads a list in one call", t_page_plugin_offline),
+        ("slack plugin reads a permalink offline", t_slack_plugin_offline),
         ("the plugin seam hands out the core readers",
          t_plugin_seam_hands_out_the_core_readers),
         ("type delay is validated before any browser",

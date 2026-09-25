@@ -1763,7 +1763,11 @@ def c_frames() -> str:
     assert "TOP_MARKER" in top["text"], top
     assert "INNER_MARKER" not in top["text"], top
     assert top["frames"] == {"total": 3, "separate": 2, "same_process": 1,
-                             "cross_origin": 2, "visible": 3}, top["frames"]
+                             "cross_origin": 2, "visible": 3,
+                             # `bound` rides the census so the note cannot
+                             # promise `--frame` for a frame it refuses; both
+                             # separate frames here bind, so it is 2
+                             "bound": 2}, top["frames"]
     # `--frame` by index and by URL, with the verbs working inside it
     inner = ok_json("tab", "text", "--frame", "1", "--chars", "120",
                     "--tab", tid)

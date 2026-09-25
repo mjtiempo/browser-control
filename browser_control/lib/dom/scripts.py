@@ -510,6 +510,13 @@ WAIT_EXPRS = {
   const selector = __SELECTOR__;
   return query(selector).some((el) => rendered(el) !== null);
 })()"""),
+    #: `--match` is a SUBSTRING of the address, not a pattern: the wait is a
+    #: boolean the page answers, and `location.href` is the one fact a
+    #: client-side navigation cannot hide. A URL wait is what tells "the app
+    #: took the tab over" from "the launch stub is still showing" — measured
+    #: on a Slack permalink, where the stub answers `readyState complete` and
+    #: `--for load` therefore passed while the address never left the stub.
+    "url": "Boolean(String(location.href).indexOf(__MATCH__) >= 0)",
     "js": ("(() => { const v = (__EXPR__); if (v && "
            "(typeof v === 'object' || typeof v === 'function') && "
            "typeof v.then === 'function') return 'thenable'; "
