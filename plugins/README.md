@@ -112,6 +112,14 @@ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
 30 s) gates the render. The browser must be logged in to the workspace on the
 tab's profile.
 
+The same file also ships **`slack channel PERMALINK [--cap N] [--chars N]
+[--max-scrolls N]`**, which reads a channel's recent messages: it extracts the
+mounted window, wheels up, and merges by timestamp, because the client
+unmounts what scrolls out (`--cap` is a target, and `loading.stop` says why the
+walk ended). Slack renders the author once per group, so a name-less message
+carries the one above it — a leading empty sender means the group's header is
+above the loaded window.
+
 ## Shipped: `x_reader.py`
 
 Read-only X search, built on `tab extract` — with `--cap` as a TARGET rather

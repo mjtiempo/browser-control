@@ -16,6 +16,9 @@ from browser_control.lib import (
 from browser_control.lib import (
     cdp,
 )
+from browser_control.lib import (
+    sink,
+)
 from browser_control.lib import dom as _pkg
 from browser_control.lib.browser.machine import (
     row_port,
@@ -44,6 +47,7 @@ from browser_control.lib.errors import (
     ERR_CDP_ERROR,
     ERR_NO_MATCH,
     ERR_WAIT_TIMEOUT,
+    ERR_WRITE_FAILED,
     fail,
 )
 from browser_control.lib.text import (
@@ -241,7 +245,8 @@ def _node_of(session: cdp.Session, expression: str) -> int:
     node = session.call("DOM.requestNode", {"objectId": handle})
     return as_int(node.get("nodeId"))
 
-def js(expression: str, tab: str = "", browser: str = "") -> dict:
+def js(expression: str, tab: str = "", browser: str = "", out: str = "",
+       force: bool = False) -> dict:
     """`tab js`: the page's own answer — capped, and NOT verified.
 
     This is the escape hatch, and it can WRITE (it is resolved like one, so it
@@ -263,17 +268,49 @@ def js(expression: str, tab: str = "", browser: str = "") -> dict:
     `value_type: "undefined"` — every other value keeps today's exact shape
     (`{"value": value}`), and `null` stays `{"value": null}` (a review found
     the two indistinguishable).
+
+    `--out FILE` is the SINK the reply cap never had: the value is written to
+    the file as JSON and the reply carries `path`/`bytes` instead of the value,
+    so a read the cap would have refused (`result-too-large` — this verb
+    refuses rather than truncating, by decision) has somewhere to land. The
+    transfer cap is lifted for that call and ONLY for that call: the 16 MiB
+    frame limit still applies, and without `--out` nothing changes. `bytes` is
+    the file's own size, compared against the payload — a short write refuses
+    instead of answering a path that does not hold the value.
     """
     expr = str(expression or "").strip()
     if not expr:
         fail(ERR_BAD_ARGS, "tab js: an EXPRESSION is required")
+    target = sink.output_path("tab js", out) if out else ""
     page = _pkg.Tab.open(tab, browser, for_write=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
-        value = session.evaluate(expr, raw=True)
-    reply = {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
-             "verified": False, "note": "evaluated, not interpreted",
-             "browser": browser_lib.brief(row)}
+        # the cap is lifted for the SINK call and only there: without `--out`
+        # the reply still carries the value, and the transport's size refusal
+        # is what stops a page flooding it (`result-too-large`, never a
+        # truncation — the decision this verb already made)
+        value = session.evaluate(expr, raw=True, cap=None) if target \
+            else session.evaluate(expr, raw=True)
+    if target:
+        # the page's `undefined` is not a JSON value; the file says `null` and
+        # the reply still names what the page answered, exactly as the reply-
+        # shaped path does
+        payload = (json.dumps(None if value is UNDEFINED else value,
+                              ensure_ascii=False) + "\n").encode("utf-8")
+        written = sink.write_atomic("tab js", target, payload, force)
+        if written != len(payload):
+            fail(ERR_WRITE_FAILED,
+                 f"tab js: {target} holds {written} bytes, not the "
+                 f"{len(payload)} written — the value is not in that file")
+        reply = {"ok": True, "tab": f"id:{tab_row['id']}", "path": target,
+                 "bytes": written, "value_omitted": True,
+                 "verified": True, "note": "evaluated, written to PATH as "
+                 "JSON (the value is in the file, not the reply)",
+                 "browser": browser_lib.brief(row)}
+    else:
+        reply = {"ok": True, "tab": f"id:{tab_row['id']}", "value": value,
+                 "verified": False, "note": "evaluated, not interpreted",
+                 "browser": browser_lib.brief(row)}
     if value is UNDEFINED:
         reply["value"] = None
         reply["value_type"] = "undefined"

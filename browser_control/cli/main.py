@@ -12,6 +12,7 @@ import contextlib
 import difflib
 import json
 import os
+import re
 import sys
 
 from browser_control.cli import registry
@@ -139,7 +140,10 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   tab screenshot PATH|--path PATH [--full] [--force] [--tab SPEC]
                                  write a PNG of the page; its own header
                                  vouches for the size, not the page's geometry
-  tab js EXPR [--tab SPEC]       evaluate an expression (can write; unverified)
+  tab js EXPR [--out FILE] [--force] [--tab SPEC]
+                                 evaluate an expression (can write; unverified);
+                                 --out writes the value to FILE as JSON — the
+                                 sink for a value the reply cap would refuse
                                  — the page's OWN value: a string that parses
                                  as JSON is still that string
   tab find TEXT|--selector CSS [--cap N] [--tab SPEC]
@@ -227,6 +231,55 @@ reads: every drivable browser.  writes: a managed browser, or an attached one
        — `attach` grants TAB writes only, `close` never stops one; `tab js`
        and `tab wait --for js` count as writes (they run caller code)
 out:   one JSON object on stdout; ERR[code]: message on stderr, exit 2"""
+
+#: A refusal that names a flag the verb does not take gets the verb's OWN usage
+#: line appended: the message already says WHAT was misread, and the usage says
+#: what the call may look like — the two halves a caller needs to fix it. The
+#: line is derived from the ONE help text (and each plugin's own `usage`), so
+#: there is no second table to drift out of date; a message this cannot place
+#: gets a pointer to `--help` instead of a guess.
+_UNKNOWN_FLAG = re.compile(r"unknown (?:flag|option)\b")
+
+
+def _usage_head(line: str) -> str:
+    """The flags half of one usage line, or "" for a description line.
+
+    The help text puts a call's shape on the left and its explanation on the
+    right, separated by a run of spaces; the continuation lines are
+    explanation-only, so they cannot match a verb phrase. A plugin's `usage`
+    splits the same way on an em dash.
+    """
+    text = str(line).strip().split(" — ", 1)[0].strip()
+    if not text or text.startswith("usage:"):
+        return ""
+    return re.split(r"\s{3,}", text, maxsplit=1)[0].strip()
+
+
+def _usage_lines() -> list[str]:
+    """Every verb's usage, from the help text and the installed plugins."""
+    lines = [_usage_head(raw) for raw in USAGE.splitlines()]
+    lines += [_usage_head(usage) for usage in registry.PLUGINS.usages()]
+    return [line for line in lines if line]
+
+
+def _hinted(message: str, code: str) -> str:
+    """`message`, plus the verb's usage when a flag was misread.
+
+    Only a `bad-args` refusal that names an unknown flag or option gets this:
+    the refusal is about argv, and the usage line is exactly what is missing.
+    Any other refusal is about the page, the policy or the browser, where a
+    usage line would be noise — and a message that already carries one is left
+    alone.
+    """
+    text = str(message or "")
+    if code != ERR_BAD_ARGS or "usage:" in text \
+            or not _UNKNOWN_FLAG.search(text):
+        return text
+    phrase = text.split(":", 1)[0].strip().split()
+    for usage in _usage_lines():
+        if usage.split()[:len(phrase)] == phrase:
+            return f"{text} — usage: {usage}"
+    return f"{text} — usage: browser-control-cli --help lists every verb"
 def cmd_tab(rest: list[str], browser: str) -> dict:
     """`tab [URL...]` opens tabs; `tab list|info|close` are subcommands.
 
@@ -547,7 +600,7 @@ def _run_invocation(args: list[str]) -> int:
         return 0
     except ControlError as e:
         code = e.code
-        print(f"ERR[{e.code}]: {e.message}", file=sys.stderr)
+        print(f"ERR[{e.code}]: {_hinted(e.message, e.code)}", file=sys.stderr)
         return 2
     except BrokenPipeError:
         # a closed reader (`| head`) is not a crash: the verb already did its

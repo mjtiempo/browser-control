@@ -180,6 +180,42 @@ $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
 - The browser must be logged in to the workspace on the tab's profile — seed
   the managed profile with `profile seed` first, or drive an attached session.
 
+## Shipped: `slack channel` — a channel's recent messages
+
+The timeline recycles its rows: the client mounts a window and unmounts what
+scrolls out, so one extraction can never answer a `--cap` request. The verb
+extracts, wheels UP (older messages are above), extracts again and merges by
+timestamp — the same loading loop the X adapter uses, and the reason `--cap` is
+a TARGET rather than a slice of the first render:
+
+```console
+$ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
+    slack channel https://<workspace>.slack.com/archives/C… --cap 20
+{"ok": true, "channel": "C…", "count": 20, "truncated": true,
+ "loading": {"reads": 2, "scrolls": 1, "stop": "cap", …},
+ "messages": [{"ts": "1790340351.996489", "posted_at": "2026-09-25T12:45:51Z",
+               "sender": "AWS Notifications", "text": "…"}, …]}
+```
+
+- Usage: `slack channel PERMALINK [--cap N] [--chars N] [--max-scrolls N]
+  [--timeout S] [--tab SPEC]`. `--cap` default 20 (max 50); `--chars` default
+  500 per message (max 4000 — the page-side budget is `cap × chars`, so an
+  over-budget read says `truncated` instead of quietly shortening);
+  `--max-scrolls` default 5 (0 reads the first window only).
+- The reply holds the NEWEST `messages`, oldest first, and `loading.stop` names
+  why the walk ended: `cap` (enough read — more may exist), `exhausted` (the
+  client stopped yielding), `max-scrolls` (the budget), `no-messages` (a wall or
+  an empty channel), `scroll-failed`. `truncated` is true whenever the walk
+  stopped short or a read was cut.
+- **Slack renders the author once per message group**, so every message after
+  the group's first has an empty sender cell. The reply carries the group's
+  name down the list; a LEADING empty sender means that group's header sits
+  above what the walk loaded, not that the message has no author.
+- `--cap` is a target: a round can mount several messages at once and
+  overshoot, in which case the newest `--cap` are kept and `truncated` is set.
+- Same session requirement as `slack message`: the tab's profile must be
+  logged in to the workspace.
+
 ## Writing one
 
 The contract, the supported `browser_control.plugin_api` surface, and the

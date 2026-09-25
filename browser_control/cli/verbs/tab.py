@@ -198,8 +198,10 @@ def cmd_tab_extract(rest: list[str], browser: str) -> dict:
         visible=visible, unique=unique or "", tab=spec, browser=browser)
 
 def cmd_tab_js(rest: list[str], browser: str) -> dict:
-    """`tab js EXPR [--tab SPEC]` — the escape hatch, declared unverified."""
+    """`tab js EXPR [--out FILE] [--force] [--tab SPEC]` — the escape hatch."""
     rest, spec = _tab_flag(rest, "tab js")
+    rest, out = _pop(rest, "--out", "tab js")
+    rest, force = _switch(rest, "--force")
     rest = _no_flags(rest, "tab js")
     if not rest:
         fail(ERR_BAD_ARGS, "tab js: an EXPRESSION is required")
@@ -207,7 +209,14 @@ def cmd_tab_js(rest: list[str], browser: str) -> dict:
         fail(ERR_BAD_ARGS,
              f"tab js: one expression at most, got {len(rest)} — the tab is "
              "--tab SPEC")
-    return dom.js(rest[0], tab=spec, browser=browser)
+    if force and out is None:
+        # a flag nobody reads is the shape the rest of this tool refuses
+        # instead of ignoring: `--force` exists to overwrite a FILE
+        fail(ERR_BAD_ARGS,
+             "tab js: --force goes with --out FILE — by itself there is "
+             "nothing to overwrite")
+    return dom.js(rest[0], tab=spec, browser=browser, out=out or "",
+                  force=bool(force))
 
 def cmd_tab_frames(rest: list[str], browser: str) -> dict:
     """`tab frames [--tab SPEC]` — this page's iframes, and which are drivable.

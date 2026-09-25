@@ -261,7 +261,8 @@ def _value_of(result: dict, raw: bool = False,
     if cap is not None and size > cap:
         fail(ERR_RESULT_TOO_LARGE,
              f"Runtime.evaluate answered {size} chars (cap {cap}) "
-             "— narrow the expression, or read the page with `tab text`")
+             "— narrow the expression, send it to a file with "
+             "`tab js EXPR --out FILE`, or read the page with `tab text`")
     if isinstance(value, str) and not raw:
         try:
             return json.loads(value)      # a page that answered JSON

@@ -135,6 +135,23 @@ def resolved_mode(verb: str, rest: list[str], *,
     return mode
 
 
+def _js_writes_a_file(rest: list[str], *,
+                      pop: Callable[[list[str], str, str], tuple[list[str], Any]],
+                      ) -> bool:
+    """Does this `tab js` call write a file?
+
+    `--out FILE` is the one `tab js` flag that changes what the call can DO —
+    it writes a file the caller names — and the gate authorises a call by its
+    action, from the argv alone, before the handler runs. `--tab` is popped
+    FIRST, exactly as `cmd_tab_js` pops it, so a `--tab` value that is
+    literally `--out` is not read as the flag.
+    """
+    args = list(rest[1:])
+    args, _spec = pop(args, "--tab", "tab js")
+    _kept, out = pop(args, "--out", "tab js")
+    return out is not None
+
+
 def action_of(verb: str, rest: list[str], *,
               tab_subcommands: dict[str, Handler],
               profile_subcommands: dict[str, Handler],
@@ -164,6 +181,11 @@ def action_of(verb: str, rest: list[str], *,
         if head == "wait":
             mode = resolved_mode(verb, rest, pop=pop)
             return "tab wait --for js" if mode == "js" else "tab wait"
+        if head == "js":
+            # the file class must be reachable from the argv ALONE: the gate
+            # runs before the handler, so `--out` is read here the same way
+            return "tab js --out" if _js_writes_a_file(rest, pop=pop) \
+                else "tab js"
         if head in ("dialog", "media"):
             return f"tab {head} {resolved_mode(verb, rest, pop=pop) or 'state'}"
         return f"tab {head}"

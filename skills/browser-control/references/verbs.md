@@ -198,12 +198,20 @@ per item). Defaults: cap 10 (max 500), 1000 chars/field (max 20000), whole
 reply budget 20000 chars, all sliced in-page. `--visible` skips unrendered
 matches; `--unique FIELD` keeps the first of duplicates.
 
-### `tab js EXPR [--tab SPEC]`
+### `tab js EXPR [--out FILE] [--force] [--tab SPEC]`
 
 Run one expression in the page. Capability class `code`; can WRITE, so it needs
 a managed/attached browser. Reply: `value` (the page's OWN value — a string
 that parses as JSON is still that string), `verified: false`, `note`. Use
 `({a: 1})` for an object; `JSON.stringify(...)` only when the string is wanted.
+A value past the reply cap (64 k) refuses `result-too-large` — never a
+truncation — and `--out FILE` is its sink: the value is written to the file as
+JSON and the reply carries `path`/`bytes`/`value_omitted` instead of `value`,
+with the post-transfer cap lifted for that call alone. The file rules are the
+ones `tab screenshot` follows (absolute path, no clobber without `--force`,
+0600); `--force` without `--out` is refused, and the action's classes are
+`code`+`write`+`egress`+`file`, so `--deny file` stops the `--out` form while
+plain `tab js` still runs.
 
 ### `tab wait --for load | idle | element | url | js [--selector CSS] [--expr EXPR] [--match SUBSTR] [--timeout S] [--idle-ms MS] [--tab SPEC]`
 
@@ -223,9 +231,13 @@ while the address is the one fact a client-side redirect cannot hide.
 
 Real input (CDP) at the element's centre. Reply: `clicked`, `changed`, `under`,
 `element`, `point`, `before`/`after` (url/title/scroll), `note`. A covered
-centre refuses `occluded` naming what it hit. `--at X,Y` is a POINT (mutually
-exclusive with TEXT/`--selector`/`--index`) for what a selector cannot name; it
-reports `verified: false` with what the point reaches.
+centre refuses `occluded` naming what it hit. An element OUTSIDE the viewport
+refuses `no-viewport-target` with the remedy in the message (`tab scroll`
+reveals it) — the click does not scroll the page itself, so a refused click
+costs the page nothing and never moves what the caller was looking at. `--at
+X,Y` is a POINT (mutually exclusive with TEXT/`--selector`/`--index`) for what
+a selector cannot name; it reports `verified: false` with what the point
+reaches.
 
 ### `tab hover TEXT | --selector CSS [--index N] [--at X,Y] [--tab SPEC]`
 

@@ -1581,6 +1581,54 @@ managed — Liam's permalink returns the four-reply devops thread it has
 (`claimed: 4`, `count: 4`), and the third chunk's permalink returns its tail
 with `head_missing: true`.
 
+### 5.36 The remaining four: a channel read, a file sink, a usage hint, and a policy re-checked
+
+The items left open after §5.35, each closed with its own measurement:
+
+* **`slack channel PERMALINK [--cap N] [--chars N] [--max-scrolls N]`** — the
+  second read in `slack_reader.py`. The timeline recycles rows, so one
+  extraction can never answer a `--cap` request: the verb extracts, wheels UP,
+  extracts again and merges by ts (the X adapter's loop), carries the group's
+  author down past the empty sender cells Slack renders for the overflow, and
+  names why the walk stopped (`cap`, `exhausted`, `max-scrolls`, `no-messages`,
+  `scroll-failed`). Measured live: `--cap 8` answered 8 from the first mount;
+  `--cap 20 --max-scrolls 3` took 2 reads and one wheel and answered 20
+  spanning the 8:45 PM error through the 10:43 PM one.
+* **`tab js --out FILE [--force]`** — `tab js` refuses past the 64 k reply cap
+  without truncating (a decision), which left a bigger value no way out at all.
+  `--out` is the sink: the value is written as JSON and the reply carries
+  `path`/`bytes`/`value_omitted`, with the post-transfer cap lifted for that
+  call only (the 16 MiB frame limit still applies). The file rules are
+  `tab screenshot`'s, extracted to `lib/sink.py` so both writers share them
+  (absolute path, no clobber without `--force`, 0600, exclusive/atomic), and
+  the action is its own gate entry (`code`+`write`+`egress`+`file`) resolved
+  from the argv alone, so `--deny file` stops the `--out` form while plain
+  `tab js` still runs. Measured live: 100 000 chars refused without `--out` and
+  written (100 003 bytes, `verified: true`) with it.
+* **A misread flag now names the verb's usage.** `unknown flag` refusals get
+  the verb's own usage line appended, derived from the ONE help text plus each
+  plugin's `usage` field (no second table to drift). Only a `bad-args` message
+  that names an unknown flag or option gets it; the rest are left alone. The
+  plugin side got the other half: `slack` now refuses a flag it does not read
+  by NAME, where a mistyped flag used to surface as "one TEXT at most, got 2".
+* **`tab click`'s off-viewport policy: re-checked, not changed.** The open
+  question was whether the verb should scroll the target into view or refuse.
+  It already refuses — `no-viewport-target`, with `tab scroll` named in the
+  message — and that is the right reading: a click is real input at a proven
+  point, and moving the page underneath the caller to make that point reachable
+  is a side effect nobody asked for. The live battery pins both halves (the
+  refusal with its remedy, then `tab scroll` → click landing).
+
+Also fixed along the way: a stale live-battery expectation (the frames census
+has carried `bound` since 74af259 and the check still compared against the dict
+without it), and `Runtime.evaluate`'s size refusal now names the `--out` sink
+beside `tab text` as a remedy.
+
+Evidence: 169 hermetic checks green (three new: `tab js --out`'s file and its
+refusals, the channel merge/carry-forward/stop, the usage hint's source and its
+silence for non-argv refusals), `ruff check .` 0, `pyright` 0, live battery
+62/0, and the live runs quoted above on the RavenTrack workspace.
+
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,
 per-profile lock and pacing, real UA override, explicit verdicts (empty vs

@@ -92,6 +92,7 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "tab wait": ("read",),
     "tab wait --for js": ("code", "write", "egress"),
     "tab js": ("code", "write", "egress"),
+    "tab js --out": ("code", "write", "egress", "file"),
     # profiles
     "profile info": ("read",),
     "profile logins": ("read",),

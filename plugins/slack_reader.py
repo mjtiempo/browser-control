@@ -1,4 +1,5 @@
-"""slack-reader — read a Slack message (and its thread) from a permalink.
+"""slack-reader — read a Slack message, its thread, or a channel's recent
+messages, from a permalink.
 
 One call that replaces the walk a caller otherwise does by hand: navigate to
 the permalink, get past the desktop-app launch stub, wait for the client to
@@ -6,6 +7,11 @@ render the message, read it, notice that Slack split one long payload across
 several messages, and open the reply bar when the thread is asked for. Every
 step is the core CLI's own verb through `plugin_api` — this file is the SITE
 knowledge: the URLs, the selectors, and what Slack's own words mean.
+
+Two reads share that machinery: `slack message PERMALINK` answers the message
+the permalink names (with `--thread`, the replies the bar opens), and
+`slack channel PERMALINK` answers the channel's recent messages, merged across
+the timeline's recycled window because the client unmounts what scrolls out.
 
 The permalink is the input (a message's "Copy link"), and the reply is the
 page's own answer: `sender`, `text`, `posted_at` (from the message's own
@@ -41,11 +47,14 @@ in to the workspace on the tab's profile — seed the managed profile with
     browser-control-cli slack message \
         https://raventrack.slack.com/archives/C02Q99A8VGS/p1790340351996489 \
         --thread
+    browser-control-cli slack channel \
+        https://raventrack.slack.com/archives/C02Q99A8VGS --cap 20
 """
 from __future__ import annotations
 
 import contextlib
 import re
+import time
 from datetime import datetime, timezone
 
 from browser_control import plugin_api
@@ -83,6 +92,7 @@ PERMALINK_FIELDS = ["ts=[data-ts]@data-ts",
 PROBE_FIELDS = ["ts=[data-ts]@data-ts", f"sender={SENDER}"]
 PART_FIELDS = ["ts=[data-ts]@data-ts", f"text={BODY}"]
 THREAD_FIELDS = ["ts=[data-ts]@data-ts", f"sender={SENDER}", f"text={BODY}"]
+WINDOW_FIELDS = ["ts=[data-ts]@data-ts", f"sender={SENDER}", f"text={BODY}"]
 
 DEFAULT_CHARS = 4_000        # one Slack message's worth of one message
 MAX_CHARS = 20_000           # `tab extract`'s own per-field ceiling
@@ -92,6 +102,22 @@ THREAD_TIMEOUT_S = 15.0      # the pane mounts after the reply-bar click
 PARTS_CAP = 12               # overflow messages followed before giving up
 PROBE_CAP = 120              # rendered containers read to find them
 THREAD_CAP = 50              # replies one pane read returns
+
+# --- `slack channel`: the timeline's window, and what loading it costs ------
+#: `tab extract`'s page-side budget is 20 000 chars of field text for the WHOLE
+#: reply, so a window read is `--cap × --chars` that has to fit inside it: the
+#: defaults below do, and a caller who asks for more of either still gets
+#: `truncated` from the extraction rather than a silent shortfall.
+DEFAULT_CAP = 20             # messages a channel read aims for
+MAX_CAP = 50                 # and the most one reply may carry
+DEFAULT_WINDOW_CHARS = 500   # chars kept of one message's text
+MAX_WINDOW_CHARS = 4_000
+DEFAULT_SCROLLS = 5          # wheel steps spent trying to fill `--cap`
+MAX_SCROLLS = 30
+SCROLL_PIXELS = 2_400        # one wheel event, a few viewports
+SCROLL_PAUSE_S = 1.0         # Slack mounts the next window after the wheel
+STALL_PAUSE_S = 0.4          # a second read before calling a round empty
+STALL_ROUNDS = 2             # empty rounds in a row = nothing older is coming
 #: Same sender, this close in the timestamp, and it is the SAME payload's
 #: overflow — measured at 20–60 ms; a second is the conservative bound.
 CHUNK_GAP_S = 1.0
@@ -109,6 +135,15 @@ _CLIENT = re.compile(
     r"^https?://[^/]+/client/(?P<team>[A-Za-z0-9]+)/(?P<channel>[A-Za-z0-9]+)"
     r"/(?P<ts>\d{1,12}\.\d{1,9})$")
 _CLAIMED = re.compile(r"(\d+)\s+repl")
+#: `…/archives/<CHANNEL>` — the channel itself, with or without a message on
+#: the end (the message form opens the window AT that message).
+_CHANNEL = re.compile(
+    r"^https?://[^/]+/archives/(?P<channel>[A-Za-z0-9]+)"
+    r"(?:/p\d{7,20})?$")
+#: `…/client/<TEAM>/<CHANNEL>[/<ts>]` — the address bar's own spelling.
+_CLIENT_CHANNEL = re.compile(
+    r"^https?://[^/]+/client/[A-Za-z0-9]+/(?P<channel>[A-Za-z0-9]+)"
+    r"(?:/\d{1,12}\.\d{1,9})?$")
 
 
 def _ts(value: object) -> float:
@@ -162,6 +197,38 @@ def _claimed(text: object) -> int | None:
         return int(match.group(1))
     except ValueError:      # `\d+` makes this arm unreachable; the contract
         return None         # is "None for what cannot be read", so it stays
+
+
+def _channel_ref(url: str) -> str:
+    """The channel id a channel address names, or a refusal."""
+    text = str(url or "").strip().split("?")[0].split("#")[0].rstrip("/")
+    for pattern in (_CHANNEL, _CLIENT_CHANNEL):
+        match = pattern.match(text)
+        if match:
+            return match.group("channel")
+    fail(errors.ERR_BAD_ARGS,
+         f"slack channel: {url!r} is not a Slack channel address — give the "
+         "address from the channel's own \"Copy link\", "
+         "https://<workspace>.slack.com/archives/<CHANNEL>")
+
+
+def _leftovers(args: list[str], verb: str, takes: str) -> None:
+    """Refuse a flag this verb does not read, BY NAME.
+
+    `pop` takes out the flags this file knows, so anything left that still
+    looks like a flag is one nobody reads — and the core's own verbs refuse
+    those rather than guessing. Without this a mistyped flag surfaced as "one
+    TEXT at most, got 2", which names neither the flag nor the fix; the CLI
+    then appends this verb's usage line to the unknown-option refusal. A bare
+    `--` ends the flags, as it does everywhere else in the tool.
+    """
+    for word in args:
+        text = str(word)
+        if text == "--":
+            return
+        if text.startswith("-"):
+            fail(errors.ERR_BAD_ARGS,
+                 f"{verb}: unknown option {text!r} — this verb takes {takes}")
 
 
 def _open(url: str, tab: str, browser: str) -> bool:
@@ -340,20 +407,200 @@ def _thread(ts: str, tab: str, browser: str, chars: int) -> dict:
     return {"replies": replies}
 
 
+def _read_window(tab: str, browser: str, cap: int, chars: int) -> dict:
+    """One extraction of what the client currently has mounted."""
+    return plugin_api.extract(each=MESSAGE, fields=WINDOW_FIELDS, cap=cap,
+                              chars=chars, tab=tab, browser=browser)
+
+
+def _merge(seen: dict[str, dict], data: dict) -> list[str]:
+    """Add this window's fresh messages to `seen`, first occurrence winning.
+
+    Merged BY ts: the client recycles its rows, so the same message arrives in
+    several windows, and it must come home once. The author is stored as the
+    page rendered it — an empty cell for a grouped continuation — and resolved
+    once the walk is done, because the group's name may be in a window the
+    caller has not read yet.
+    """
+    fresh: list[str] = []
+    for row in data.get("matches") or []:
+        row = row or {}
+        ts = str(row.get("ts") or "")
+        if not ts or ts in seen:
+            continue
+        seen[ts] = {"ts": ts, "posted_at": _stamp(ts),
+                    "sender": str(row.get("sender") or ""),
+                    "text": str(row.get("text") or "")}
+        fresh.append(ts)
+    return fresh
+
+
+def _collect(tab: str, browser: str, cap: int, chars: int,
+             max_scrolls: int) -> tuple[list[dict], dict, bool]:
+    """The channel's recent messages, and what loading them took.
+
+    The loop a caller used to run by hand: extract what is mounted, wheel the
+    timeline UP (older messages are above), extract again, merge by ts — one
+    extraction can only ever answer the mounted window, and the client unmounts
+    what scrolls out. Bounded by `max_scrolls`, and stopped early when nothing
+    older arrives (`STALL_ROUNDS` empty rounds, each given a second read after
+    a beat, so a slow mount is not mistaken for the beginning of the channel).
+
+    `stop` names the cause the way the core names every other one, and
+    `truncated` is the OR of every extraction's own cut flag plus "stopped
+    short": a reply never claims to hold everything when a read was cut or the
+    loading ran out.
+    """
+    seen: dict[str, dict] = {}
+    data = _read_window(tab, browser, cap, chars)
+    _merge(seen, data)
+    truncated = bool(data.get("truncated"))
+    reads, scrolls, stall = 1, 0, 0
+    stop = ""
+    if not seen:
+        # an empty channel, or a wall: the wheel has nothing to load
+        stop = "no-messages"
+    while not stop and len(seen) < cap and scrolls < max_scrolls:
+        try:
+            plugin_api.scroll(by=-SCROLL_PIXELS, tab=tab, browser=browser)
+        except ControlError:
+            stop = "scroll-failed"
+            break
+        scrolls += 1
+        time.sleep(SCROLL_PAUSE_S)
+        data = _read_window(tab, browser, cap, chars)
+        reads += 1
+        truncated = truncated or bool(data.get("truncated"))
+        fresh = _merge(seen, data)
+        if not fresh:
+            time.sleep(STALL_PAUSE_S)
+            data = _read_window(tab, browser, cap, chars)
+            reads += 1
+            truncated = truncated or bool(data.get("truncated"))
+            fresh = _merge(seen, data)
+        if fresh:
+            stall = 0
+        else:
+            stall += 1
+            if stall >= STALL_ROUNDS:
+                stop = "exhausted"
+    if len(seen) > cap:
+        # a window mounts many at once, so the round that reaches the target
+        # can overshoot it: this verb reads the RECENT messages, so the tail
+        # (newest) is what a capped reply keeps — and cutting is truncation
+        truncated = True
+    rows = sorted(seen.values(), key=lambda row: _ts(row["ts"]))
+    if len(rows) > cap:
+        rows = rows[-cap:]
+    # Slack renders the author once per group: a message whose sender cell is
+    # empty belongs to the last name above it, carried forward in ts order
+    previous = ""
+    for row in rows:
+        if row["sender"]:
+            previous = row["sender"]
+        else:
+            row["sender"] = previous
+    if not stop:
+        stop = "cap" if len(rows) >= cap else "max-scrolls"
+    # an exhausted read is the whole channel window; anything else stopped
+    # short, so older messages may exist (and an extraction's own cut counts)
+    return rows, {"reads": reads, "scrolls": scrolls,
+                  "max_scrolls": max_scrolls, "stop": stop}, (
+        truncated or stop not in ("exhausted", "no-messages"))
+
+
+def _channel(args: list[str], browser: str) -> dict:
+    """`slack channel PERMALINK [--cap N] [--chars N] [--max-scrolls N]
+    [--timeout S] [--tab SPEC]`."""
+    args, cap_flag = pop(args, "--cap", "slack channel")
+    args, chars_flag = pop(args, "--chars", "slack channel")
+    args, scrolls_flag = pop(args, "--max-scrolls", "slack channel")
+    args, timeout_flag = pop(args, "--timeout", "slack channel")
+    args, tab = tab_arg(args, "slack channel")
+    _leftovers(args, "slack channel",
+               "a PERMALINK, --cap N, --chars N, --max-scrolls N, "
+               "--timeout S and --tab SPEC")
+    url = text_arg(args, "slack channel").strip()
+    channel = _channel_ref(url)
+    # every argument is validated BEFORE the first navigation: a typo must not
+    # move the caller's tab and stall a client boot before refusing
+    cap = int_arg(cap_flag, "slack channel: --cap") \
+        if cap_flag is not None else DEFAULT_CAP
+    if cap < 1:
+        fail(errors.ERR_BAD_ARGS,
+             f"slack channel: --cap must be at least 1, got {cap}")
+    cap = min(cap, MAX_CAP)
+    chars = int_arg(chars_flag, "slack channel: --chars") \
+        if chars_flag is not None else DEFAULT_WINDOW_CHARS
+    if chars < 1:
+        fail(errors.ERR_BAD_ARGS,
+             f"slack channel: --chars must be at least 1, got {chars}")
+    chars = min(chars, MAX_WINDOW_CHARS)
+    max_scrolls = int_arg(scrolls_flag, "slack channel: --max-scrolls") \
+        if scrolls_flag is not None else DEFAULT_SCROLLS
+    if max_scrolls < 0:
+        # 0 is meaningful ("read the first window, wheel nothing")
+        fail(errors.ERR_BAD_ARGS,
+             "slack channel: --max-scrolls must be 0 or more, got "
+             f"{max_scrolls}")
+    max_scrolls = min(max_scrolls, MAX_SCROLLS)
+    timeout = float_arg(timeout_flag, "slack channel: --timeout") \
+        if timeout_flag is not None else DEFAULT_TIMEOUT_S
+    if not 0 < timeout < 3600:
+        fail(errors.ERR_BAD_ARGS,
+             "slack channel: --timeout must be between 0 and 3600 seconds, "
+             f"got {timeout_flag!r}")
+
+    stub = _open(url, tab, browser)
+    plugin_api.wait("element", selector=MESSAGE, timeout=timeout,
+                    tab=tab, browser=browser)
+    messages, loading, truncated = _collect(tab, browser, cap, chars,
+                                            max_scrolls)
+    if not messages:
+        fail(errors.ERR_NO_MATCH,
+             "slack channel: the client rendered no messages — the page's "
+             "own answer, not a claim about the channel")
+    return {
+        "ok": True,
+        "channel": channel,
+        "permalink": url,
+        "count": len(messages),
+        "truncated": truncated,
+        "loading": {**loading, "stub_clicked": stub},
+        "messages": messages,
+        "note": ("read from the client's own rendered messages and merged "
+                 "across the timeline's recycled window: the NEWEST are the "
+                 "end of the list, `--cap` bounds the reply, and "
+                 "`loading.stop` says why the walk stopped (`cap`, "
+                 "`exhausted`, `max-scrolls`, `no-messages`, "
+                 "`scroll-failed`); Slack renders the author once per group, "
+                 "so a name-less message here carries the one above it — a "
+                 "LEADING empty sender means the group's header sits above "
+                 "what the walk loaded"),
+    }
+
+
 def run(rest: list[str], browser: str) -> dict:
-    """`slack message PERMALINK [--thread] [--chars N] [--timeout S] [--tab SPEC]`."""
+    """`slack message PERMALINK ...` or `slack channel PERMALINK ...`."""
     args = [str(arg) for arg in rest]
-    if not args or args[0] != "message":
-        # the plugin's noun is `slack`; `message` is the action, so a future
-        # read (`slack channel …`) can sit beside it
+    if not args or args[0] not in ("message", "channel"):
+        # the plugin's noun is `slack`; the subcommand is the action
         fail(errors.ERR_BAD_ARGS,
              "slack: the subcommand is required — `slack message PERMALINK "
-             "[--thread] ...` (have: message)")
-    args = args[1:]
+             "[--thread] ...` or `slack channel PERMALINK [--cap N] ...`")
+    head, args = args[0], args[1:]
+    return _message(args, browser) if head == "message" \
+        else _channel(args, browser)
+
+
+def _message(args: list[str], browser: str) -> dict:
+    """`slack message PERMALINK [--thread] [--chars N] [--timeout S] [--tab SPEC]`."""
     args, want_thread = switch(args, "--thread")
     args, chars_flag = pop(args, "--chars", "slack message")
     args, timeout_flag = pop(args, "--timeout", "slack message")
     args, tab = tab_arg(args, "slack message")
+    _leftovers(args, "slack message",
+               "a PERMALINK, --thread, --chars N, --timeout S and --tab SPEC")
     url = text_arg(args, "slack message").strip()
     channel, ts = _permalink(url)
     # every argument is validated BEFORE the first navigation: a typo must not
@@ -451,10 +698,14 @@ PLUGIN = {
             # would let `--allow read` authorise a verb that browses
             "classes": ("read", "write", "egress"),
             "usage": ("slack message PERMALINK [--thread] [--chars N] "
-                      "[--timeout S] [--tab SPEC] — the message the permalink "
+                      "[--timeout S] [--tab SPEC] | slack channel PERMALINK "
+                      "[--cap N] [--chars N] [--max-scrolls N] [--timeout S] "
+                      "[--tab SPEC] — `message` reads the message a permalink "
                       "names, with the overflow messages Slack split one "
                       "payload into (`parts`) and, with --thread, the replies "
-                      "beside the reply bar's own count"),
+                      "beside the reply bar's own count; `channel` reads the "
+                      "channel's recent messages, merged across the "
+                      "timeline's recycled window"),
         },
     },
 }

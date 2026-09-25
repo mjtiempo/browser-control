@@ -1114,9 +1114,13 @@ def t_one_tab_addressing() -> None:
 def t_cli_dom_grammar() -> None:
     """`tab js|find|text|wait` argv — flags stripped, none dropped."""
     calls: list[tuple] = []
+    #: An inert `--out` path: the fake `js` never writes, so this proves the
+    #: flag REACHES the verb and nothing more.
+    sink_path = os.path.join(tempfile.gettempdir(), "js-out-grammar.json")
 
-    def fake_js(expression: str, tab: str = "", browser: str = "") -> dict:
-        calls.append(("js", expression, tab, browser))
+    def fake_js(expression: str, tab: str = "", browser: str = "",
+                out: str = "", force: bool = False) -> dict:
+        calls.append(("js", expression, tab, browser, out, force))
         return {"ok": True}
 
     def fake_find(text: str | None = None, selector: str | None = None,
@@ -1143,6 +1147,8 @@ def t_cli_dom_grammar() -> None:
     try:
         for argv in (["tab", "js", "document.title"],
                      ["tab", "js", "document.title", "--tab", "id:ABC"],
+                     ["tab", "js", "1+1", "--out", sink_path,
+                      "--force"],
                      ["tab", "find", "Save"],
                      ["tab", "find", "--selector", ".x", "--cap", "3"],
                      ["tab", "text"],
@@ -1157,8 +1163,9 @@ def t_cli_dom_grammar() -> None:
             rc, _out, err = run_cli(argv)
             assert rc == 0, (argv, rc, err)
         assert calls == [
-            ("js", "document.title", "", ""),
-            ("js", "document.title", "id:ABC", ""),
+            ("js", "document.title", "", "", "", False),
+            ("js", "document.title", "id:ABC", "", "", False),
+            ("js", "1+1", "", "", sink_path, True),
             ("find", "Save", None, dom.FIND_CAP, "", ""),
             ("find", None, ".x", 3, "", ""),
             ("text", None, dom.TEXT_CAP, "", ""),
@@ -1175,7 +1182,8 @@ def t_cli_dom_grammar() -> None:
     # every one of these refuses BEFORE a browser is touched (there is none
     # running in a hermetic check), which is the property being held here
     for argv in (["tab", "js"], ["tab", "js", "a", "b"],
-                 ["tab", "js", "--tab", "id:1"], ["tab", "find"],
+                 ["tab", "js", "--tab", "id:1"], ["tab", "js", "1", "--force"],
+                 ["tab", "find"],
                  ["tab", "find", "a", "--selector", "b"],
                  ["tab", "find", "a", "b"], ["tab", "text", "extra"],
                  ["tab", "text", "--chars", "x"], ["tab", "wait"],
@@ -2032,6 +2040,8 @@ def t_capability_surface() -> None:
             assert parts[1] in registry.TAB_SUBCOMMANDS, action
     # the classes a caller would guess, including the ones a MODE decides
     assert capabilities.ACTIONS["tab js"] == ("code", "write", "egress")
+    assert capabilities.ACTIONS["tab js --out"] == ("code", "write", "egress",
+                                                   "file")
     assert capabilities.ACTIONS["tab text"] == ("read",)
     assert capabilities.ACTIONS["tab extract"] == ("read",)
     assert capabilities.ACTIONS["tab screenshot"] == ("read", "file")
@@ -2052,16 +2062,27 @@ def t_capability_surface() -> None:
     caps = json.loads(out)["capabilities"]
     assert caps["classes"] == list(capabilities.CLASSES), caps["classes"]
     assert caps["unclassified"] == [], caps
-    assert caps["by_class"]["code"] == ["tab js", "tab wait --for js"], \
+    assert caps["by_class"]["code"] == ["tab js", "tab js --out",
+                                         "tab wait --for js"], \
         caps["by_class"]["code"]
     assert caps["by_class"]["write"] == sorted(
         action for action, classes in capabilities.ACTIONS.items()
         if "write" in classes), caps["by_class"]["write"]
-    assert caps["by_class"]["file"] == ["profile seed", "tab screenshot",
-                                        "tab upload"], caps["by_class"]["file"]
-    assert caps["by_class"]["egress"] == ["open", "tab", "tab js", "tab nav",
+    assert caps["by_class"]["file"] == ["profile seed", "tab js --out",
+                                        "tab screenshot", "tab upload"], \
+        caps["by_class"]["file"]
+    assert caps["by_class"]["egress"] == ["open", "tab", "tab js",
+                                          "tab js --out", "tab nav",
                                           "tab wait --for js"], \
         caps["by_class"]["egress"]
+    # a FLAG can bring a class with it: `--out` writes a file, and the gate
+    # runs before the handler, so the action must be readable from the argv
+    rc, _out, err = run_cli(["--deny", "file", "tab", "js", "1",
+                             "--out",
+                             os.path.join(tempfile.gettempdir(), "x.json")])
+    assert rc == 2 and "'file' is denied" in err, (rc, err)
+    rc, _out, err = run_cli(["--deny", "file", "tab", "js", "1"])
+    assert "not-allowed" not in err, (rc, err)
 
 
 def t_lock_serializes_a_check_then_act() -> None:
@@ -3335,6 +3356,121 @@ def t_slack_plugin_offline() -> None:
             os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
 
 
+def t_slack_channel_plugin_offline() -> None:
+    """`slack channel`: the window merge, the carry-forward, and the stop cause.
+
+    Measured on the real client: the timeline mounts a window and unmounts what
+    scrolls out, so one extraction can never answer a `--cap` request — the
+    reason the plugin wheels at all. What is pinned here: a wheel UP per round
+    (older messages are above), rows merged BY ts so a message seen in two
+    windows comes home once, the author carried down from the group header
+    above an empty sender cell, the newest `cap` messages kept when a round
+    overshoots, and `loading.stop` naming why the walk ended.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    #: two mounts of the SAME timeline: the second repeats the newest message
+    #: (the client recycles rows) and adds two older ones above it
+    rounds = [
+        [{"ts": "1790000504.000000", "sender": "AWS Notifications",
+          "text": "newest"},
+         {"ts": "1790000503.000000", "sender": "", "text": "second"},
+         {"ts": "1790000502.000000", "sender": "", "text": "third"}],
+        [{"ts": "1790000501.000000", "sender": "Liam", "text": "older"},
+         {"ts": "1790000500.000000", "sender": "", "text": "oldest"},
+         {"ts": "1790000504.000000", "sender": "AWS Notifications",
+          "text": "newest"}],
+    ]
+    state = {"round": 0}
+    navs: list[str] = []
+    wheels: list[object] = []
+    waits: list[tuple] = []
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        navs.append(url)
+        return {"ok": True, "moved": True}
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 15.0,
+                  idle_ms: int = 500, tab: str = "", browser: str = "",
+                  match: str | None = None) -> dict:
+        waits.append((mode, match))
+        return {"ok": True}
+
+    def fake_scroll(by: int | None = None, edge: str | None = None,
+                    text: str | None = None, selector: str | None = None,
+                    index: int | None = None, at: str | None = None,
+                    tab: str = "", browser: str = "") -> dict:
+        wheels.append(by)
+        return {"ok": True}
+
+    def fake_extract(each: str = "", fields: list[str] | None = None,
+                     cap: int = 10, chars: int = 1000,
+                     visible: bool = False, unique: str = "",
+                     tab: str = "", browser: str = "") -> dict:
+        index = min(state["round"], len(rounds) - 1)
+        state["round"] += 1
+        return {"ok": True, "truncated": False, "matches": rounds[index]}
+
+    real = {name: getattr(plugin_api, name)
+            for name in ("nav", "wait", "scroll", "extract")}
+    plugin_api.nav = fake_nav                        # type: ignore[assignment]
+    plugin_api.wait = fake_wait                      # type: ignore[assignment]
+    plugin_api.scroll = fake_scroll                  # type: ignore[assignment]
+    plugin_api.extract = fake_extract                # type: ignore[assignment]
+    try:
+        link = "https://raventrack.slack.com/archives/C02Q99A8VGS"
+        rc, out, err = run_cli(["slack", "channel", link, "--cap", "4",
+                                "--max-scrolls", "3"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert navs == [link], navs
+        # the wheel goes UP: older messages are above the mount
+        assert wheels == [-2400], wheels
+        # the newest `cap` after the merge: 500 fell off, 501-504 came home
+        assert [m["ts"] for m in data["messages"]] == [
+            "1790000501.000000", "1790000502.000000", "1790000503.000000",
+            "1790000504.000000"], data["messages"]
+        # the author is carried down the group: 502/503 have no cell of their
+        # own, and 504 starts a new group
+        senders = [m["sender"] for m in data["messages"]]
+        assert senders == ["Liam", "Liam", "Liam", "AWS Notifications"], senders
+        assert [m["text"] for m in data["messages"]] == [
+            "older", "third", "second", "newest"], data["messages"]
+        assert data["loading"] == {"reads": 2, "scrolls": 1, "max_scrolls": 3,
+                                   "stop": "cap", "stub_clicked": False}, data
+        assert data["truncated"] is True, data
+        # every refusal is argv, before the first navigation
+        for argv, phrase in (
+                (["slack", "channel"], "TEXT is required"),
+                (["slack", "channel", "https://example.com/x"],
+                 "is not a Slack channel address"),
+                (["slack", "channel", link, "--cap", "0"],
+                 "--cap must be at least 1"),
+                (["slack", "channel", link, "--chars", "0"],
+                 "--chars must be at least 1"),
+                (["slack", "channel", link, "--max-scrolls", "-1"],
+                 "--max-scrolls must be 0 or more"),
+                (["slack", "message", link, "--depth", "2"],
+                 "unknown option '--depth'"),
+                (["slack", "channel", link, "--depth", "2"],
+                 "unknown option '--depth'")):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
+        assert navs == [link], navs
+    finally:
+        for name, value in real.items():
+            setattr(plugin_api, name, value)
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
 def _restore_root(keep: str | None) -> None:
     """Put BROWSER_CONTROL_ROOT back the way the caller found it."""
     if keep is None:
@@ -3369,6 +3505,10 @@ class _ScriptedPage:
         self.route = route
         self.calls: list[dict] = []
         self.events: list[dict] = []
+        #: What each `evaluate` was CALLED with for `cap`: `None` is the one
+        #: spelling of "no post-transfer refusal", and a check that pins
+        #: `tab js --out` lifting it (and nothing else lifting it) needs it.
+        self.caps: list[int | None] = []
 
     def __enter__(self) -> _ScriptedPage:
         return self
@@ -3378,7 +3518,9 @@ class _ScriptedPage:
         return None
 
     def evaluate(self, expression: str, timeout: float = 0.0,
-                 raw: bool = False, cap: int | None = None) -> object:
+                 raw: bool = False,
+                 cap: int | None = cdp_rpc.EVAL_RESULT_CAP) -> object:
+        self.caps.append(cap)
         return self.route(expression)
 
     def handle(self, expression: str, timeout: float = 0.0) -> str:
@@ -7427,6 +7569,112 @@ def t_a_click_refuses_before_it_presses() -> None:
         (dom._resolve, dom._session, dom._matches_in) = real       # noqa: SLF001
 
 
+def t_js_out_writes_the_value_and_names_its_refusals() -> None:
+    """`tab js --out`: the value goes to the FILE, and only that call lifts the cap.
+
+    The reply cap REFUSES rather than truncating (a decision), so a value
+    bigger than a reply had no way out; `--out` is that sink. What is pinned
+    here: the file holds the JSON of the page's own value (including the
+    page's `undefined`, which the reply still NAMES), the post-transfer cap is
+    passed as `None` for that one call — and stays the transport's default
+    without `--out` — `bytes` is the file's own size, and the path rules are
+    the sink's: exclusive without `--force`, absolute, parent must exist, and
+    a directory is not a file.
+    """
+    box = {"value": {"a": [1, 2, 3]}}
+    page = _ScriptedPage(lambda expression: box["value"])
+
+    class _Tab:
+        row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        @classmethod
+        def open(cls, *args: object, **kwargs: object) -> "_Tab":
+            # the real seam is `Tab.open(tab, browser, for_write=…)`, not the
+            # constructor: a fake that only overrides `__init__` fails where
+            # the verb actually enters
+            return cls()
+
+        def session(self) -> _ScriptedPage:
+            return page
+
+    real = dom.Tab
+    dom.Tab = _Tab                                        # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "value.json")
+            reply = dom.js("({a: 1})", out=target)
+            assert reply["path"] == target, reply
+            assert reply["value_omitted"] is True, reply
+            assert "value" not in reply, reply
+            assert reply["verified"] is True, reply
+            with open(target, encoding="utf-8") as handle:
+                assert json.load(handle) == {"a": [1, 2, 3]}
+            assert reply["bytes"] == os.stat(target).st_size, reply
+            # the cap is OFF for THIS call only: the sink is what makes a
+            # value past the reply cap readable at all
+            assert page.caps == [None], page.caps
+            plain = dom.js("1")
+            assert plain["verified"] is False, plain
+            assert page.caps[-1] == cdp_rpc.EVAL_RESULT_CAP, page.caps
+            # the sink's own rules: no clobber without --force…
+            refusal(lambda: dom.js("1", out=target), "file-exists")
+            again = dom.js("1", out=target, force=True)
+            assert again["verified"] is True and "value" not in again, again
+            # …and the page's `undefined` is still named, while the file —
+            # which cannot hold it — says null
+            box["value"] = cdp_rpc.UNDEFINED
+            undefined = os.path.join(tmp, "undefined.json")
+            undef = dom.js("undefined", out=undefined)
+            assert undef["value_type"] == "undefined", undef
+            with open(undefined, encoding="utf-8") as handle:
+                assert json.load(handle) is None
+            for bad in ("rel.json", tmp, os.path.join(tmp, "nope", "x.json")):
+                refusal(lambda bad=bad: dom.js("1", out=bad), "bad-args")
+    finally:
+        dom.Tab = real                                    # type: ignore[assignment]
+
+
+def t_a_misread_flag_hints_at_the_verb_usage() -> None:
+    """An `unknown flag` refusal names the verb's own usage line.
+
+    The message says WHAT was misread; the usage says what the call may look
+    like — and both come from ONE source (the help text, plus each plugin's
+    own `usage` field), so the hint cannot drift away from `--help`. A refusal
+    that is not about argv gets nothing added: a usage line there would be
+    noise, and a message that already carries one is left alone.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    try:
+        for argv, phrase in (
+                (["tab", "js", "--code", "1"],
+                 "usage: tab js EXPR [--out FILE] [--force] [--tab SPEC]"),
+                (["tab", "wait", "--for", "load", "--math", "x"],
+                 "usage: tab wait --for load|idle|element|url|js"),
+                (["tab", "text", "--nope"], "usage: tab text"),
+                (["page", "read", "https://a/", "--depth", "2"],
+                 "usage: page read URL..."),
+                (["slack", "message", "--depth", "2"],
+                 "usage: slack message PERMALINK")):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert phrase in err, (argv, err)
+        # argv is not what went wrong here, so nothing is appended
+        for argv in (["tab", "js"],
+                     ["tab", "wait", "--for", "load", "--timeout", "0"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "usage:" not in err, (argv, rc, err)
+    finally:
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
 def t_wait_tabs_names_what_is_missing() -> None:
     """`_wait_tabs` confirms the ROWS it saw and NAMES the ids still missing.
 
@@ -8523,7 +8771,7 @@ def t_end_of_flags_reaches_the_verb() -> None:
     real = (dom.type_text, dom.js)                                 # noqa: SLF001
     dom.type_text = lambda text, tab="", browser="", delay_s=None: (  # type: ignore[assignment]
         calls.append(("type", text)) or {"ok": True})
-    dom.js = lambda expression, tab="", browser="": (               # type: ignore[assignment]
+    dom.js = lambda expression, tab="", browser="", out="", force=False: (  # type: ignore[assignment]
         calls.append(("js", expression)) or {"ok": True})
     try:
         for argv in (["tab", "type", "--", "-hello"],
@@ -8655,6 +8903,11 @@ def main() -> int:
          t_google_plugin_offline),
         ("page plugin reads a list in one call", t_page_plugin_offline),
         ("slack plugin reads a permalink offline", t_slack_plugin_offline),
+        ("slack plugin reads a channel window", t_slack_channel_plugin_offline),
+        ("js --out writes the value to a file",
+         t_js_out_writes_the_value_and_names_its_refusals),
+        ("a misread flag hints at the verb usage",
+         t_a_misread_flag_hints_at_the_verb_usage),
         ("the plugin seam hands out the core readers",
          t_plugin_seam_hands_out_the_core_readers),
         ("type delay is validated before any browser",
