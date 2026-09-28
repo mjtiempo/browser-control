@@ -262,6 +262,28 @@ def _usage_lines() -> list[str]:
     return [line for line in lines if line]
 
 
+def _usage_heads(usage: str) -> list[list[str]]:
+    """Every call one usage line may name, as token lists.
+
+    Two shapes spell TWO calls: `tab back|forward …`, where the pipe is inside
+    a token, and a plugin's single `usage` field — `slack message … | slack
+    channel …` — where it stands alone between two shapes. Both must be
+    matched, or the second verb's refusal falls through to the generic
+    `--help` pointer; `tab forward` and the new `slack channel` were exactly
+    that. The tokens after the pipe are kept, because the pipe changes only
+    the head (`tab back` / `tab forward`), never the flags that follow.
+    """
+    segments: list[list[list[str]]] = [[[]]]
+    for word in usage.split():
+        if word == "|":
+            segments.append([[]])
+            continue
+        segments[-1] = [[*head, alt]
+                        for head in segments[-1]
+                        for alt in word.split("|")]
+    return [head for segment in segments for head in segment]
+
+
 def _hinted(message: str, code: str) -> str:
     """`message`, plus the verb's usage when a flag was misread.
 
@@ -269,7 +291,8 @@ def _hinted(message: str, code: str) -> str:
     the refusal is about argv, and the usage line is exactly what is missing.
     Any other refusal is about the page, the policy or the browser, where a
     usage line would be noise — and a message that already carries one is left
-    alone.
+    alone. The reply always carries the WHOLE line, so a caller sees the same
+    joined spelling `--help` prints.
     """
     text = str(message or "")
     if code != ERR_BAD_ARGS or "usage:" in text \
@@ -277,7 +300,7 @@ def _hinted(message: str, code: str) -> str:
         return text
     phrase = text.split(":", 1)[0].strip().split()
     for usage in _usage_lines():
-        if usage.split()[:len(phrase)] == phrase:
+        if any(head[:len(phrase)] == phrase for head in _usage_heads(usage)):
             return f"{text} — usage: {usage}"
     return f"{text} — usage: browser-control-cli --help lists every verb"
 def cmd_tab(rest: list[str], browser: str) -> dict:

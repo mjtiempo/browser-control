@@ -617,13 +617,18 @@ def c_selftest() -> str:
                for actions in caps["by_class"].values()
                for action in actions}
     assert set(data["verbs"]) <= covered, (data["verbs"], sorted(covered))
-    # the surface the command SHIPS is the one the library DECLARES: a literal
-    # here went stale the moment a new action joined a class (`tab js --out`
-    # carries `code`), which is a failure about the CHECK, not the CLI
+    # the surface the command SHIPS is the one this checkout's library
+    # DECLARES: a literal here went stale the moment a new action joined a
+    # class (`tab js --out` carries `code`), which is a failure about the CHECK,
+    # not the CLI. What this comparison can actually catch is a SKEWED command —
+    # `BROWSER_CONTROL_CLI` pointing at an older install than this tree — so it
+    # is written as the whole dict, both directions. The per-class CONTENT is
+    # what the hermetic battery pins (a literal there is MEANT to move when an
+    # action joins a class: `t_capability_surface`), because running this script
+    # the two sides here are the same source and cannot disagree.
     caps_lib = import_module("browser_control.lib.capabilities")
-    for name, actions in caps_lib.by_class().items():
-        assert caps["by_class"][name] == actions, (name, caps["by_class"][name],
-                                                   actions)
+    assert caps["by_class"] == caps_lib.by_class(), (
+        caps["by_class"], caps_lib.by_class())
     return (f'{data["version"]} on {data["python_version"]}, '
             f'websockets {data["websockets"]}, '
             f'{len(caps["by_class"])} capability classes')

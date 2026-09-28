@@ -122,28 +122,40 @@ STALL_ROUNDS = 2             # empty rounds in a row = nothing older is coming
 #: overflow — measured at 20–60 ms; a second is the conservative bound.
 CHUNK_GAP_S = 1.0
 
+#: The ONE host rule: Slack's own domain, apex or any subdomain. The address
+#: SHAPE alone (`/archives/<CHANNEL>`) is forgeable on any host, so it is not a
+#: check — an `https://evil.example/archives/C02Q99A8VGS` would otherwise
+#: navigate and answer `ok` with that site's content wearing Slack's channel id
+#: (a review found it). Part of the pattern, so it holds BEFORE the first
+#: navigation, where the other argv rules are enforced.
+_SLACK_HOST = r"(?:[A-Za-z0-9-]+\.)*slack\.com"
+
 #: `https://<workspace>.slack.com/archives/<CHANNEL>/p<TS>` — the address a
 #: message's own "Copy link" gives. The timestamp is the last 6 digits
 #: (microseconds) split off the packed seconds.
 _PERMALINK = re.compile(
-    r"^https?://(?P<host>[^/]+)/archives/(?P<channel>[A-Za-z0-9]+)"
+    rf"^https?://{_SLACK_HOST}/archives/(?P<channel>[A-Za-z0-9]+)"
     r"/p(?P<packed>\d{7,20})$")
 #: `https://app.slack.com/client/<TEAM>/<CHANNEL>/<TS>` — what the address bar
 #: holds once the client has the tab; accepted so a caller who copied THAT can
 #: use it, with the ts already dotted.
 _CLIENT = re.compile(
-    r"^https?://[^/]+/client/(?P<team>[A-Za-z0-9]+)/(?P<channel>[A-Za-z0-9]+)"
+    rf"^https?://{_SLACK_HOST}/client/"
+    r"(?P<team>[A-Za-z0-9]+)/(?P<channel>[A-Za-z0-9]+)"
     r"/(?P<ts>\d{1,12}\.\d{1,9})$")
 _CLAIMED = re.compile(r"(\d+)\s+repl")
 #: `…/archives/<CHANNEL>` — the channel itself, with or without a message on
 #: the end (the message form opens the window AT that message).
 _CHANNEL = re.compile(
-    r"^https?://[^/]+/archives/(?P<channel>[A-Za-z0-9]+)"
+    rf"^https?://{_SLACK_HOST}/archives/(?P<channel>[A-Za-z0-9]+)"
     r"(?:/p\d{7,20})?$")
 #: `…/client/<TEAM>/<CHANNEL>[/<ts>]` — the address bar's own spelling.
 _CLIENT_CHANNEL = re.compile(
-    r"^https?://[^/]+/client/[A-Za-z0-9]+/(?P<channel>[A-Za-z0-9]+)"
+    rf"^https?://{_SLACK_HOST}/client/[A-Za-z0-9]+/(?P<channel>[A-Za-z0-9]+)"
     r"(?:/\d{1,12}\.\d{1,9})?$")
+#: An address the TAB reported that is still Slack's own — the read-back half
+#: of the same rule, for where a Slack address took the tab.
+_LANDED = re.compile(rf"^https?://{_SLACK_HOST}(?=[/?#]|$)")
 
 
 def _ts(value: object) -> float:
@@ -180,7 +192,8 @@ def _permalink(url: str) -> tuple[str, str]:
         return match.group("channel"), match.group("ts")
     fail(errors.ERR_BAD_ARGS,
          f"slack message: {url!r} is not a Slack message address — give the "
-         "permalink from the message's own \"Copy link\", "
+         "permalink from the message's own \"Copy link\", which is on "
+         "<workspace>.slack.com: "
          "https://<workspace>.slack.com/archives/<CHANNEL>/p<TS>")
 
 
@@ -208,7 +221,8 @@ def _channel_ref(url: str) -> str:
             return match.group("channel")
     fail(errors.ERR_BAD_ARGS,
          f"slack channel: {url!r} is not a Slack channel address — give the "
-         "address from the channel's own \"Copy link\", "
+         "address from the channel's own \"Copy link\", which is on "
+         "<workspace>.slack.com: "
          "https://<workspace>.slack.com/archives/<CHANNEL>")
 
 
@@ -231,23 +245,47 @@ def _leftovers(args: list[str], verb: str, takes: str) -> None:
                  f"{verb}: unknown option {text!r} — this verb takes {takes}")
 
 
-def _open(url: str, tab: str, browser: str) -> bool:
-    """Navigate, and get PAST the desktop-app launch stub. True if it was clicked.
+def _open(url: str, tab: str, browser: str) -> tuple[bool, str]:
+    """Navigate, and get PAST the desktop-app launch stub.
 
     The stub's document is COMPLETE (`--for load` passes on it, measured), so
     the address is what says whether the client took the tab. Only when the
     address never left the stub is its own link clicked — and a client that was
     already there, or a workspace without a stub, simply skips it.
+
+    Answers `(was the stub clicked, the address the tab held when it arrived)`.
+    The address comes back with it because NEITHER wait below can say the tab
+    landed on SLACK — both are `suppress`ed, since that normal path must not
+    fail the call — so without it nothing later knows where the page came from
+    (`_landed` is the check that uses it).
     """
-    plugin_api.nav(url, tab=tab, browser=browser)
+    moved = plugin_api.nav(url, tab=tab, browser=browser)
+    address = str(moved.get("url_read") or moved.get("url") or "")
     with contextlib.suppress(ControlError):
         plugin_api.wait("url", match=CLIENT_MATCH, timeout=STUB_TIMEOUT_S,
                         tab=tab, browser=browser)
-        return False
+        return False, address
     with contextlib.suppress(ControlError):
         plugin_api.click(selector=STUB_LINK, tab=tab, browser=browser)
-        return True
-    return False
+        return True, address
+    return False, address
+
+
+def _landed(verb: str, address: str) -> None:
+    """Refuse a tab whose reported address is not Slack's own domain.
+
+    The INPUT was already ruled Slack (`_channel_ref`/`_permalink`), so this
+    only fires when the TAB is somewhere else — a redirect off the domain, or
+    an address that could not be read at all. It fails CLOSED: a reply that
+    said `ok` here would be another site's rendered DOM wearing a Slack
+    channel id, which is indistinguishable from the authenticated read this
+    verb promises.
+    """
+    if not _LANDED.match(str(address or "").strip()):
+        seen = address or "an address the tab would not report"
+        fail(errors.ERR_NAV_NOT_VERIFIED,
+             f"{verb}: the tab is at {seen!r}, not a Slack client — another "
+             "site's page is never read as this Slack address")
 
 
 def _row(matches: object, ts: str) -> dict | None:
@@ -419,8 +457,9 @@ def _merge(seen: dict[str, dict], data: dict) -> list[str]:
     Merged BY ts: the client recycles its rows, so the same message arrives in
     several windows, and it must come home once. The author is stored as the
     page rendered it — an empty cell for a grouped continuation — and resolved
-    once the walk is done, because the group's name may be in a window the
-    caller has not read yet.
+    once the walk is done, on everything the walk loaded, because the group's
+    name may be in a window the caller has not read yet OR in the oldest rows
+    the `--cap` cut is about to drop.
     """
     fresh: list[str] = []
     for row in data.get("matches") or []:
@@ -458,7 +497,10 @@ def _collect(tab: str, browser: str, cap: int, chars: int,
     reads, scrolls, stall = 1, 0, 0
     stop = ""
     if not seen:
-        # an empty channel, or a wall: the wheel has nothing to load
+        # nothing mounted even though a container did: the wheel has nothing
+        # to load, so stop instead of spending the budget on it. This never
+        # reaches a reply — `_channel` refuses an empty walk (`no-match`) —
+        # which is why the note below does not name it among the causes.
         stop = "no-messages"
     while not stop and len(seen) < cap and scrolls < max_scrolls:
         try:
@@ -490,16 +532,19 @@ def _collect(tab: str, browser: str, cap: int, chars: int,
         # (newest) is what a capped reply keeps — and cutting is truncation
         truncated = True
     rows = sorted(seen.values(), key=lambda row: _ts(row["ts"]))
-    if len(rows) > cap:
-        rows = rows[-cap:]
     # Slack renders the author once per group: a message whose sender cell is
-    # empty belongs to the last name above it, carried forward in ts order
+    # empty belongs to the last name above it, carried forward in ts order —
+    # on the FULL list, because the group's header is the OLDEST row of the
+    # group and `--cap` cuts from the oldest end: a name carried after the cut
+    # would lose the header that is right there in what the walk loaded
     previous = ""
     for row in rows:
         if row["sender"]:
             previous = row["sender"]
         else:
             row["sender"] = previous
+    if len(rows) > cap:
+        rows = rows[-cap:]
     if not stop:
         stop = "cap" if len(rows) >= cap else "max-scrolls"
     # an exhausted read is the whole channel window; anything else stopped
@@ -551,7 +596,8 @@ def _channel(args: list[str], browser: str) -> dict:
              "slack channel: --timeout must be between 0 and 3600 seconds, "
              f"got {timeout_flag!r}")
 
-    stub = _open(url, tab, browser)
+    stub, address = _open(url, tab, browser)
+    _landed("slack channel", address)
     plugin_api.wait("element", selector=MESSAGE, timeout=timeout,
                     tab=tab, browser=browser)
     messages, loading, truncated = _collect(tab, browser, cap, chars,
@@ -572,8 +618,8 @@ def _channel(args: list[str], browser: str) -> dict:
                  "across the timeline's recycled window: the NEWEST are the "
                  "end of the list, `--cap` bounds the reply, and "
                  "`loading.stop` says why the walk stopped (`cap`, "
-                 "`exhausted`, `max-scrolls`, `no-messages`, "
-                 "`scroll-failed`); Slack renders the author once per group, "
+                 "`exhausted`, `max-scrolls`, `scroll-failed`); Slack renders "
+                 "the author once per group, "
                  "so a name-less message here carries the one above it — a "
                  "LEADING empty sender means the group's header sits above "
                  "what the walk loaded"),
@@ -618,7 +664,8 @@ def _message(args: list[str], browser: str) -> dict:
              "slack message: --timeout must be between 0 and 3600 seconds, "
              f"got {timeout_flag!r}")
 
-    stub = _open(url, tab, browser)
+    stub, address = _open(url, tab, browser)
+    _landed("slack message", address)
     # the wait IS the render gate: the container that carries this ts is the
     # one element the rest of the call depends on
     plugin_api.wait("element",

@@ -12,6 +12,11 @@ temporary name renamed into place, so a failed write never replaces a good
 file. Those rules lived in `lib/images.py` until the second writer needed them;
 they live here now, parameterised by the verb that names them in its refusals.
 
+`claim` is the ONE exception to "the open is the check": a verb whose work
+comes BEFORE the write needs to know the target is taken while refusing is
+still free (`tab js` would otherwise run the expression first). It is a probe,
+never the authority — `write_atomic` still opens exclusively.
+
 `write_atomic` answers the bytes ON DISK, not the bytes handed in: the one
 caller that must not merely assume its payload landed (`tab js --out`, whose
 whole point is a value too big to cross the reply) compares that size against
@@ -29,7 +34,7 @@ from browser_control.lib.errors import (
     fail,
 )
 
-__all__ = ["output_path", "write_atomic"]
+__all__ = ["claim", "output_path", "write_atomic"]
 
 
 def output_path(verb: str, path: str, *, suffix: str = "",
@@ -42,7 +47,10 @@ def output_path(verb: str, path: str, *, suffix: str = "",
     """
     expanded = os.path.expanduser(str(path or ""))
     if not expanded:
-        fail(ERR_BAD_ARGS, f"{verb}: --out needs a PATH")
+        # flag-agnostic: the two writers spell their flag differently (`--out`
+        # and PATH), so this names neither — a refusal that named `--out` would
+        # be a lie when `tab screenshot` reached it
+        fail(ERR_BAD_ARGS, f"{verb}: a PATH is required")
     if not os.path.isabs(expanded):
         fail(ERR_BAD_ARGS,
              f"{verb}: {path!r} must be an absolute path — this tool writes "
@@ -59,6 +67,21 @@ def output_path(verb: str, path: str, *, suffix: str = "",
         fail(ERR_BAD_ARGS,
              f"{verb}: {parent} is not a directory — create it first")
     return target
+
+
+def claim(verb: str, target: str, force: bool) -> None:
+    """Refuse a target that already exists, BEFORE the caller's work runs.
+
+    `write_atomic`'s `O_EXCL` open stays the authoritative answer — this probe
+    exists only to fix ORDER: a verb that does something irreversible before
+    writing (`tab js` runs the caller's expression) must learn the target is
+    taken first, or it reports `file-exists` after the page has already acted.
+    A file that appears in between is still refused by the open itself, so the
+    race this loses costs a second attempt, never a clobber.
+    """
+    if not force and os.path.exists(target):
+        fail(ERR_FILE_EXISTS,
+             f"{verb}: {target} already exists — pass --force to replace it")
 
 
 def write_atomic(verb: str, target: str, data: bytes, force: bool) -> int:

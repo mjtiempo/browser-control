@@ -209,6 +209,15 @@ def cmd_tab_js(rest: list[str], browser: str) -> dict:
         fail(ERR_BAD_ARGS,
              f"tab js: one expression at most, got {len(rest)} — the tab is "
              "--tab SPEC")
+    if out is not None and not str(out).strip():
+        # a flag given an EMPTY value is a MISTAKE, not an absent flag (the
+        # rule `_parse_globals` states and every other value-carrying flag
+        # keeps): without this the gate reads `tab js --out` and charges `file`
+        # for a call that then writes nothing — `tab screenshot` refuses the
+        # same shape, and `--force` alone is refused just below
+        fail(ERR_BAD_ARGS,
+             "tab js: --out needs a FILE (an absolute path) — leave the flag "
+             "out to read the value from the reply")
     if force and out is None:
         # a flag nobody reads is the shape the rest of this tool refuses
         # instead of ignoring: `--force` exists to overwrite a FILE

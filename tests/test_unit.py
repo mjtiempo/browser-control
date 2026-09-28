@@ -1183,6 +1183,11 @@ def t_cli_dom_grammar() -> None:
     # running in a hermetic check), which is the property being held here
     for argv in (["tab", "js"], ["tab", "js", "a", "b"],
                  ["tab", "js", "--tab", "id:1"], ["tab", "js", "1", "--force"],
+                 # an EMPTY `--out` is a mistake, not an absent flag: the gate
+                 # already reads `tab js --out` and charges `file` for it, so
+                 # letting it through would mean a refusal for a call that
+                 # writes nothing (and a silent no-op when no policy runs)
+                 ["tab", "js", "1", "--out", ""],
                  ["tab", "find"],
                  ["tab", "find", "a", "--selector", "b"],
                  ["tab", "find", "a", "b"], ["tab", "text", "extra"],
@@ -3174,11 +3179,13 @@ def t_slack_plugin_offline() -> None:
 
     def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
         navs.append(url)
-        return {"ok": True, "moved": True}
+        # `nav`'s own shape, read-back included: the plugin checks the address
+        # the TAB reports, so a double that omits it would skip that check
+        return {"ok": True, "moved": True, "url": url, "url_read": url}
 
     def fake_wait(mode: str, selector: str | None = None,
                   expr: str | None = None, timeout: float = 15.0,
-                  idle_ms: int = 500, tab: str = "", browser: str = "",
+                  idle_ms: float = 500, tab: str = "", browser: str = "",
                   match: str | None = None) -> dict:
         waits.append((mode, selector, match))
         if mode == "url":
@@ -3391,11 +3398,13 @@ def t_slack_channel_plugin_offline() -> None:
 
     def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
         navs.append(url)
-        return {"ok": True, "moved": True}
+        # `nav`'s own shape, read-back included: the plugin checks the address
+        # the TAB reports, so a double that omits it would skip that check
+        return {"ok": True, "moved": True, "url": url, "url_read": url}
 
     def fake_wait(mode: str, selector: str | None = None,
                   expr: str | None = None, timeout: float = 15.0,
-                  idle_ms: int = 500, tab: str = "", browser: str = "",
+                  idle_ms: float = 500, tab: str = "", browser: str = "",
                   match: str | None = None) -> dict:
         waits.append((mode, match))
         return {"ok": True}
@@ -3462,6 +3471,168 @@ def t_slack_channel_plugin_offline() -> None:
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
             assert phrase in err, (argv, err)
         assert navs == [link], navs
+    finally:
+        for name, value in real.items():
+            setattr(plugin_api, name, value)
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_slack_channel_carries_the_author_across_the_cap_cut() -> None:
+    """`slack channel` keeps a `--cap` cut from dropping a group's header.
+
+    Slack renders the author once per group, so an empty sender cell means
+    "the name ABOVE this row" — and `--cap` cuts from the oldest end, which
+    lands inside a group just as often as on a boundary. Carrying the name
+    after the cut would hand back a run of blank senders for a header the
+    walk had already loaded; carrying before it gives every kept row the name
+    it was rendered under.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    #: ONE window, newest first: Alice's group of four (its header is the
+    #: OLDEST row) with Bob starting a new group above it
+    rows = [{"ts": "1790000104.000000", "sender": "Bob", "text": "newest"},
+            {"ts": "1790000103.000000", "sender": "", "text": "third"},
+            {"ts": "1790000102.000000", "sender": "", "text": "second"},
+            {"ts": "1790000101.000000", "sender": "", "text": "first"},
+            {"ts": "1790000100.000000", "sender": "Alice", "text": "oldest"}]
+    wheels: list[object] = []
+    reads: list[dict] = []
+
+    def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+        return {"ok": True, "moved": True, "url": url, "url_read": url}
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 15.0,
+                  idle_ms: float = 500, tab: str = "", browser: str = "",
+                  match: str | None = None) -> dict:
+        return {"ok": True}
+
+    def fake_scroll(by: int | None = None, edge: str | None = None,
+                    text: str | None = None, selector: str | None = None,
+                    index: int | None = None, at: str | None = None,
+                    tab: str = "", browser: str = "") -> dict:
+        wheels.append(by)
+        return {"ok": True}
+
+    def fake_extract(each: str = "", fields: list[str] | None = None,
+                     cap: int = 10, chars: int = 1000,
+                     visible: bool = False, unique: str = "",
+                     tab: str = "", browser: str = "") -> dict:
+        reads.append({"cap": cap})
+        return {"ok": True, "truncated": False, "matches": rows}
+
+    real = {name: getattr(plugin_api, name)
+            for name in ("nav", "wait", "scroll", "extract")}
+    plugin_api.nav = fake_nav                        # type: ignore[assignment]
+    plugin_api.wait = fake_wait                      # type: ignore[assignment]
+    plugin_api.scroll = fake_scroll                  # type: ignore[assignment]
+    plugin_api.extract = fake_extract                # type: ignore[assignment]
+    try:
+        link = "https://raventrack.slack.com/archives/C02Q99A8VGS"
+        rc, out, err = run_cli(["slack", "channel", link, "--cap", "4",
+                                "--max-scrolls", "0"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        # five loaded, four kept: the cut fell between 100 and 101, INSIDE
+        # Alice's group — the header it dropped is what carries the three
+        # rows that survived it
+        assert [m["sender"] for m in data["messages"]] == [
+            "Alice", "Alice", "Alice", "Bob"], data["messages"]
+        assert [m["text"] for m in data["messages"]] == [
+            "first", "second", "third", "newest"], data["messages"]
+        assert data["truncated"] is True, data
+        # one mounted window already met the cap, so the wheel never turned
+        assert wheels == [], wheels
+        assert data["loading"] == {"reads": 1, "scrolls": 0, "max_scrolls": 0,
+                                   "stop": "cap", "stub_clicked": False}, data
+        assert len(reads) == 1, reads
+    finally:
+        for name, value in real.items():
+            setattr(plugin_api, name, value)
+        if keep is None:
+            os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
+        else:
+            os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = keep
+
+
+def t_slack_refuses_a_tab_that_is_not_slack() -> None:
+    """`slack channel` reads only a tab whose ADDRESS is Slack's own.
+
+    The input permalink is already ruled Slack before anything is opened, so
+    this fires on the tab's own reported address — a redirect off the domain,
+    or a nav that cannot say where it landed. It fails CLOSED: a reply that
+    said `ok` here would be another site's DOM wearing a Slack channel id,
+    which no later check could tell apart from the authenticated read.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    keep = os.environ.get("BROWSER_CONTROL_PLUGIN_PATH")
+    os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
+    from browser_control import plugin_api  # noqa: PLC0415
+
+    seen: dict[str, str] = {}
+    reads: list[dict] = []
+
+    def make_nav(address: object) -> Any:
+        def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
+            seen["nav"] = url
+            if address is None:  # a nav that reports no address at all
+                return {"ok": True, "moved": True}
+            return {"ok": True, "moved": True, "url": url, "url_read": address}
+
+        return fake_nav
+
+    def fake_wait(mode: str, selector: str | None = None,
+                  expr: str | None = None, timeout: float = 15.0,
+                  idle_ms: float = 500, tab: str = "", browser: str = "",
+                  match: str | None = None) -> dict:
+        return {"ok": True}
+
+    def fake_extract(each: str = "", fields: list[str] | None = None,
+                     cap: int = 10, chars: int = 1000,
+                     visible: bool = False, unique: str = "",
+                     tab: str = "", browser: str = "") -> dict:
+        reads.append({"cap": cap})
+        return {"ok": True, "truncated": False,
+                "matches": [{"ts": "1790000100.000000", "sender": "Alice",
+                             "text": "hello"}]}
+
+    link = "https://raventrack.slack.com/archives/C02Q99A8VGS"
+    real = {name: getattr(plugin_api, name)
+            for name in ("nav", "wait", "scroll", "extract")}
+    try:
+        plugin_api.wait = fake_wait                  # type: ignore[assignment]
+        plugin_api.extract = fake_extract            # type: ignore[assignment]
+        # the tab went somewhere else entirely
+        plugin_api.nav = make_nav("https://example.com/auth?next=%2Fclient")
+        rc, _out, err = run_cli(["slack", "channel", link])
+        assert rc == 2 and "nav-not-verified" in err, (rc, err)
+        assert "https://example.com/auth?next=%2Fclient" in err, err
+        assert "not a Slack client" in err, err
+        # …and a nav that reports NOTHING is refused by the same rule: no
+        # `url_read` and no `url`, so there is no address to check at all
+        plugin_api.nav = make_nav(None)
+        rc, _out, err = run_cli(["slack", "channel", link])
+        assert rc == 2 and "nav-not-verified" in err, (rc, err)
+        assert "an address the tab would not report" in err, err
+        # neither refusal reached a page: the walk never started
+        assert reads == [], reads
+        # the address the plugin asked for is the one it was given
+        assert seen["nav"] == link, seen
+        # a tab that DID land on Slack reads normally
+        plugin_api.nav = make_nav(link)
+        rc, out, err = run_cli(["slack", "channel", link, "--cap", "1",
+                                "--max-scrolls", "0"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert [m["sender"] for m in data["messages"]] == ["Alice"], data
+        assert len(reads) == 1, reads
     finally:
         for name, value in real.items():
             setattr(plugin_api, name, value)
@@ -5978,6 +6149,19 @@ def t_x_plugin_offline() -> None:
         dom.wait = real_wait                      # type: ignore[assignment]
         dom.extract = real_extract                # type: ignore[assignment]
         dom.scroll = real_scroll                  # type: ignore[assignment]
+        # `plugin_api` binds these names AT IMPORT, so a seam first imported
+        # while these fakes were up keeps them: without putting it back the
+        # wheel refusal above stays installed for every later plugin that
+        # scrolls (the readers that fake their own scroll hid the leak)
+        seam = sys.modules.get("browser_control.plugin_api")
+        if seam is not None:
+            for name, fake, real in (
+                    ("nav", fake_nav, real_nav),
+                    ("wait", fake_wait, real_wait),
+                    ("extract", fake_extract, real_extract),
+                    ("scroll", fake_scroll, real_scroll)):
+                if getattr(seam, name, None) is fake:
+                    setattr(seam, name, real)
         if keep is None:
             os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
         else:
@@ -7621,6 +7805,10 @@ def t_js_out_writes_the_value_and_names_its_refusals() -> None:
             assert page.caps[-1] == cdp_rpc.EVAL_RESULT_CAP, page.caps
             # the sink's own rules: no clobber without --force…
             refusal(lambda: dom.js("1", out=target), "file-exists")
+            # …and the refusal lands BEFORE the expression runs: the page must
+            # not be touched to learn the target is taken, because `tab js` can
+            # place an order no file refusal can undo
+            assert len(page.caps) == 2, page.caps
             again = dom.js("1", out=target, force=True)
             assert again["verified"] is True and "value" not in again, again
             # …and the page's `undefined` is still named, while the file —
@@ -7629,6 +7817,10 @@ def t_js_out_writes_the_value_and_names_its_refusals() -> None:
             undefined = os.path.join(tmp, "undefined.json")
             undef = dom.js("undefined", out=undefined)
             assert undef["value_type"] == "undefined", undef
+            # `value_omitted: true` beside a `value` would contradict itself:
+            # verbs.md promises the sink reply carries `path`/`bytes`/
+            # `value_omitted` INSTEAD of `value`, so the type alone is named
+            assert "value" not in undef, undef
             with open(undefined, encoding="utf-8") as handle:
                 assert json.load(handle) is None
             for bad in ("rel.json", tmp, os.path.join(tmp, "nope", "x.json")):
@@ -7659,10 +7851,26 @@ def t_a_misread_flag_hints_at_the_verb_usage() -> None:
                 (["page", "read", "https://a/", "--depth", "2"],
                  "usage: page read URL..."),
                 (["slack", "message", "--depth", "2"],
-                 "usage: slack message PERMALINK")):
+                 "usage: slack message PERMALINK"),
+                # a line that SPELLS two calls must place the first one too:
+                # `tab back|forward` puts `back|forward` in the second token
+                (["tab", "back", "--bogus"],
+                 "usage: tab back|forward [--tab SPEC]")):
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
             assert phrase in err, (argv, err)
+        # …and the SECOND spelling of such a line must get the line as well,
+        # never the generic pointer: `tab forward` (its `|` is inside a token)
+        # and `slack channel` (the plugin's one `usage` field carries both) are
+        # the ones that used to fall through
+        for argv in (["tab", "back", "--bogus"],
+                     ["tab", "forward", "--bogus"],
+                     ["slack", "channel", "--depth", "2"]):
+            rc, _out, err = run_cli(argv)
+            assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+            assert "usage:" in err, (argv, err)
+            assert "browser-control-cli --help lists every verb" not in err, \
+                (argv, err)
         # argv is not what went wrong here, so nothing is appended
         for argv in (["tab", "js"],
                      ["tab", "wait", "--for", "load", "--timeout", "0"]):
@@ -8904,6 +9112,10 @@ def main() -> int:
         ("page plugin reads a list in one call", t_page_plugin_offline),
         ("slack plugin reads a permalink offline", t_slack_plugin_offline),
         ("slack plugin reads a channel window", t_slack_channel_plugin_offline),
+        ("the channel's cap cut keeps a group's author",
+         t_slack_channel_carries_the_author_across_the_cap_cut),
+        ("slack reads only a tab whose address is Slack's",
+         t_slack_refuses_a_tab_that_is_not_slack),
         ("js --out writes the value to a file",
          t_js_out_writes_the_value_and_names_its_refusals),
         ("a misread flag hints at the verb usage",

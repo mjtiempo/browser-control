@@ -20,12 +20,15 @@ One verb per process. **stdout**: exactly one JSON object. **stderr**:
   select, `length_after` after insert/type, `moved` after nav, `visibility`
   after activate, the PNG's own dimensions after screenshot.
 - `verified: false` is honest, not a failure: `tab press` and `tab js` cannot
-  know the page's reaction — read the effect with `tab text`/`tab info`.
+  know the page's reaction — read the effect with `tab text`/`tab info`. The
+  one exception is `tab js --out FILE`, whose `verified: true` is the FILE's
+  own byte count read back; there is no value in that reply to trust.
 - A refusal names the cause and, when known, the fix. **Branch on the code**,
   not on the message text.
 - For DOM verbs the oracle is the page's own JavaScript. The page-independent
   oracles are the screenshot's PNG bytes, `/proc` checks, and CDP protocol
-  errors. `verified: true` means "the page says so".
+  errors. `verified: true` means "the page says so" — except `tab js --out`,
+  where it is the written FILE's own byte count, nothing the page claimed.
 
 ## When to use this
 
@@ -231,7 +234,9 @@ browser-control-cli --allow read tab text
 ```
 
 - `tab js` carries `write`+`code` (either `--deny write` or `--deny code`
-  stops it); `tab wait --for js` carries `code`+`write` too, so either deny
+  stops it) and `tab js --out FILE` carries `file` on top of those, so
+  `--deny file` stops the `--out` form while plain `tab js` still runs;
+  `tab wait --for js` carries `code`+`write` too, so either deny
   stops it.
 - `tab extract` is `read` only — a `--deny code` session can still extract.
 - `tab screenshot` is `read`+`file`; `tab upload` and `profile seed` are

@@ -251,7 +251,9 @@ def js(expression: str, tab: str = "", browser: str = "", out: str = "",
 
     This is the escape hatch, and it can WRITE (it is resolved like one, so it
     needs a browser this CLI manages or has attached). The reply says
-    `verified: false` rather than pretending the value means something, and
+    `verified: false` rather than pretending the value means something — the
+    one exception is `--out`, whose `verified: true` vouches only for the
+    WRITE (the file's own size read back) and never for the value. Either way
     the value is the page's OWN (`raw=True`): a string that parses as JSON is
     still that string, where this CLI's internal probes stringify on purpose
     and keep the decode. Structure still arrives — `returnByValue` serializes
@@ -264,10 +266,12 @@ def js(expression: str, tab: str = "", browser: str = "", out: str = "",
     default cap (the rule is stated with `PAGE_BOUNDED_CAP` above). The page's
     `undefined` is its OWN value and is reported as such: `rpc._value_of`
     answers the `UNDEFINED` sentinel for it, and a sentinel that is not JSON
-    would break the one-object reply, so it rides as `value: null` PLUS
-    `value_type: "undefined"` — every other value keeps today's exact shape
-    (`{"value": value}`), and `null` stays `{"value": null}` (a review found
-    the two indistinguishable).
+    would break the one-object reply, so the reply-shaped path rides it as
+    `value: null` PLUS `value_type: "undefined"` — every other value keeps
+    today's exact shape (`{"value": value}`), and `null` stays
+    `{"value": null}` (a review found the two indistinguishable). The `--out`
+    reply carries `value_type` ALONE: it names what the page answered without
+    putting a `value` beside its own `value_omitted: true`.
 
     `--out FILE` is the SINK the reply cap never had: the value is written to
     the file as JSON and the reply carries `path`/`bytes` instead of the value,
@@ -282,6 +286,11 @@ def js(expression: str, tab: str = "", browser: str = "", out: str = "",
     if not expr:
         fail(ERR_BAD_ARGS, "tab js: an EXPRESSION is required")
     target = sink.output_path("tab js", out) if out else ""
+    if target:
+        # the target is settled BEFORE the page is touched: the expression can
+        # place an order, write localStorage, push history — work a
+        # `file-exists` refusal cannot undo, so it must not be discovered after
+        sink.claim("tab js", target, force)
     page = _pkg.Tab.open(tab, browser, for_write=True)
     row, tab_row = page.row, page.tab_row
     with page.session() as session:
@@ -312,8 +321,13 @@ def js(expression: str, tab: str = "", browser: str = "", out: str = "",
                  "verified": False, "note": "evaluated, not interpreted",
                  "browser": browser_lib.brief(row)}
     if value is UNDEFINED:
-        reply["value"] = None
+        # the page's `undefined` is not a JSON value: the type is always named,
+        # and the reply-shaped path swaps the sentinel for null beside it. The
+        # sink path carries NO value — `value_omitted: true` and a `value` would
+        # contradict each other, which is what `verbs.md` promises it does not
         reply["value_type"] = "undefined"
+        if not target:
+            reply["value"] = None
     return reply
 
 def _idle_window(value: object) -> int:

@@ -7,6 +7,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# opencode plugin deps
+node_modules/
+
 # build artifacts
 build/
 dist/

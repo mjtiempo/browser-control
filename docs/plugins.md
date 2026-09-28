@@ -204,9 +204,11 @@ $ BROWSER_CONTROL_PLUGIN_PATH=$PWD/plugins browser-control-cli \
   `--max-scrolls` default 5 (0 reads the first window only).
 - The reply holds the NEWEST `messages`, oldest first, and `loading.stop` names
   why the walk ended: `cap` (enough read — more may exist), `exhausted` (the
-  client stopped yielding), `max-scrolls` (the budget), `no-messages` (a wall or
-  an empty channel), `scroll-failed`. `truncated` is true whenever the walk
-  stopped short or a read was cut.
+  client stopped yielding), `max-scrolls` (the budget), `scroll-failed`.
+  `truncated` is true whenever the walk stopped short or a read was cut. A
+  channel the client renders no messages for never gets a reply at all: the
+  walk's container wait is what names it (`wait-timeout`), or `no-match` when
+  a container is there and yields nothing.
 - **Slack renders the author once per message group**, so every message after
   the group's first has an empty sender cell. The reply carries the group's
   name down the list; a LEADING empty sender means that group's header sits

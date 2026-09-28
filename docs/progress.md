@@ -1590,7 +1590,7 @@ The items left open after §5.35, each closed with its own measurement:
   extraction can never answer a `--cap` request: the verb extracts, wheels UP,
   extracts again and merges by ts (the X adapter's loop), carries the group's
   author down past the empty sender cells Slack renders for the overflow, and
-  names why the walk stopped (`cap`, `exhausted`, `max-scrolls`, `no-messages`,
+  names why the walk stopped (`cap`, `exhausted`, `max-scrolls`,
   `scroll-failed`). Measured live: `--cap 8` answered 8 from the first mount;
   `--cap 20 --max-scrolls 3` took 2 reads and one wheel and answered 20
   spanning the 8:45 PM error through the 10:43 PM one.

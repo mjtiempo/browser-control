@@ -202,7 +202,10 @@ matches; `--unique FIELD` keeps the first of duplicates.
 
 Run one expression in the page. Capability class `code`; can WRITE, so it needs
 a managed/attached browser. Reply: `value` (the page's OWN value — a string
-that parses as JSON is still that string), `verified: false`, `note`. Use
+that parses as JSON is still that string), `verified: false`, `note` — except
+with `--out`, where there is no `value` in the reply and `verified: true`
+vouches only for the WRITE (the file's own size read back), never for what the
+page answered. Use
 `({a: 1})` for an object; `JSON.stringify(...)` only when the string is wanted.
 A value past the reply cap (64 k) refuses `result-too-large` — never a
 truncation — and `--out FILE` is its sink: the value is written to the file as
