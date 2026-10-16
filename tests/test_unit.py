@@ -9146,7 +9146,7 @@ def t_a_recycled_pid_is_never_taken_for_the_browsers() -> None:
         # exact string compare read a live profile as idle (a review found it)
         spelled = os.path.join(profile, "sub", "..") + os.sep
         on_profile = f"chrome\0--user-data-dir={spelled}\0"
-        other = tempfile.mkdtemp(prefix="bc-other-")
+        other = os.path.join(profile, "other")
         elsewhere = f"chrome\0--user-data-dir={other}\0"
         try:
             proc_lib.main_processes = lambda: [(me, "chrome", on_profile)]
