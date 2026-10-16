@@ -10480,7 +10480,7 @@ def t_remote_attach_records_and_lists() -> None:
     internal key is never a directory. Re-attaching the same endpoint is
     idempotent (`already: true`).
     """
-    with _remote_root() as root:
+    with _remote_root():
         with _FakeRemote(_fp()) as fake:
             rc, out, err = run_cli(["remote", "attach", "--cdp-url",
                                     fake.url])
@@ -10572,6 +10572,29 @@ def t_remote_identity_and_family() -> None:
         with _FakeRemote(_fp(browser="Firefox/120.0")) as fake:
             rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
             assert rc == 2 and "cdp-not-local" in err, (rc, err)
+        # ...and neither is an answer that is not CDP JSON at all: the
+        # endpoint answered, so this is NOT `cdp-unreachable`
+        class _NotJson(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                payload = b"hello, not json"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        not_json = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NotJson)
+        threading.Thread(target=not_json.serve_forever, daemon=True).start()
+        try:
+            rc, _out, err = run_cli([
+                "remote", "attach", "--cdp-url",
+                f"http://127.0.0.1:{not_json.server_address[1]}"])
+            assert rc == 2 and "cdp-not-local" in err, (rc, err)
+        finally:
+            not_json.shutdown()
+            not_json.server_close()
         # a port nothing answers on is `cdp-unreachable`
         rc, _out, err = run_cli(["remote", "attach", "--cdp-url",
                                  f"http://127.0.0.1:{_free_port()}"])
@@ -10646,6 +10669,13 @@ def t_remote_isolation() -> None:
             assert rc == 2 and "no-browser" in err, (rc, err)
             rc, _out, err = run_cli(["tab", "text", "--profile", key])
             assert rc == 2 and "ERR[cdp-unreachable]" in err, (rc, err)
+            # a DEAD remote endpoint names the endpoint and the remote fix —
+            # never the flat "run open", which points at the wrong machine
+            fake_url = fake.url
+            fake.shutdown()
+            rc, _out, err = run_cli(["remote", "tab", "text"])
+            assert rc == 2 and "ERR[cdp-unreachable]" in err, (rc, err)
+            assert fake_url in err and "remote list" in err, (rc, err)
             # ...and a lifecycle/profile verb never treats the key as a
             # profile: `open` would create the directory, a profile verb
             # would walk, copy or wipe it
@@ -10837,7 +10867,9 @@ def t_remote_cli_grammar() -> None:
         assert phrase in err, (argv, err)
     # a global scope cannot ride on a remote call: one endpooint per call
     with _remote_root():
-        rc, _out, err = run_cli(["--profile", "/tmp/x", "remote", "info"])
+        rc, _out, err = run_cli(["--profile",
+                                 os.path.join(tempfile.gettempdir(), "x"),
+                                 "remote", "info"])
         assert rc == 2 and "--cdp-url" in err, (rc, err)
         rc, _out, err = run_cli(["--browser", "chrome", "remote", "list"])
         assert rc == 2 and "--cdp-url" in err, (rc, err)

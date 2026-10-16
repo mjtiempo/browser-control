@@ -1,6 +1,10 @@
 # Remote CDP over a tunnel — plan (draft)
 
-Status: **DRAFT for review. Not implemented, not decided.**
+Status: **DELIVERED** (revision 3). Implemented on the `remote-cdp` branch;
+`docs/progress.md` §0.1 records what exists and the live evidence. The design
+below is the one that shipped — the `remote` command group, the
+fingerprint oracle at the connection seam, and the binding that keeps the flat
+surface blind to remote endpoints.
 Revision 3: remote is a **command group**. Every remote action is spelled
 `browser-control-cli remote …`, and the flat surface (`open`, `close`, `list`,
 `info`, `attach`, `detach`, `tab`, `profile`) never addresses a remote browser.
@@ -260,6 +264,12 @@ listener is `cdp-unreachable`, not an identity change).
 | M2 | The binding + the `EndpointGuard` seam (per-connection fingerprint, `verify_port_owner` coverage) + `remote tab` delegation + isolation + `remote close`/`remote-path` refusals | Hermetic 3–7, 9, 10, 13 |
 | M3 | `remote list` running semantics, `remote tab close` caveat, audit, policy review, docs + skills | Docs updated in the same change; the docs↔code sync check the microvm repo uses (verbs + codes) adapted here |
 | M4 | Live battery + microVM acceptance + `docs/progress.md` + remove "remote/forwarded CDP" from plan.md §7 | Tier 3 + `m6-remote-cdp.sh` |
+
+All four milestones are delivered. M4's own acceptance ran on 2026-10-17
+against a local Chromium (Tier 3, `remote attach` to a by-hand browser) and
+the omarchy4 microVM over `ssh -L`; the battery's remote check is committed.
+The microVM script (`m6-remote-cdp.sh`) lives in the microvm repo; its flow
+was executed by hand there and is recorded in `docs/progress.md` §0.1.
 
 ## 10. Open questions (with this revision's answers)
 

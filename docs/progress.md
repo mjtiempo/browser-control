@@ -113,6 +113,30 @@ what exists:
   including the port-only path (`tab frames`, `tab wait`); selection/detach;
   the declared surface (delegated `remote tab X` → `tab X`, gate, `selftest`,
   help) and argv.
+- **Live evidence (Tier 3, local).** A Chromium started by hand outside the
+  managed root and attached by `remote attach --cdp-url`: attach/list, a flat
+  census with no remote row, `info --profile <key>` refusing `not-managed`,
+  `nav`/`text`/`wait`/`js`/`screenshot` (a verified 780×437 PNG) and
+  `js --out`, `remote-path`/`remote-not-closable`, a killed endpoint
+  (`cdp-unreachable`), and the port taken by a listener answering a different
+  fingerprint → `running: false` + `cdp-identity-changed` with the drive
+  refused and a one-call re-attach refused.
+- **Live evidence (microVM).** The omarchy4 VM (Chromium 152; the plan's
+  `192.168.122.122` is stale on this host — the guest answers on
+  `.222`): `ssh -N -L 9444:127.0.0.1:9222`, attach, nav to a guest fixture,
+  text `before` → click `Go` → `after` (`changed: true`), focus/insert into an
+  input, `tab js` read the value back, screenshot written HERE (780×437), the
+  tunnel killed → `cdp-unreachable`, the port answered by a swapped listener
+  → `cdp-identity-changed`, detach.
+- **The live battery** gained its Tier-3 check
+  (`c_remote_attaches_and_drives_a_tunnel_shaped_endpoint`), which also pins
+  the binding's one-row resolution (the local twin of the same listener is
+  suppressed for the call) and the swapped-fingerprint refusal. On this
+  desktop the battery is flaky in five checks unrelated to remote
+  (`Input.dispatchMouseEvent` / `Page.captureScreenshot` timing out against
+  Chrome 155); the SAME five fail on the pre-remote commit `a74e19f`, so that
+  is a pre-existing Chrome-155/desktop issue, recorded here rather than
+  papered over.
 
 ## 1. What exists
 

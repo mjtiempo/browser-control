@@ -57,10 +57,21 @@ def _no_drive(browser: str = "", reason: str = "") -> None:
 
     "No drivable browser" is honest for an unscoped call. A scoped one asked
     about ONE instance, so the refusal names that instance and the command that
-    would start it; a call narrowed by name gets the name. An endpoint that
-    ANSWERED but did not verify is a different refusal (`cdp-not-local`), which
-    the callers check first — this one is for nothing being there at all.
+    would start it; a call narrowed by name gets the name. A BOUND remote call
+    names the remote endpoint instead: there is no local browser to start, and
+    "run `open`" would point at the wrong machine. An endpoint that ANSWERED
+    but did not verify is a different refusal (`cdp-not-local` /
+    `cdp-identity-changed`), which the callers check first — this one is for
+    nothing being there at all.
     """
+    remote = _pkg.remote_active()
+    if remote:
+        fail(ERR_CDP_UNREACHABLE,
+             f"the remote endpoint {remote.get('url')} did not answer"
+             + (f" ({reason})" if reason else "")
+             + " — check the tunnel and the browser where it runs, then "
+             "`remote list` (`remote attach` again if its fingerprint "
+             "changed)")
     scoped = _pkg._scoped()
     asked = [part for part in ((f"on {scoped}" if scoped else ""),
                                (f"matching {browser!r}" if browser else ""))

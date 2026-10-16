@@ -256,6 +256,15 @@ def browsers() -> list[dict]:
     # grammar's default, not a filter each verb must remember.
     binding = remote_lib.active()
     if binding:
+        # The binding RESOLVES that endpoint for this call: a /proc row naming
+        # the same listener would be a second name for one browser. The
+        # Tier-3 shape (a local Chromium attached by `--cdp-url`) showed it as
+        # double vision in `remote tab list` and as `tab-ambiguous` for any
+        # spec matching its tab; the flat surface has no binding, so its
+        # census is unchanged.
+        port = as_int(binding.get("port"))
+        rows = [r for r in rows
+                if as_int(endpoint_of(r).get("port")) != port]
         rows.append(_remote_row(binding))
     # ours first, then the attached ones, then whatever can be driven, by pid
     return sorted(rows, key=lambda r: (not r["managed"], not r["attached"],

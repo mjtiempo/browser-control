@@ -2065,6 +2065,125 @@ def c_close_by_name_stops_a_foreign_browser() -> str:
     return f"foreign pid {proc.pid} stopped BY NAME, tabs guard and all"
 
 
+def c_remote_attaches_and_drives_a_tunnel_shaped_endpoint() -> str:
+    """`remote attach` drives a browser the kernel cannot identify.
+
+    The Tier-3 shape the plan names: a browser started by hand outside the
+    managed root on its own port. The census can see the PROCESS, but the
+    oracle a flat drive uses (whose port is it?) is exactly what a tunnel
+    breaks — so a flat drive by URL must not exist, `remote attach` records
+    the fingerprint the endpoint reports about itself, and every drive runs
+    under the binding. The endpoint is ALSO a live local process here, which
+    pins the binding's one-row resolution: the local twin is suppressed for
+    the call, so `remote tab` is never `tab-ambiguous`. Finally a swapped
+    listener on the same port answers a different fingerprint and refuses
+    `cdp-identity-changed` until the record is detached.
+    """
+    path = browser_lib.binary()
+    profile = fixture_profile()
+    proc = subprocess.Popen(
+        [path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
+         "--no-first-run", "--no-default-browser-check", "about:blank"],
+        start_new_session=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    fake: Any = None
+    try:
+        port, deadline = 0, time.time() + 40
+        while time.time() < deadline:
+            try:
+                with open(Path(profile, "DevToolsActivePort")) as handle:
+                    port = int(handle.readline().strip() or 0)
+            except (OSError, ValueError):
+                port = 0
+            if port and listening(port):
+                break
+            time.sleep(0.5)
+        assert port, f"the by-hand browser never published a port: {profile}"
+        url = f"http://127.0.0.1:{port}"
+        version = http_json(port, "/json/version")
+        # the flat verbs have no remote spelling at all
+        refuses("bad-args", "attach", "--cdp-url", url)
+        # ...and `remote attach` records the endpoint and its fingerprint
+        reply = ok_json("remote", "attach", "--cdp-url", url)
+        assert reply["attached"] is True and reply["already"] is False, reply
+        assert reply["url"] == url, reply
+        assert reply["product"] == version["Browser"], (reply, version)
+        assert reply["fingerprint"]["browser"] == version["Browser"], reply
+        listed = ok_json("remote", "list")
+        assert listed["count"] == 1, listed
+        assert listed["remotes"][0]["running"] is True, listed
+        # the flat census carries no remote row
+        assert all(not row.get("remote")
+                   for row in ok_json("list")["browsers"]), "a remote row leaked"
+        # drive the local fixture through the remote noun, in ONE row
+        nav = ok_json("remote", "tab", "nav", f"{base_url()}/dom")
+        assert nav["url"].startswith(base_url()), nav
+        text = ok_json("remote", "tab", "text")
+        assert "Dom Fixture Heading" in text["text"], text["text"][:80]
+        assert ok_json("remote", "tab", "list")["count"] == 1, \
+            "the local twin was not suppressed under the binding"
+        shot = os.path.join(ROOT, "remote-shot.png")
+        shot_reply = ok_json("remote", "tab", "screenshot", shot)
+        assert shot_reply["verified"] is True, shot_reply
+        assert Path(shot).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        refuses("remote-path", "remote", "tab", "upload", __file__)
+        refuses("remote-not-closable", "remote", "close")
+        # stop the browser by hand: the tunnel is gone
+        os.kill(proc.pid, signal.SIGTERM)
+        deadline = time.time() + 10
+        while time.time() < deadline and listening(port):
+            time.sleep(0.2)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        dead = ok_json("remote", "list")["remotes"][0]
+        assert dead["running"] is False and dead["reachable"] is False, dead
+        refuses("cdp-unreachable", "remote", "tab", "text")
+        # the port is taken by a listener answering a DIFFERENT fingerprint:
+        # nothing is driven, and a one-call re-bless is refused too
+        class SwappedVersion(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = ({"Browser": "HeadlessChrome/999.0.0.0",
+                         "Protocol-Version": "9.9",
+                         "User-Agent": "spoofed", "V8-Version": "0"}
+                        if self.path == "/json/version" else [])
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        fake = http.server.ThreadingHTTPServer(("127.0.0.1", port),
+                                               SwappedVersion)
+        threading.Thread(target=fake.serve_forever, daemon=True).start()
+        swapped = ok_json("remote", "list")["remotes"][0]
+        assert swapped["running"] is False, swapped
+        assert swapped["reachable"] is True and swapped["verified"] is False, \
+            swapped
+        refuses("cdp-identity-changed", "remote", "tab", "text")
+        refuses("cdp-identity-changed", "remote", "attach", "--cdp-url", url)
+        detached = ok_json("remote", "detach", "--cdp-url", url)
+        assert detached["detached"] == [url], detached
+        assert ok_json("remote", "list")["count"] == 0
+        return (f"attached {reply['product']}, drove the fixture, refused a "
+                "swapped fingerprint, detached")
+    finally:
+        if fake is not None:
+            fake.shutdown()
+            fake.server_close()
+        with contextlib.suppress(OSError):
+            os.kill(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        for _ in range(3):
+            shutil.rmtree(profile, ignore_errors=True)
+            if not Path(profile).exists():
+                break
+            time.sleep(0.3)
+
+
 def c_two_instances_by_profile() -> str:
     """Two instances of ONE browser are addressable with `--profile DIR`.
 
@@ -2644,6 +2763,8 @@ CHECKS = (
      c_attach_grants_writes),
     ("a foreign browser can be stopped BY NAME",
      c_close_by_name_stops_a_foreign_browser),
+    ("a hand-started browser is driven through `remote`",
+     c_remote_attaches_and_drives_a_tunnel_shaped_endpoint),
     ("two instances of one browser are addressable",
      c_two_instances_by_profile),
     ("no process is left behind", c_no_leftover_process),

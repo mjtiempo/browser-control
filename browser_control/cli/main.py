@@ -715,7 +715,6 @@ def _run_invocation(args: list[str]) -> int:
             raise ControlError(ERR_UNKNOWN_COMMAND,
                                f"{verb} (have: "
                                + ", ".join(registry.verb_names()) + ")")
-        head = _head_of(rest)
         _authorise(verb, rest, flags)
         if plugin is None:
             reply = handler(rest, browser)
