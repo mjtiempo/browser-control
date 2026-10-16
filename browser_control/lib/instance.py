@@ -22,6 +22,7 @@ from browser_control.lib.errors import (
 from browser_control.lib.paths import (
     expand,
     is_managed,
+    is_remote_key,
     norm,
     profile_dir,
     root,
@@ -60,6 +61,15 @@ class Instance:
         wanted = str(profile or "").strip() or browser_lib.scope()
         if wanted:
             path = expand(wanted)
+            if is_remote_key(path):
+                # a `remote` attachment's internal key: there is no profile
+                # here to walk, copy, start or wipe — the noun that owns it is
+                # `remote` (`remote detach` revokes it)
+                fail(ERR_NOT_MANAGED,
+                     f"{path} is a remote attachment's internal key, not a "
+                     f"profile — `{verb}` manages the profiles this CLI "
+                     "created; `remote detach` is how an attachment goes "
+                     "away")
             if not is_managed(path):
                 fail(ERR_NOT_MANAGED, _outside(path, verb))
         else:

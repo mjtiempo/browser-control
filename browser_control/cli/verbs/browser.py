@@ -161,7 +161,9 @@ def cmd_selftest(rest: list[str], browser: str) -> dict:
                  # being quietly missing from a table nobody re-reads
                  "unclassified": capabilities.unclassified(
                      registry.HANDLERS, {"tab": registry.TAB_SUBCOMMANDS,
-                                "profile": registry.PROFILE_SUBCOMMANDS})},
+                                  "profile": registry.PROFILE_SUBCOMMANDS,
+                                  "remote": registry.REMOTE_SUBCOMMANDS},
+                     delegated={"remote tab": "tab"})},
              "policy": registry.POLICY.describe(),
              "browsers": found}
     reply.update(registry.plugins_report())

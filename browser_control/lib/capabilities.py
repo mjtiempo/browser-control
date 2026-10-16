@@ -54,6 +54,17 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "info": ("read",),
     "attach": ("write",),
     "detach": ("write",),
+    # a REMOTE endpoint: attach/detach are the same consent act for a browser
+    # behind a loopback tunnel, and close is the same refusal it always is —
+    # declared so the answer carries a code instead of `unknown-command`.
+    # Every `remote tab X` deliberately has NO entry here: it resolves to the
+    # SAME action as `tab X` (mode included) through `registry.action_of`, so
+    # the classes live in one table and cannot drift.
+    "remote attach": ("write",),
+    "remote detach": ("write",),
+    "remote close": ("write",),
+    "remote list": ("read",),
+    "remote info": ("read",),
     "selftest": ("read",),
     # tabs: `tab` opens a tab per URL (about:blank included: the verb is the
     # URL path), and `tab nav` navigates
@@ -122,19 +133,27 @@ class Surface:
         return ACTIONS.get(action) or self.plugin_actions.get(action) or ()
 
     def unclassified(self, handlers: dict,
-                     subcommands: dict[str, dict] | None = None) -> list[str]:
+                     subcommands: dict[str, dict] | None = None,
+                     delegated: dict[str, str] | None = None,
+                     ) -> list[str]:
         """The verbs with NO entry — a top-level verb, or a subcommand.
 
         `subcommands` maps a noun to its subcommand table, so one call covers
         every noun the CLI has:
 
             unclassified(HANDLERS, {"tab": TAB_SUBCOMMANDS,
-                                   "profile": PROFILE_SUBCOMMANDS})
+                                   "profile": PROFILE_SUBCOMMANDS,
+                                   "remote": REMOTE_SUBCOMMANDS},
+                         delegated={"remote tab": "tab"})
 
-        Asked at runtime (`selftest` prints the answer) and by the hermetic
-        test, from this one function, so a new verb cannot exist in one place
-        and be missing in the other without both saying so. Plugin verbs are
-        NOT handlers, so they are not part of this question.
+        `delegated` names a `noun sub` whose subcommands are classified by
+        ANOTHER noun's actions ("remote tab" -> "tab"): the classes live in
+        one table, and what this function checks is that the delegation is
+        TOTAL — every `tab` action exists — rather than demanding a second
+        copy that could drift. Asked at runtime (`selftest` prints the answer)
+        and by the hermetic test, from this one function, so a new verb cannot
+        exist in one place and be missing in the other without both saying so.
+        Plugin verbs are NOT handlers, so they are not part of this question.
         """
         missing = [verb for verb in handlers
                    if verb not in ACTIONS
@@ -142,6 +161,13 @@ class Surface:
         for noun, table in (subcommands or {}).items():
             for sub in table:
                 key = f"{noun} {sub}"
+                target = (delegated or {}).get(key)
+                if target is not None:
+                    if not any(action == target
+                               or action.startswith(target + " ")
+                               for action in ACTIONS):
+                        missing.append(key)
+                    continue
                 if not any(action == key or action.startswith(key + " ")
                            for action in ACTIONS):
                     missing.append(key)
@@ -200,9 +226,11 @@ def classes_for(action: str) -> tuple[str, ...]:
 
 
 def unclassified(handlers: dict,
-                 subcommands: dict[str, dict] | None = None) -> list[str]:
+                 subcommands: dict[str, dict] | None = None,
+                 delegated: dict[str, str] | None = None,
+                 ) -> list[str]:
     """`Surface.unclassified`, on the process-wide surface."""
-    return SURFACE.unclassified(handlers, subcommands)
+    return SURFACE.unclassified(handlers, subcommands, delegated)
 
 
 def by_class() -> dict[str, list[str]]:

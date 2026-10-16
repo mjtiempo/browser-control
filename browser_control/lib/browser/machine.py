@@ -18,6 +18,7 @@ from browser_control.lib import browser as _pkg
 from browser_control.lib import (
     cdp,
     )
+from browser_control.lib.browser import remote as remote_lib
 from browser_control.lib.coerce import (
     as_int,
 )
@@ -188,7 +189,7 @@ def browsers() -> list[dict]:
     and failed to verify.
     """
     rows: list[dict] = []
-    attached = attachments_lib.STORE.records()
+    attached = attachments_lib.STORE.records("local")
     # ONE walk, held open for every row below: `endpoint_owner` resolves the
     # profile's pid through `profile_pid`, which reads THIS list
     with census_processes() as procs:
@@ -248,9 +249,56 @@ def browsers() -> list[dict]:
                          "attached": norm(profile) in attached,
                          "headless": is_headless_cmd(cmd, exe),
                          "cdp": endpoint})
+    # The ACTIVE remote binding is ONE synthetic row: `remote tab` runs the
+    # ordinary tab verbs through this census, judged by the fingerprint oracle
+    # (`remote.check`) instead of the kernel. A flat call has no binding, so
+    # the flat surface never sees a remote browser at all — isolation is the
+    # grammar's default, not a filter each verb must remember.
+    binding = remote_lib.active()
+    if binding:
+        rows.append(_remote_row(binding))
     # ours first, then the attached ones, then whatever can be driven, by pid
     return sorted(rows, key=lambda r: (not r["managed"], not r["attached"],
                                        not endpoint_of(r)["verified"], r["pid"]))
+
+
+def _remote_row(binding: dict) -> dict:
+    """The one census row a bound `remote` call runs under.
+
+    Shaped exactly like a /proc row so every consumer (`_narrow`, `_drivable`,
+    `_writable`, `may_write`, the tab verbs) works unchanged: `pid` 0 and `exe`
+    "" because no process on THIS machine is the browser, `managed` false
+    (the key is internal, never a profile), `attached` true (the record is the
+    authorization), `headless` NULL (unknowable — the product is reported
+    instead), and a `cdp` block whose `verified` is the fingerprint verdict,
+    whose `code` is the refusal that verdict earned, and whose `port_from`
+    says the port came from the RECORD, not a file or a cmdline.
+    """
+    key = norm(str(binding.get("profile") or ""))
+    port = as_int(binding.get("port"))
+    live = remote_lib.check(binding)
+    verified = bool(live["verified"])
+    endpoint: dict = {"port": port, "reachable": bool(live["reachable"]),
+                      "verified": verified, "remote": True,
+                      "url": str(binding.get("url") or ""),
+                      "product": str(binding.get("product") or ""),
+                      "port_from": "record",
+                      "reason": str(live["reason"] or ""),
+                      "code": str(live["code"] or "")}
+    if verified:
+        try:
+            endpoint["tabs"] = len(cdp.page_rows_at(port))
+        except ControlError as e:
+            # a remote that died between the probe and this GET is reported,
+            # not fatal — the same rule the /proc rows follow
+            endpoint["tabs"] = None
+            endpoint["reason"] = e.message
+    return {"pid": 0, "exe": "", "path": "", "profile": key,
+            "profile_from": "remote", "managed": False, "attached": True,
+            "headless": None, "remote": True,
+            "product": str(binding.get("product") or ""),
+            "url": str(binding.get("url") or ""),
+            "cdp": endpoint}
 
 def list_browsers() -> dict:
     """`list`: every browser running here, drivable or not.
@@ -346,18 +394,25 @@ class BrowserRow:
     profile_from: str = ""
     managed: bool = False
     attached: bool = False
-    headless: bool = False
+    headless: bool | None = False
     endpoint: Endpoint = Endpoint()
 
     @classmethod
     def from_dict(cls, row: dict) -> BrowserRow:
+        # `headless` is TRI-state: True/False from the process's own cmdline,
+        # and None for a remote row, where no process on this machine can say.
+        # `bool(None)` would report a windowless remote as WINDOWED — the
+        # opposite lie — so the null survives the conversion (the plan's row
+        # shape depends on it).
+        headless = row.get("headless")
         return cls(pid=as_int(row.get("pid")), exe=str(row.get("exe") or ""),
                    path=str(row.get("path") or ""),
                    profile=str(row.get("profile") or ""),
                    profile_from=str(row.get("profile_from") or ""),
                    managed=bool(row.get("managed")),
                    attached=bool(row.get("attached")),
-                   headless=bool(row.get("headless")),
+                   headless=(bool(headless) if headless is not None
+                             else None),
                    endpoint=Endpoint.from_dict(endpoint_of(row)))
 
     def as_brief(self) -> dict:

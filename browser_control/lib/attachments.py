@@ -29,6 +29,12 @@ from browser_control.lib.locks import LockState, profile_lock
 from browser_control.lib.paths import lock_path, norm, root
 
 ATTACH_FILE = "attached.json"
+#: A record's KIND: local attachments (the original shape, and the default a
+#: record without a `kind` keeps) and REMOTE endpoints, which live in the same
+#: store but belong to the `remote` noun alone. One store, two kinds: each
+#: noun reads and drops only its own.
+KIND_LOCAL = "local"
+KIND_REMOTE = "remote"
 #: How much of the attach store is a RECORD: one row is ~200 bytes (`profile`,
 #: `pid`, `port`, `exe`, `managed`, `attached_at`), so a megabyte is thousands
 #: of concurrent attachments — far past any real machine, and the point is only
@@ -37,7 +43,19 @@ ATTACH_FILE = "attached.json"
 #: unusable shape (no attachment is not an authorization to write anywhere).
 ATTACH_FILE_CAP = 1 << 20
 
-__all__ = ["ATTACH_FILE", "ATTACH_FILE_CAP", "STORE", "AttachmentStore"]
+__all__ = ["ATTACH_FILE", "ATTACH_FILE_CAP", "KIND_LOCAL", "KIND_REMOTE",
+           "STORE", "AttachmentStore"]
+
+
+def row_kind(record: dict) -> str:
+    """A record's kind: `"remote"`, or `"local"` for the original shape.
+
+    One reader, so the same missing-`kind` record cannot be local to one
+    caller and remote to another: the store shipped without a `kind` field,
+    and every one of those records is a LOCAL attachment.
+    """
+    return KIND_REMOTE if str(record.get("kind") or "") == KIND_REMOTE \
+        else KIND_LOCAL
 
 
 class AttachmentStore:
@@ -54,8 +72,14 @@ class AttachmentStore:
     def path(self) -> str:
         return os.path.join(self.base, ATTACH_FILE)
 
-    def records(self) -> dict[str, dict]:
+    def records(self, kind: str = "") -> dict[str, dict]:
         """The attach records, keyed by absolute profile path.
+
+        `kind` filters the store: "" is every record, `"local"` is every
+        record that is not a remote attachment (a record without a `kind` is
+        LOCAL — the shape the store shipped with), and `"remote"` only the
+        remote ones. The filter is what lets the local verbs and the `remote`
+        noun share one file without one ever touching the other's records.
 
         The file is chosen by whoever wrote the profile ROOT, so it is read the
         way every other file this process did not write is read
@@ -78,12 +102,41 @@ class AttachmentStore:
             return {}
         if not isinstance(data, list):
             return {}
+        wanted = str(kind or "")
         return {norm(row["profile"]): row for row in data
-                if isinstance(row, dict) and row.get("profile")}
+                if isinstance(row, dict) and row.get("profile")
+                and (not wanted or row_kind(row) == wanted)}
+
+    def find(self, key: str = "", *, port: int = 0) -> dict:
+        """One REMOTE record by internal key and/or port, or {} — the seam.
+
+        The EndpointGuard judges a `(profile, port)` pair; this is how it asks
+        whether that pair is a remote record at all. The key is compared
+        NORMALISED, exactly as `records()` keys it, and a port must match too
+        when one is given (a record whose key matches but whose port moved is
+        not the endpoint the verdict was asked about).
+        """
+        wanted = norm(key) if key else ""
+        number = as_int(port)
+        for record in self.records(KIND_REMOTE).values():
+            if wanted and str(record.get("profile")) != wanted:
+                continue
+            if number and as_int(record.get("port")) != number:
+                continue
+            return record
+        return {}
+
+    def find_url(self, url: str) -> dict:
+        """One remote record by its canonical URL, or {}."""
+        wanted = str(url or "").strip()
+        for record in self.records(KIND_REMOTE).values():
+            if str(record.get("url")) == wanted:
+                return record
+        return {}
 
     def is_attached(self, profile: str) -> bool:
-        """Is this profile attached for tab writes?"""
-        return norm(profile) in self.records()
+        """Is this profile attached for tab writes? (local attachments only)"""
+        return norm(profile) in self.records(KIND_LOCAL)
 
     def put(self, record: dict) -> tuple[bool, LockState]:
         """Store one record under the root lock. `(was_already_there, lock)`."""
@@ -96,13 +149,15 @@ class AttachmentStore:
 
     def drop(self, profile: str = "", *, pid: int = 0,
              port: int = 0) -> tuple[list[str], LockState]:
-        """Remove the records a selector names, under the root lock."""
+        """Remove the LOCAL records a selector names, under the root lock."""
         def update(records: dict[str, dict]) -> list[str]:
             keys = [key for key in records
-                    if (profile and key == norm(profile))
-                    or (pid and as_int(records[key].get("pid")) == as_int(pid))
-                    or (port and as_int(records[key].get("port"))
-                        == as_int(port))]
+                    if row_kind(records[key]) != KIND_REMOTE
+                    and ((profile and key == norm(profile))
+                         or (pid and as_int(records[key].get("pid"))
+                             == as_int(pid))
+                         or (port and as_int(records[key].get("port"))
+                             == as_int(port)))]
             for key in keys:
                 records.pop(key, None)
             return keys
@@ -110,18 +165,43 @@ class AttachmentStore:
         return self._locked_update(update, "detach")
 
     def drop_all(self) -> tuple[list[str], LockState]:
-        """Remove every record, under the root lock. `(removed, lock)`."""
+        """Remove every LOCAL record, under the root lock. `(removed, lock)`."""
         def update(records: dict[str, dict]) -> list[str]:
-            keys = sorted(records)
-            records.clear()
+            keys = sorted(key for key, row in records.items()
+                          if row_kind(row) != KIND_REMOTE)
+            for key in keys:
+                records.pop(key, None)
             return keys
 
         return self._locked_update(update, "detach")
 
+    def drop_remote(self, url: str = "",
+                    *, all_remotes: bool = False,
+                    ) -> tuple[list[str], LockState]:
+        """Remove the REMOTE records a `remote detach` names.
+
+        Returns the URLS removed (what a caller sees), not the internal keys.
+        `all_remotes` takes every remote record; a URL takes exactly the one
+        it names (and nothing when it names none — the caller refuses on the
+        empty answer).
+        """
+        def update(records: dict[str, dict]) -> list[str]:
+            wanted = str(url or "").strip()
+            gone = [key for key, row in records.items()
+                    if row_kind(row) == KIND_REMOTE
+                    and (all_remotes or str(row.get("url")) == wanted)]
+            found = [str(records[key].get("url")) for key in gone]
+            for key in gone:
+                records.pop(key, None)
+            return sorted(found)
+
+        return self._locked_update(update, "detach")
+
     def drop_unlocked(self, profile: str) -> list[str]:
-        """Drop one record when the CALLER already holds the root lock."""
+        """Drop one LOCAL record when the CALLER already holds the root lock."""
         records = self.records()
-        keys = [key for key in records if key == norm(profile)]
+        keys = [key for key in records if key == norm(profile)
+                and row_kind(records[key]) != KIND_REMOTE]
         for key in keys:
             records.pop(key, None)
         self._write(records)

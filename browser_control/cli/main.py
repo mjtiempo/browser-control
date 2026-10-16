@@ -38,6 +38,13 @@ from browser_control.cli.verbs.profile import (
     cmd_profile_reset,
     cmd_profile_seed,
 )
+from browser_control.cli.verbs.remote import (
+    cmd_remote_attach,
+    cmd_remote_close,
+    cmd_remote_detach,
+    cmd_remote_info,
+    cmd_remote_list,
+)
 from browser_control.cli.verbs.tab import (
     cmd_tab_activate,
     cmd_tab_back,
@@ -69,6 +76,7 @@ from browser_control.cli.verbs.tab import (
 )
 from browser_control.lib import audit, capabilities, dom
 from browser_control.lib import browser as browser_lib
+from browser_control.lib.browser import remote as remote_lib
 from browser_control.lib import plugins as plugins_lib
 from browser_control.lib import policy as policy_lib
 from browser_control.lib.errors import (
@@ -98,6 +106,22 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
   attach --list      what is attached, and whether it is still up
   detach [--port N|--pid N|--profile DIR|--all]
                      revoke that authorization
+  remote attach --cdp-url URL
+                     attach a browser behind a loopback tunnel (a microVM's
+                     guest over `ssh -L`): records the endpoint and the
+                     fingerprint it reports, then allows remote tab writes
+  remote detach [--cdp-url URL|--all]
+                     revoke that authorization
+  remote list        every remote endpoint attached, and whether it answers
+  remote info [--cdp-url URL]
+                     one remote endpoint: its record, fingerprint and verdict
+  remote close [--cdp-url URL]
+                     REFUSED (remote-not-closable): stop a remote browser
+                     where it runs; this CLI does not signal what it cannot own
+  remote tab VERB [ARGS...] [--cdp-url URL]
+                     run any `tab` verb against the attached remote browser;
+                     files it writes land HERE, and `upload` refuses because a
+                     file path names the OTHER side's filesystem
   profile info [--profile DIR]
                      the profiles this CLI manages: weight, age, whether a
                      browser is on one, whether it is attached
@@ -370,6 +394,37 @@ def cmd_profile(rest: list[str], browser: str) -> dict:
         fail(ERR_BAD_ARGS,
              "profile: a subcommand is required (info, logins, seed, reset)")
     return handler(rest[1:], browser)
+def cmd_remote(rest: list[str], browser: str) -> dict:
+    """`remote attach|detach|list|info|close|tab` — the remote noun.
+
+    Every remote action runs through this group, so the flat surface carries
+    no remote spelling at all: a global `--browser`/`--profile` is refused
+    here (one endpoint per call, named with `--cdp-url`), and the subcommand
+    table is the one place the surface is declared.
+    """
+    if browser or browser_lib.scope():
+        fail(ERR_BAD_ARGS,
+             "remote: a remote call names ONE endpoint with --cdp-url — "
+             "--browser/--profile do not apply")
+    handler = registry.REMOTE_SUBCOMMANDS.get(_head_of(rest))
+    if handler is None:
+        fail(ERR_BAD_ARGS,
+             "remote: a subcommand is required (attach, detach, list, info, "
+             "close, tab)")
+    return handler(rest[1:], browser)
+def cmd_remote_tab(rest: list[str], browser: str) -> dict:
+    """`remote tab <tab verb> …`: the ordinary tab verb over the tunnel.
+
+    The record is resolved FIRST — a missing/malformed target refuses before
+    any tab verb parses — and becomes the active binding for the whole call,
+    so every tab verb, its gate action and its read-backs run the SAME code
+    paths as a local drive, judged by the fingerprint oracle. `--cdp-url` may
+    stand anywhere in the argv (the reader respects a bare `--`).
+    """
+    rest, url = _pop(rest, "--cdp-url", "remote tab")
+    record = remote_lib.select(url or "")
+    with remote_lib.binding(record):
+        return cmd_tab(rest, browser)
 # the tables' HOME is `cli.registry`, so a verb reads them without reaching
 # into this module's privates; the adapters are defined here, where the verb
 # imports are, and handed over once
@@ -409,6 +464,14 @@ registry.register(
         "seed": cmd_profile_seed,
         "reset": cmd_profile_reset,
     },
+    remote={
+        "attach": cmd_remote_attach,
+        "detach": cmd_remote_detach,
+        "list": cmd_remote_list,
+        "info": cmd_remote_info,
+        "close": cmd_remote_close,
+        "tab": cmd_remote_tab,
+    },
     handlers={
         "open": cmd_open,
         "close": cmd_close,
@@ -417,6 +480,7 @@ registry.register(
         "attach": cmd_attach,
         "detach": cmd_detach,
         "profile": cmd_profile,
+        "remote": cmd_remote,
         "tab": cmd_tab,
         "selftest": cmd_selftest,
     })
@@ -451,6 +515,7 @@ def action(verb: str, rest: list[str]) -> str:
     return registry.action_of(verb, rest,
                               tab_subcommands=registry.TAB_SUBCOMMANDS,
                               profile_subcommands=registry.PROFILE_SUBCOMMANDS,
+                              remote_subcommands=registry.REMOTE_SUBCOMMANDS,
                               pop=_pop)
 def _parse_globals(flags: dict[str, str | None]) -> dict[str, str]:
     """The name-valued globals a call runs with — pure, and refused when empty.
@@ -486,11 +551,18 @@ def _authorise(verb: str, rest: list[str],
     head = _head_of(rest)
     if verb == "tab" and head and head not in registry.TAB_SUBCOMMANDS:
         _bare_tab_word(head)
+    if verb == "remote" and head == "tab":
+        # the delegated dispatcher reads the same word: a typo in `remote tab`
+        # gets the same `bad-args` (with the same subcommand list) a plain
+        # `tab` typo gets, BEFORE the gate or the handler runs
+        inner = _head_of(rest[1:])
+        if inner and inner not in registry.TAB_SUBCOMMANDS:
+            _bare_tab_word(inner)
     if flags["frame"] is not None and not str(flags["frame"]).strip():
         fail(ERR_BAD_ARGS,
              "--frame needs a VALUE — a URL substring or an index from "
              "`tab frames` (an empty value is not a frame)")
-    if flags["frame"] and verb != "selftest" and not _takes_frame(verb, head):
+    if flags["frame"] and verb != "selftest" and not _takes_frame(verb, rest):
         # a scope that cannot apply is REFUSED, by every verb: `list
         # --frame 1` and `open --frame 1 URL` used to accept it and drop it
         fail(ERR_BAD_ARGS,
@@ -511,18 +583,23 @@ def _authorise(verb: str, rest: list[str],
                 wanted, capabilities.classes_for(wanted))
             if not permitted:
                 fail(ERR_NOT_ALLOWED, why)
-def _takes_frame(verb: str, head: str) -> bool:
+def _takes_frame(verb: str, rest: list[str]) -> bool:
     """Does this call act inside the `--frame` scope?
 
     The built-in answer is unchanged: a `tab` subcommand whose head is declared
-    in `dom.FRAME_VERBS`. A PLUGIN action opts in by declaring `"frames": True`
-    in its action spec (`plugins/page_reader.py` does, for a page whose words
-    are in a frame), which is the ONLY way `_authorise` lets a plugin verb take
-    a scope — the guard for the built-ins is not loosened, and a plugin that
-    does not declare it refuses exactly as it did before.
+    in `dom.FRAME_VERBS`. A `remote tab` call delegates to the SAME answer —
+    `remote tab text --frame 1` scopes the same document a local `tab text`
+    would, because it runs the same verb. A PLUGIN action opts in by declaring
+    `"frames": True` in its action spec (`plugins/page_reader.py` does, for a
+    page whose words are in a frame), which is the ONLY way `_authorise` lets a
+    plugin verb take a scope — the guard for the built-ins is not loosened, and
+    a plugin that does not declare it refuses exactly as it did before.
     """
+    head = _head_of(rest)
     if verb == "tab":
         return head in dom.FRAME_VERBS
+    if verb == "remote" and head == "tab":
+        return _head_of(rest[1:]) in dom.FRAME_VERBS
     plugin = registry.PLUGINS.actions.get(verb)
     return plugin is not None and plugin.frames
 def _run_invocation(args: list[str]) -> int:
@@ -621,6 +698,9 @@ def _run_invocation(args: list[str]) -> int:
         # another call's scope.
         browser = globals_["browser"]
         browser_lib.scope(globals_["profile"])
+        # the REMOTE binding is cleared like the profile and frame: one
+        # invocation never drives with the previous call's endpoint
+        browser_lib.remote_scope({})
         dom.frame(globals_["frame"])
         # NOT `or None`: a flag given an empty value must reach the policy,
         # which refuses it, instead of reading as "the call named no policy"
@@ -662,7 +742,7 @@ def _run_invocation(args: list[str]) -> int:
                  f"{verb}: the handler returned {type(reply).__name__}, "
                  "not a JSON object")
         scoped_frame = dom.frame()
-        if _takes_frame(verb, head) and scoped_frame:
+        if _takes_frame(verb, rest) and scoped_frame:
             # one place says which frame a scoped call acted in, so no verb has
             # to remember to (and none can forget to) — plus WHICH document that
             # turned out to be, because an index is the page's live frame order

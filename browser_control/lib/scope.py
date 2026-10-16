@@ -23,6 +23,25 @@ class Scope:
         self.profile = ""
         self.frame_wanted = ""
         self.frame_resolved: dict | None = None
+        #: the REMOTE record a `remote tab` call runs under, {} when none:
+        #: the one binding `machine.browsers()` turns into a synthetic row,
+        #: so the flat surface never sees a remote browser.
+        self.remote: dict = {}
+
+    def set_remote(self, record: dict | None = None) -> dict:
+        """Set, clear or read the remote binding for this invocation.
+
+        `None` reads it, `{}` clears it (the dispatcher clears on the way out
+        of every call), and a record sets a COPY — nothing outside this call
+        may mutate the binding the gate is judging.
+        """
+        if record is not None:
+            self.remote = dict(record) if record else {}
+        return dict(self.remote)
+
+    def remote_record(self) -> dict:
+        """A COPY of the active remote binding, or {} when none is set."""
+        return dict(self.remote) if self.remote else {}
 
     def set_profile(self, profile: str | None) -> str:
         """Set, clear or read the profile this call is about.

@@ -65,6 +65,7 @@ from browser_control.lib import scope as scope_lib
 from browser_control.lib.browser import lifecycle as lifecycle_lib  # noqa: E402
 from browser_control.lib.browser import machine as machine_lib  # noqa: E402
 from browser_control.lib.browser import readback as readback_lib  # noqa: E402
+from browser_control.lib.browser import remote as remote_lib  # noqa: E402
 from browser_control.lib.browser import tabs as tabs_lib  # noqa: E402
 # These four are bound through importlib because their facades re-export the
 # VERB of the same name (`browser.nav` is the function, not the module), so a
@@ -10257,6 +10258,591 @@ def t_the_frame_census_judges_its_port() -> None:
         cdp.frame_targets = real_targets                # type: ignore[assignment]
 
 
+def _fp(browser: str = "HeadlessChrome/153.0.0.0", protocol: str = "1.3",
+        user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) Chrome/153.0.0.0",
+        v8: str = "15.3") -> dict[str, str]:
+    """One `/json/version` answer, shaped as a real Chromium reports it."""
+    return {"Browser": browser, "Protocol-Version": protocol,
+            "User-Agent": user_agent, "V8-Version": v8}
+
+
+def _fp_fields(browser: str = "HeadlessChrome/153.0.0.0",
+               protocol: str = "1.3",
+               user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) "
+                            "Chrome/153.0.0.0",
+               v8: str = "15.3") -> dict[str, str]:
+    """The STORED fingerprint shape for `_fp`'s answer."""
+    return {"browser": browser, "protocol": protocol,
+            "user_agent": user_agent, "v8": v8}
+
+
+def _free_port() -> int:
+    """A loopback port nothing is listening on, for the dead-endpoint case."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+class _FakeRemote:
+    """A tunnelled-looking CDP surface: HTTP `/json{,/version}` + a ws peer.
+
+    `version` is one answer or a list consumed in order (the last repeats), so
+    a check can make the SAME port report a DIFFERENT fingerprint between two
+    connections — the swap the per-connection rule exists for. `seen` records
+    every HTTP path; `ws_methods` every CDP method the page peer answered, and
+    `connections` how many websockets were dialled (the "nothing was sent"
+    evidence a refusal needs).
+    """
+
+    def __init__(self, version: Any, tabs: list[dict] | None = None,
+                 page: dict | None = None) -> None:
+        self._versions = version if isinstance(version, list) else [version]
+        self._tabs = tabs
+        self._page = page if page is not None else {
+            "found": True, "selector": "body", "viewport": [800, 600],
+            "text": "Example Domain", "length": 14, "truncated": False,
+            "url": "https://example.com/", "title": "Example Domain",
+            "visibility": "visible"}
+        self._n = 0
+        self.seen: list[str] = []
+        self.ws_methods: list[str] = []
+        self.connections = 0
+        self.ws_port = 0
+        self.server: http.server.ThreadingHTTPServer | None = None
+        self._ws_server: Any = None
+        self._ws_thread: threading.Thread | None = None
+
+    def _version(self) -> dict:
+        answer = self._versions[min(self._n, len(self._versions) - 1)]
+        self._n += 1
+        return answer
+
+    def _rows(self) -> list[dict]:
+        if self._tabs is not None:
+            return list(self._tabs)
+        return [{"type": "page", "id": "TAB", "title": "Example Domain",
+                 "url": "https://example.com/",
+                 "webSocketDebuggerUrl":
+                     f"ws://127.0.0.1:{self.ws_port}/devtools/page/TAB"}]
+
+    def __enter__(self) -> _FakeRemote:
+        from websockets.sync.server import serve                # noqa: PLC0415
+
+        outer = self
+
+        def handler(connection: Any) -> None:
+            outer.connections += 1
+            for raw in connection:
+                message = json.loads(raw)
+                method = str(message.get("method") or "")
+                outer.ws_methods.append(method)
+                mid = message.get("id")
+                if method == "Runtime.evaluate":
+                    expression = str(
+                        (message.get("params") or {}).get("expression") or "")
+                    if "frames().map" in expression:
+                        value = json.dumps([])
+                    elif "document.readyState === 'complete'" in expression:
+                        # the `--for load` predicate: the fake page is loaded
+                        value = json.dumps(True)
+                    else:
+                        value = json.dumps(outer._page)
+                    connection.send(json.dumps({"id": mid, "result": {
+                        "result": {"type": "string", "value": value}}}))
+                else:
+                    connection.send(json.dumps({"id": mid, "result": {}}))
+
+        self._ws_server = serve(handler, "127.0.0.1", 0)
+        self.ws_port = int(self._ws_server.socket.getsockname()[1])
+        self._ws_thread = threading.Thread(
+            target=self._ws_server.serve_forever, daemon=True)
+        self._ws_thread.start()
+
+        class HttpHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                outer.seen.append(self.path)
+                if self.path == "/json/version":
+                    body: Any = outer._version()
+                elif self.path == "/json":
+                    body = outer._rows()
+                else:
+                    self.send_error(404)
+                    return
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                                      HttpHandler)
+        threading.Thread(target=self.server.serve_forever,
+                         daemon=True).start()
+        return self
+
+    @property
+    def port(self) -> int:
+        assert self.server is not None
+        return int(self.server.server_address[1])
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def shutdown(self) -> None:
+        """Stop answering: the endpoint is GONE but the fake stays reusable.
+
+        The websocket peer is left alone (nothing dials it once the HTTP side
+        is gone), and `__exit__` tolerates an already-closed HTTP server.
+        """
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+
+    def __exit__(self, exc_type: object, exc: object,
+                 tb: object) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+        if self._ws_server is not None:
+            self._ws_server.shutdown()
+        if self._ws_thread is not None:
+            self._ws_thread.join(timeout=5)
+
+
+@contextlib.contextmanager
+def _remote_root() -> Iterator[str]:
+    """A private managed root for one remote check, restored afterwards."""
+    root = tempfile.mkdtemp(prefix="browser-control-remote-")
+    keep = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        yield root
+    finally:
+        _restore_root(keep)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _remote_record(port: int = 0) -> dict:
+    """The one remote record in the store, or the one for `port`."""
+    records = attachments_lib.STORE.records("remote")
+    if port:
+        key = paths_lib.remote_key("127.0.0.1", port)
+        assert key in records, sorted(records)
+        return records[key]
+    assert len(records) == 1, sorted(records)
+    return next(iter(records.values()))
+
+
+def t_remote_url_policy() -> None:
+    """`--cdp-url` is a LOOPBACK http endpoint with a real port, nothing else.
+
+    The same three host spellings `rpc._checked_ws` allows, and no userinfo,
+    path, query, fragment, TLS or websocket scheme: the endpoint policy is the
+    attach-time half of the loopback-only transport rule.
+    """
+    for bad in ("http://192.168.122.1:9222", "http://10.0.0.1:9222",
+                "https://127.0.0.1:9222", "ws://127.0.0.1:9222",
+                "wss://127.0.0.1:9222", "ftp://127.0.0.1:9",
+                "http://127.0.0.1", "http://127.0.0.1:0",
+                "http://127.0.0.1:70000", "http://127.0.0.1:abc",
+                "http://user@127.0.0.1:9222",
+                "http://user:pass@127.0.0.1:9222",
+                "http://127.0.0.1:9222/json",
+                "http://127.0.0.1:9222?a=1",
+                "http://127.0.0.1:9222#x",
+                "http://example.com:9222", "http://[::2]:9222",
+                "127.0.0.1:9222", "", "http://", "://127.0.0.1:9222"):
+        refusal(lambda bad=bad: remote_lib.parse_url(bad), "bad-args")
+    assert remote_lib.parse_url("http://127.0.0.1:9222") == ("127.0.0.1", 9222)
+    assert remote_lib.parse_url("http://LOCALHOST:9222") == ("localhost", 9222)
+    assert remote_lib.parse_url("http://localhost:9222/") == ("localhost", 9222)
+    assert remote_lib.parse_url("http://[::1]:9222") == ("::1", 9222)
+    assert remote_lib.canonical("::1", 9222) == "http://[::1]:9222"
+    assert remote_lib.canonical("127.0.0.1", 9222) == "http://127.0.0.1:9222"
+    # the URL policy is also what the CLI says, with the flag named
+    rc, _out, err = run_cli(["remote", "attach", "--cdp-url",
+                             "http://192.168.122.1:9222"])
+    assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
+    assert "--cdp-url" in err, err
+
+
+def t_remote_attach_records_and_lists() -> None:
+    """`remote attach` records the endpoint + fingerprint under its own kind.
+
+    The record lives in the SAME store as a local attachment but is a kind of
+    its own: `attach --list` does not see it, `remote list` does, and the
+    internal key is never a directory. Re-attaching the same endpoint is
+    idempotent (`already: true`).
+    """
+    with _remote_root() as root:
+        with _FakeRemote(_fp()) as fake:
+            rc, out, err = run_cli(["remote", "attach", "--cdp-url",
+                                    fake.url])
+            assert rc == 0, (rc, err)
+            reply = json.loads(out)
+            assert reply["ok"] is True and reply["attached"] is True, reply
+            assert reply["kind"] == "remote" and reply["already"] is False
+            assert reply["url"] == fake.url, reply
+            assert reply["product"] == "HeadlessChrome/153.0.0.0", reply
+            assert reply["fingerprint"] == _fp_fields(), reply
+            key = paths_lib.remote_key("127.0.0.1", fake.port)
+            records = attachments_lib.STORE.records("remote")
+            assert list(records) == [key], sorted(records)
+            record = records[key]
+            assert record["kind"] == "remote", record
+            assert record["port"] == fake.port and record["pid"] == 0, record
+            assert record["url"] == fake.url, record
+            assert str(record["attached_at"]), record
+            assert not os.path.exists(paths_lib.remote_dir()), \
+                "the attach created a key directory"
+            assert attachments_lib.STORE.records("local") == {}
+            rc, out, _err = run_cli(["attach", "--list"])
+            assert json.loads(out)["count"] == 0, out
+            rc, out, err = run_cli(["remote", "list"])
+            assert rc == 0, (rc, err)
+            listed = json.loads(out)
+            assert listed["count"] == 1, listed
+            row = listed["remotes"][0]
+            assert row["url"] == fake.url and row["running"] is True, row
+            assert row["reachable"] is True and row["verified"] is True, row
+            assert row["product"] == "HeadlessChrome/153.0.0.0", row
+            assert row["fingerprint"] == _fp_fields(), row
+            # idempotent re-attach: the same fingerprint, no second record
+            rc, out, err = run_cli(["remote", "attach", "--cdp-url",
+                                    fake.url])
+            assert rc == 0 and json.loads(out)["already"] is True, (rc, err)
+            assert list(attachments_lib.STORE.records("remote")) == [key]
+            # `remote info` reports the endpoint and the live verdict
+            rc, out, err = run_cli(["remote", "info", "--cdp-url", fake.url])
+            assert rc == 0, (rc, err)
+            info = json.loads(out)
+            assert info["running"] is True, info
+            assert info["remote"]["url"] == fake.url, info
+            assert info["cdp"]["port"] == fake.port, info
+            assert info["cdp"]["remote"] is True, info
+            # detach by url: only the remote kind goes
+            rc, out, err = run_cli(["remote", "detach", "--cdp-url",
+                                    fake.url])
+            assert rc == 0, (rc, err)
+            assert json.loads(out)["detached"] == [fake.url], out
+            assert attachments_lib.STORE.records("remote") == {}
+            assert not os.path.exists(paths_lib.remote_dir())
+
+
+def t_remote_identity_and_family() -> None:
+    """The fingerprint is re-read and compared; a foreign product refuses.
+
+    A changed fingerprint on an existing record refuses `cdp-identity-changed`
+    (both on re-attach and on `remote list`'s verdict), a non-Chromium product
+    refuses `cdp-not-local` at attach, and an endpoint that stopped answering
+    is `cdp-unreachable` with `running: false`.
+    """
+    with _remote_root():
+        with _FakeRemote([_fp(),
+                          _fp(browser="HeadlessChrome/154.0.0.0")]) as fake:
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 0, (rc, err)
+            # the record survives, and a re-attach over the CHANGED
+            # fingerprint refuses instead of silently re-blessing
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 2 and "cdp-identity-changed" in err, (rc, err)
+            record = _remote_record()
+            assert record["fingerprint"]["browser"] == \
+                "HeadlessChrome/153.0.0.0", record
+            rc, out, _err = run_cli(["remote", "list"])
+            row = json.loads(out)["remotes"][0]
+            assert row["running"] is False, row
+            assert row["reachable"] is True and row["verified"] is False, row
+            assert "changed" in row["reason"], row
+        # an endpoint that stopped answering: reachable false, still listed
+        with _FakeRemote(_fp()) as fake:
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 0, (rc, err)
+            fake.shutdown()
+            rc, out, _err = run_cli(["remote", "list"])
+            row = json.loads(out)["remotes"][0]
+            assert row["running"] is False and row["reachable"] is False, row
+        # a non-Chromium product is not a CDP endpoint this tool drives
+        with _FakeRemote(_fp(browser="Firefox/120.0")) as fake:
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 2 and "cdp-not-local" in err, (rc, err)
+        # a port nothing answers on is `cdp-unreachable`
+        rc, _out, err = run_cli(["remote", "attach", "--cdp-url",
+                                 f"http://127.0.0.1:{_free_port()}"])
+        assert rc == 2 and "cdp-unreachable" in err, (rc, err)
+
+
+def t_remote_gate_seam() -> None:
+    """The remote oracle replaces the kernel check at the CONNECTION seam.
+
+    A bound record is a drivable, writable row whose `verified` is the
+    fingerprint comparison; the gate re-reads it per connection, and a change
+    between two connections refuses `cdp-identity-changed` before any page
+    traffic (`/json` is never fetched after the refusal).
+    """
+    with _remote_root():
+        with _FakeRemote([_fp(), _fp()]) as fake:
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 0, (rc, err)
+            record = _remote_record()
+            key, port = str(record["profile"]), int(record["port"])
+            with remote_lib.binding(record):
+                rows = [r for r in browser.browsers() if r.get("remote")]
+                assert len(rows) == 1, rows
+                row = rows[0]
+                assert row["pid"] == 0 and row["exe"] == "", row
+                assert row["managed"] is False and row["attached"] is True, row
+                assert row["headless"] is None, row
+                assert row["profile_from"] == "remote", row
+                assert row["cdp"]["verified"] is True, row
+                assert row["cdp"]["remote"] is True, row
+                assert row["cdp"]["url"] == fake.url, row
+                assert browser.may_write(row), row
+                assert row in browser._drivable(), \
+                    "a verified remote row is not drivable"
+                browser.verify_ws_owner(key, port)
+            run_cli(["remote", "detach", "--all"])
+        # ...and now with a swap BETWEEN two connections: the first passes,
+        # the second refuses and sends nothing
+        with _FakeRemote([_fp(), _fp(), _fp(browser="HeadlessChrome/199.0.0.0")]) \
+                as fake:
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 0, (rc, err)
+            record = _remote_record()
+            key, port = str(record["profile"]), int(record["port"])
+            with remote_lib.binding(record):
+                browser.verify_ws_owner(key, port)       # 2nd: same
+                json_before = [p for p in fake.seen if p == "/json"]
+                refusal(lambda: browser.verify_ws_owner(key, port),
+                        "cdp-identity-changed")
+                assert [p for p in fake.seen if p == "/json"] == json_before, \
+                    "page traffic went out after an identity change"
+        # a flat census has no remote row, ever
+        assert not any(r.get("remote") for r in browser.browsers())
+
+
+def t_remote_isolation() -> None:
+    """A remote endpoint is invisible to the flat surface.
+
+    No remote row in `browsers()`, `close --port N` cannot name it, a flat
+    `--profile` scope on the internal key drives nothing, and the local
+    `detach --all` does not revoke it.
+    """
+    with _remote_root():
+        with _FakeRemote(_fp()) as fake:
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 0, (rc, err)
+            record = _remote_record()
+            key = str(record["profile"])
+            assert not any(r.get("remote") for r in browser.browsers())
+            rc, _out, err = run_cli(["close", "--port", str(fake.port),
+                                     "--force"])
+            assert rc == 2 and "no-browser" in err, (rc, err)
+            rc, _out, err = run_cli(["tab", "text", "--profile", key])
+            assert rc == 2 and "ERR[cdp-unreachable]" in err, (rc, err)
+            # ...and a lifecycle/profile verb never treats the key as a
+            # profile: `open` would create the directory, a profile verb
+            # would walk, copy or wipe it
+            for argv in (["open", "--profile", key],
+                         ["profile", "info", "--profile", key],
+                         ["profile", "reset", "--profile", key]):
+                rc, _out, err = run_cli(argv)
+                assert rc == 2 and "ERR[not-managed]" in err, (argv, rc, err)
+            assert not os.path.exists(paths_lib.remote_dir()), \
+                "a profile verb created the remote key directory"
+            rc, out, err = run_cli(["detach", "--all"])
+            assert rc == 0, (rc, err)
+            assert json.loads(out)["detached"] == [], out
+            assert list(attachments_lib.STORE.records("remote")) == [key]
+
+
+def t_remote_tab_drives_and_refusals() -> None:
+    """`remote tab` drives the tunnelled browser; the two refusals are early.
+
+    `remote tab list` and `remote tab text` run the ordinary verbs over the
+    fake peer; `remote tab upload` refuses `remote-path` BEFORE any page
+    traffic (the path names the other side's filesystem), and `remote close`
+    refuses `remote-not-closable`.
+    """
+    with _remote_root() as root:
+        with _FakeRemote(_fp()) as fake:
+            rc, _out, err = run_cli(["remote", "attach", "--cdp-url", fake.url])
+            assert rc == 0, (rc, err)
+            rc, out, err = run_cli(["remote", "tab", "list"])
+            assert rc == 0, (rc, err)
+            listed = json.loads(out)
+            assert listed["count"] == 1, listed
+            assert listed["browsers"][0]["tabs"][0]["id"] == "TAB", listed
+            rc, out, err = run_cli(["remote", "tab", "text"])
+            assert rc == 0, (rc, err)
+            reply = json.loads(out)
+            assert reply["text"] == "Example Domain", reply
+            assert fake.connections >= 1, fake.connections
+            assert "Page.enable" in fake.ws_methods, fake.ws_methods
+            assert "Runtime.evaluate" in fake.ws_methods, fake.ws_methods
+            # `--cdp-url` may stand anywhere in the remote argv
+            rc, out, err = run_cli(["remote", "tab", "text", "--cdp-url",
+                                    fake.url])
+            assert rc == 0 and json.loads(out)["text"] == "Example Domain", \
+                (rc, err)
+            # the PORT-ONLY path (`verify_port_owner`) is authorised by the
+            # fingerprint verdict too: `tab frames` and `tab wait` do not
+            # carry a profile to the seam, they carry the port
+            rc, out, err = run_cli(["remote", "tab", "frames"])
+            assert rc == 0, (rc, err)
+            rc, out, err = run_cli(["remote", "tab", "wait", "--for", "load",
+                                    "--timeout", "5"])
+            assert rc == 0, (rc, err)
+            assert json.loads(out)["for"] == "load", out
+            assert json.loads(out)["samples"] >= 1, out
+            # upload refuses before the page is asked anything
+            payload = os.path.join(root, "payload.txt")
+            with open(payload, "w", encoding="utf-8") as handle:
+                handle.write("x")
+            before = list(fake.seen)
+            rc, _out, err = run_cli(["remote", "tab", "upload", payload])
+            assert rc == 2 and "remote-path" in err, (rc, err)
+            assert fake.seen == before, \
+                "upload touched the remote endpoint before refusing"
+            # a remote browser is stopped where it runs
+            rc, _out, err = run_cli(["remote", "close"])
+            assert rc == 2 and "remote-not-closable" in err, (rc, err)
+
+
+def t_remote_selection_and_detach() -> None:
+    """One target, named or sole; several refuse; none says how to attach.
+
+    `--cdp-url` names one record; without it the SOLE remote is the target,
+    several are `ambiguous-browser` (naming both), and none is
+    `cdp-unreachable` naming `remote attach`. `remote detach` needs a target
+    or `--all`; an unattached URL is `not-attached`.
+    """
+    with _remote_root():
+        with _FakeRemote(_fp()) as first, _FakeRemote(_fp()) as second:
+            for fake in (first, second):
+                rc, _out, err = run_cli(["remote", "attach", "--cdp-url",
+                                         fake.url])
+                assert rc == 0, (rc, err)
+            assert len(attachments_lib.STORE.records("remote")) == 2
+            rc, _out, err = run_cli(["remote", "info"])
+            assert rc == 2 and "ambiguous-browser" in err, (rc, err)
+            assert first.url in err and second.url in err, err
+            rc, _out, err = run_cli(["remote", "tab", "list"])
+            assert rc == 2 and "ambiguous-browser" in err, (rc, err)
+            rc, out, err = run_cli(["remote", "tab", "list", "--cdp-url",
+                                    second.url])
+            assert rc == 0, (rc, err)
+            assert json.loads(out)["count"] == 1, out
+            rc, _out, err = run_cli(["remote", "detach"])
+            assert rc == 2 and "--cdp-url" in err, (rc, err)
+            rc, _out, err = run_cli(["remote", "detach", "--cdp-url",
+                                     "http://127.0.0.1:1"])
+            assert rc == 2 and "not-attached" in err, (rc, err)
+            rc, out, err = run_cli(["remote", "detach", "--all"])
+            assert rc == 0, (rc, err)
+            assert sorted(json.loads(out)["detached"]) == \
+                sorted([first.url, second.url]), out
+            assert attachments_lib.STORE.records("remote") == {}
+        # none attached: the target-less calls say so and name the fix
+        rc, _out, err = run_cli(["remote", "info"])
+        assert rc == 2 and "ERR[cdp-unreachable]" in err, (rc, err)
+        assert "remote attach" in err, err
+        rc, _out, err = run_cli(["remote", "tab", "list"])
+        assert rc == 2 and "ERR[cdp-unreachable]" in err, (rc, err)
+
+
+def t_remote_surface_is_declared() -> None:
+    """The `remote` group is DECLARED: actions, delegation and gate.
+
+    The lifecycle subcommands have their own classes; every `remote tab X`
+    resolves to the SAME declared action as `tab X` (mode included), so the
+    gate authorises one table. `unclassified` learns the group, and the help
+    text names it.
+    """
+    assert "remote" in registry.HANDLERS
+    assert set(registry.REMOTE_SUBCOMMANDS) == {
+        "attach", "detach", "list", "info", "close", "tab"}
+    assert capabilities.ACTIONS["remote attach"] == ("write",)
+    assert capabilities.ACTIONS["remote detach"] == ("write",)
+    assert capabilities.ACTIONS["remote close"] == ("write",)
+    assert capabilities.ACTIONS["remote list"] == ("read",)
+    assert capabilities.ACTIONS["remote info"] == ("read",)
+    for argv, action in (
+            (["attach", "--cdp-url", "x"], "remote attach"),
+            (["detach", "--all"], "remote detach"),
+            (["list"], "remote list"),
+            (["info"], "remote info"),
+            (["close"], "remote close"),
+            (["tab", "list"], "tab list"),
+            (["tab", "text"], "tab text"),
+            (["tab", "js", "1"], "tab js"),
+            (["tab", "js", "1", "--out", "f"], "tab js --out"),
+            (["tab", "wait", "--for", "js"], "tab wait --for js"),
+            (["tab", "dialog", "accept"], "tab dialog accept"),
+            (["tab", "screenshot", "f.png"], "tab screenshot")):
+        assert cli_main.action("remote", argv) == action, argv
+    assert capabilities.unclassified(
+        registry.HANDLERS,
+        {"tab": registry.TAB_SUBCOMMANDS,
+         "profile": registry.PROFILE_SUBCOMMANDS,
+         "remote": registry.REMOTE_SUBCOMMANDS},
+        delegated={"remote tab": "tab"}) == []
+    # the gate reads the delegated action: `remote tab js` is code, and
+    # `--deny code` stops it before the handler runs
+    rc, _out, err = run_cli(["--deny", "code", "remote", "tab", "js", "1"])
+    assert rc == 2 and "not-allowed" in err, (rc, err)
+    rc, _out, err = run_cli(["--deny", "write", "remote", "attach",
+                             "--cdp-url", "http://127.0.0.1:9222"])
+    assert rc == 2 and "not-allowed" in err, (rc, err)
+    # selftest reports the group through the same table
+    rc, out, err = run_cli(["selftest"])
+    assert rc == 0, (rc, err)
+    caps = json.loads(out)["capabilities"]
+    assert caps["unclassified"] == [], caps
+    assert "remote attach" in caps["by_action"], sorted(caps["by_action"])
+    # help names the group and each lifecycle subcommand
+    rc, out, _err = run_cli(["help"])
+    assert rc == 0
+    for phrase in ("remote attach", "remote detach", "remote list",
+                   "remote info", "remote close", "remote tab"):
+        assert phrase in out, phrase
+
+
+def t_remote_cli_grammar() -> None:
+    """`remote` argv: the group's arity, and no remote spelling elsewhere.
+
+    A missing subcommand, an unknown one, a missing/extra target and a global
+    `--profile`/`--browser` combined with a remote call all refuse `bad-args`;
+    the flat verbs do not accept `--cdp-url` at all.
+    """
+    for argv, phrase in (
+            (["remote"], "subcommand"),
+            (["remote", "atach"], "subcommand"),
+            (["remote", "attach"], "--cdp-url"),
+            (["remote", "attach", "--cdp-url"], "needs a value"),
+            (["remote", "attach", "--cdp-url", "http://127.0.0.1:9222",
+              "extra"], "takes no arguments"),
+            (["attach", "--cdp-url", "http://127.0.0.1:9222"],
+             "unknown argument"),
+            (["detach", "--cdp-url", "http://127.0.0.1:9222"],
+             "unknown argument")):
+        rc, _out, err = run_cli(argv)
+        assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
+        assert phrase in err, (argv, err)
+    # a global scope cannot ride on a remote call: one endpooint per call
+    with _remote_root():
+        rc, _out, err = run_cli(["--profile", "/tmp/x", "remote", "info"])
+        assert rc == 2 and "--cdp-url" in err, (rc, err)
+        rc, _out, err = run_cli(["--browser", "chrome", "remote", "list"])
+        assert rc == 2 and "--cdp-url" in err, (rc, err)
+
+
 def main() -> int:
     global SUITE_LOG
     # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
@@ -10576,6 +11162,20 @@ def main() -> int:
          t_help_is_audited_and_never_gated),
         ("-- reaches the verb with the literal value",
          t_end_of_flags_reaches_the_verb),
+        ("remote --cdp-url is loopback http only", t_remote_url_policy),
+        ("remote attach records the fingerprint",
+         t_remote_attach_records_and_lists),
+        ("remote identity is re-read and compared",
+         t_remote_identity_and_family),
+        ("remote drives are judged at the seam", t_remote_gate_seam),
+        ("a remote endpoint is invisible to the flat surface",
+         t_remote_isolation),
+        ("remote tab drives, and refuses upload/close",
+         t_remote_tab_drives_and_refusals),
+        ("remote target selection and detach",
+         t_remote_selection_and_detach),
+        ("the remote surface is declared", t_remote_surface_is_declared),
+        ("remote argv grammar", t_remote_cli_grammar),
     ):
         check(name, fn)
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed, {len(SKIP)} skipped")

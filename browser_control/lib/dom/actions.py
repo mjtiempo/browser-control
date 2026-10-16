@@ -58,6 +58,7 @@ from browser_control.lib.errors import (
     ERR_NOT_A_SELECT,
     ERR_NOT_CHECKABLE,
     ERR_OCCLUDED,
+    ERR_REMOTE_PATH,
     ERR_SELECT_NOT_VERIFIED,
     ERR_UPLOAD_NOT_VERIFIED,
     ControlError,
@@ -732,7 +733,19 @@ def upload(path: str, selector: str | None = None, index: int | None = None,
     file is a path on THIS machine, checked before the browser is asked
     anything, and the read-back is what the PAGE thinks it holds: one file,
     the same name and the same size.
+
+    On a REMOTE browser this refuses before the page is asked anything: the
+    path names THIS machine's filesystem, and `DOM.setFileInputFiles` resolves
+    it on the BROWSER's side of the tunnel, where it does not exist.
     """
+    if browser_lib.remote_active():
+        fail(ERR_REMOTE_PATH,
+             "tab upload: the browser runs on the other side of a tunnel, so "
+             "a file path names THIS machine's filesystem and "
+             "DOM.setFileInputFiles would look for it over there — copy the "
+             "file to the browser's machine first (the path must exist on the "
+             "BROWSER's side), or drive a local browser"
+             )
     file_path = str(path or "")
     if not os.path.isabs(file_path):
         fail(ERR_BAD_ARGS,

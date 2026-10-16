@@ -15,6 +15,10 @@ ROOT_ENV = "BROWSER_CONTROL_ROOT"
 PID_FILE = ".pid"
 LOCK_FILE = ".browser-control.lock"
 LOCK_DIR = ".locks"
+#: where the internal keys of `remote` attachments live: one synthetic
+#: profile-shaped NAME per endpoint, under the root but dot-namespaced so
+#: `profiles()` never lists it and no verb ever treats it as a directory.
+REMOTE_DIR = ".remote"
 LOCK_NAME_LIMIT = 40        # the readable tail of a lock file name
 #: the key the ROOT's own lock is derived from. It ends in a separator, which
 #: `os.path.relpath` never produces for a path under the root, so no profile
@@ -22,9 +26,10 @@ LOCK_NAME_LIMIT = 40        # the readable tail of a lock file name
 ROOT_KEY = "_root" + os.sep
 
 __all__ = ["DEFAULT_ROOT", "LOCK_DIR", "LOCK_FILE", "LOCK_NAME_LIMIT",
-           "MARKER", "PID_FILE", "ROOT_ENV", "ROOT_KEY", "ensure_root",
-           "expand", "is_managed", "lock_path", "mark", "marked", "norm",
-           "pid_file", "profile_dir", "root"]
+           "MARKER", "PID_FILE", "REMOTE_DIR", "ROOT_ENV", "ROOT_KEY",
+           "ensure_root", "expand", "is_managed", "is_remote_key",
+           "lock_path", "mark", "marked", "norm", "pid_file",
+           "profile_dir", "remote_dir", "remote_key", "root"]
 
 MARKER = ".browser-control.profile"
 
@@ -49,6 +54,40 @@ def norm(path: object) -> str:
 def root() -> str:
     """Where the managed profiles live (`BROWSER_CONTROL_ROOT` moves it)."""
     return expand(os.environ.get(ROOT_ENV) or DEFAULT_ROOT)
+
+
+def remote_dir() -> str:
+    """The directory the internal REMOTE keys are shaped under, at USE."""
+    return os.path.join(root(), REMOTE_DIR)
+
+
+def remote_key(host: str, port: int) -> str:
+    """The one internal key for a loopback endpoint: `<root>/.remote/H-P`.
+
+    Built at USE, like every other path under the root, and injective for the
+    three host spellings the URL policy admits (`127.0.0.1`, `localhost`,
+    `::1` joined by `-` to a decimal port). It is a NAME, never a directory:
+    nothing in the tree creates it, and `profiles()` skips dot-directories so
+    a stray one would still not be listed.
+    """
+    return os.path.join(remote_dir(), f"{host}-{as_port(port)}")
+
+
+def is_remote_key(path: object) -> bool:
+    """Is this path a remote attachment's internal key (not a profile)?"""
+    text = norm(path)
+    if not text:
+        return False
+    return text.startswith(remote_dir() + os.sep)
+
+
+def as_port(value: object) -> int:
+    """A port number, or 0 — the one reading the key builder uses."""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return number if 0 < number < 65536 else 0
 
 
 def ensure_root() -> str:

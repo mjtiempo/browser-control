@@ -121,6 +121,11 @@ from browser_control.lib.browser.readback import (  # noqa: F401
     rows,
     url_landed,
 )
+from browser_control.lib.browser.remote import (  # noqa: F401
+    active as remote_active,
+    binding as remote_binding,
+    scope_record as remote_scope,
+)
 from browser_control.lib.browser.selector import Selector  # noqa: F401
 from browser_control.lib.browser.tabs import (  # noqa: F401
     ACTIVE_SPEC,

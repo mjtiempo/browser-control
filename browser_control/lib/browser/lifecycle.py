@@ -68,6 +68,7 @@ from browser_control.lib.paths import (
     ensure_root,
     expand,
     is_managed,
+    is_remote_key,
     lock_path,
     mark,
     norm,
@@ -139,6 +140,15 @@ def instance_dir(binary_path: str) -> str:
     one real directory (a review flagged the split).
     """
     scoped = _scoped()
+    if scoped and is_remote_key(scoped):
+        # the internal key of a `remote` attachment is a NAME the verb
+        # machinery carries, never a profile: starting a browser on it would
+        # create the directory and merge two identities under one key
+        fail(ERR_NOT_MANAGED,
+             f"{scoped} is a remote attachment's internal key, not a profile "
+             "— `remote tab` drives the endpoint it names, and `open` never "
+             "starts a browser on it (attach the endpoint with "
+             "`remote attach --cdp-url …`)")
     if scoped and not is_managed(scoped):
         fail(ERR_BAD_ARGS,
              f"--profile {scoped} is not under {root()} — this CLI manages the "
@@ -398,8 +408,13 @@ def managed_profile(browser: str = "") -> str:
     return profile_dir(binary(browser)) if browser else profile_dir(binary())
 
 def attachments() -> dict:
-    """`attach --list`: what is attached, and whether it is still there."""
-    records = attachments_lib.STORE.records()
+    """`attach --list`: what is attached, and whether it is still there.
+
+    LOCAL records only: a remote attachment is reported by `remote list` and
+    belongs to the `remote` noun — one store, two kinds, each noun owns its
+    own (the record's `kind` is what separates them).
+    """
+    records = attachments_lib.STORE.records("local")
     live = {norm(r["profile"]): r for r in _pkg.browsers()}
     rows: list[dict] = []
     for key in sorted(records):

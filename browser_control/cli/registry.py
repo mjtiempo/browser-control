@@ -35,9 +35,10 @@ from browser_control.lib.errors import (
 
 Handler = Callable[[list[str], str], dict]
 
-__all__ = ["Handler", "HANDLERS", "PLUGINS", "POLICY", "PROFILE_SUBCOMMANDS",
-           "TAB_SUBCOMMANDS", "action_of", "modes_of", "plugins_report",
-           "register", "resolved_mode", "verb_names"]
+__all__ = ["Handler", "HANDLERS", "PLUGINS", "POLICY",
+           "PROFILE_SUBCOMMANDS", "REMOTE_SUBCOMMANDS", "TAB_SUBCOMMANDS",
+           "action_of", "modes_of", "plugins_report", "register",
+           "resolved_mode", "verb_names"]
 
 #: Every top-level verb a caller can run, built-ins first; filled by `cli.main`.
 HANDLERS: dict[str, Handler] = {}
@@ -45,6 +46,10 @@ HANDLERS: dict[str, Handler] = {}
 TAB_SUBCOMMANDS: dict[str, Handler] = {}
 #: The `profile` subcommands, by the word that names them.
 PROFILE_SUBCOMMANDS: dict[str, Handler] = {}
+#: The `remote` subcommands, by the word that names them. `tab` is a
+#: DELEGATION: `remote tab X` runs the tab dispatcher itself, and its declared
+#: action is the tab action (see `action_of`).
+REMOTE_SUBCOMMANDS: dict[str, Handler] = {}
 
 #: The gate's policy for the invocation in flight (`cli.main` sets it).
 POLICY = policy_lib.Policy()
@@ -53,7 +58,8 @@ PLUGINS = plugins_lib.PluginSet()
 
 
 def register(*, handlers: dict[str, Handler], tab: dict[str, Handler],
-             profile: dict[str, Handler]) -> None:
+             profile: dict[str, Handler],
+             remote: dict[str, Handler] | None = None) -> None:
     """Fill the tables. Called ONCE, by `cli.main` at import.
 
     Registration, not definition: the adapters live in `cli.main` and the verb
@@ -64,6 +70,8 @@ def register(*, handlers: dict[str, Handler], tab: dict[str, Handler],
     HANDLERS.update(handlers)
     TAB_SUBCOMMANDS.update(tab)
     PROFILE_SUBCOMMANDS.update(profile)
+    if remote:
+        REMOTE_SUBCOMMANDS.update(remote)
 
 
 def verb_names() -> list[str]:
@@ -156,6 +164,7 @@ def action_of(verb: str, rest: list[str], *,
               tab_subcommands: dict[str, Handler],
               profile_subcommands: dict[str, Handler],
               pop: Callable[[list[str], str, str], tuple[list[str], Any]],
+              remote_subcommands: dict[str, Handler] | None = None,
               ) -> str:
     """Which DECLARED action a call is: verb, subcommand, and its mode.
 
@@ -173,8 +182,23 @@ def action_of(verb: str, rest: list[str], *,
     `lib.argv._head_of`, the same reader the dispatcher uses: a leading bare
     `--` means everything after it is positional, so `tab -- list` is the URL
     path (`tab`), not the `tab list` subcommand.
+
+    A `remote tab <verb>` call declares the SAME action as `tab <verb>` — it
+    is the same act against a different endpoint, so the capability table has
+    ONE copy of the classes and this is the delegation seam that keeps it that
+    way. The lifecycle subcommands answer for themselves (`remote attach`, …).
     """
     head = _head_of(rest)
+    if verb == "remote":
+        if head not in (remote_subcommands or {}):
+            return ""
+        if head == "tab":
+            return action_of("tab", rest[1:],
+                             tab_subcommands=tab_subcommands,
+                             profile_subcommands=profile_subcommands,
+                             remote_subcommands=remote_subcommands,
+                             pop=pop) or "tab"
+        return f"remote {head}"
     if verb == "tab":
         if head not in tab_subcommands:
             return verb              # a URL: the URL path, which is `tab`

@@ -20,10 +20,12 @@ from browser_control.lib.browser.machine import (
     endpoint_of,
     profile_pid,
 )
+from browser_control.lib.browser import remote as remote_lib
 from browser_control.lib.coerce import (
     as_int,
 )
 from browser_control.lib.errors import (
+    ERR_CDP_IDENTITY_CHANGED,
     ERR_CDP_NOT_LOCAL,
     ERR_CDP_UNREACHABLE,
     fail,
@@ -100,10 +102,19 @@ class EndpointGuard:
         (`cdp-not-local`) — and it is read out of the SAME kernel answer the
         rest of the verdict is built from, never guessed from a reason string.
 
+        A `(profile, port)` that names a REMOTE record is judged by the
+        fingerprint oracle instead (`remote.verdict`): the listener is a
+        tunnel, the kernel fact the rest of this function builds on does not
+        exist, and the verdict carries its own refusal code so every gate
+        routes it without re-reading it as `cdp-not-local`.
+
         The profile's pid comes from `machine.profile_pid`, which answers from
         the process list the census in progress already read: one `list` walks
         /proc once however many rows it verifies.
         """
+        remote = remote_lib.verdict(profile, port)
+        if remote is not None:
+            return remote
         owner = cdp.listener_of(port)
         pid = as_int(owner.get("pid"))
         exe = str(owner.get("exe") or "")
@@ -178,6 +189,27 @@ def endpoint_owner(profile: str, port: int) -> dict:
     return GUARD.verdict(profile, port)
 
 
+def _remote_refusal(owner: dict) -> None:
+    """Fail with a REMOTE verdict's own refusal code, when it carries one.
+
+    A remote verdict cannot be read by the kernel branches (`held`, the
+    speaker's exe): its answer is the fingerprint oracle's, and its `code` is
+    the refusal the caller must see — `cdp-identity-changed` for a changed
+    self-report (never re-read as `cdp-not-local`, which is what a
+    `--cdp-url`-less check would say), `cdp-unreachable` when the endpoint
+    stopped answering, `cdp-not-local` when it answered as a non-browser.
+    """
+    if not owner.get("remote"):
+        return
+    code = str(owner.get("code") or "")
+    reason = str(owner.get("reason") or "unknown")
+    if code == ERR_CDP_IDENTITY_CHANGED:
+        fail(ERR_CDP_IDENTITY_CHANGED, f"{reason}. Nothing was sent to it")
+    if code == ERR_CDP_NOT_LOCAL:
+        fail(ERR_CDP_NOT_LOCAL, f"{reason}. Nothing was sent to it")
+    fail(ERR_CDP_UNREACHABLE, f"{reason}. Nothing was sent to it")
+
+
 def not_local_refusal(profile: str, port: int, reason: str) -> None:
     """Refuse to drive an endpoint that is not the browser we think it is.
 
@@ -200,8 +232,12 @@ def _drive_refusal(browser: str, rows: list[dict]) -> None:
                         and not endpoint_of(r).get("verified")], browser)
     if suspects:
         row = suspects[0]
-        not_local_refusal(str(row["profile"]), as_int(endpoint_of(row)["port"]),
-                          str(endpoint_of(row).get("reason") or "unknown"))
+        endpoint = endpoint_of(row)
+        if endpoint.get("remote"):
+            _remote_refusal({"remote": True, "code": endpoint.get("code"),
+                             "reason": endpoint.get("reason")})
+        not_local_refusal(str(row["profile"]), as_int(endpoint["port"]),
+                          str(endpoint.get("reason") or "unknown"))
 
 def verify_profile_endpoint(profile: str, port: int = 0) -> None:
     """Refuse when the endpoint on that profile is not the browser we think.
@@ -241,12 +277,13 @@ def verify_profile_endpoint(profile: str, port: int = 0) -> None:
     owner = _pkg.endpoint_owner(profile, endpoint)
     if owner.get("verified"):
         return
-    reason = str(owner.get("reason") or "unknown")
+    reasons = str(owner.get("reason") or "unknown")
+    _remote_refusal(owner)
     if owner.get("held") is False:
         fail(ERR_CDP_UNREACHABLE,
              f"nothing holds the CDP port {endpoint} on {profile} any more "
-             f"({reason}) — the endpoint went away, so nothing was sent")
-    not_local_refusal(profile, endpoint, reason)
+             f"({reasons}) — the endpoint went away, so nothing was sent")
+    not_local_refusal(profile, endpoint, reasons)
 
 def verify_port_owner(port: int) -> None:
     """`verify_ws_owner` for a caller that holds the PORT and nothing else.
@@ -341,6 +378,7 @@ def verify_ws_owner(profile: str, port: int) -> None:
     owner = GUARD.verdict(profile, port, refresh=True)
     if owner.get("verified"):
         return
+    _remote_refusal(owner)
     reason = str(owner.get("reason") or "unknown")
     if not owner.get("held"):
         fail(ERR_CDP_UNREACHABLE,
