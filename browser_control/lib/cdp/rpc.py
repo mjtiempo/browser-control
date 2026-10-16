@@ -131,9 +131,25 @@ async def _await_reply(ws: Any, rid: int, method: str, params: dict,
     transport failure stays `cdp-error`, where the caller looks for one. The
     reply itself must be a JSON object (`_json_object`), so no caller can be
     handed something to call `.get()` on.
+
+    The BUDGET covers the SEND as well as the read: the deadline is taken
+    before the frame goes out, and a peer that stops reading (its receive
+    window full, so the write never drains) hits it like any other timeout.
+    Starting the clock after the send left the one unbounded wait in the
+    transport — a peer that completed the handshake and then read nothing held
+    `Session.call` past its own budget indefinitely (measured: a 3 s call had
+    not returned after 12 s) — and "one method, one deadline" is the promise
+    every caller above this line is written against.
     """
-    await ws.send(json.dumps({"id": rid, "method": method, "params": params}))
     deadline = time.monotonic() + budget
+    try:
+        await asyncio.wait_for(
+            ws.send(json.dumps({"id": rid, "method": method,
+                                "params": params})), timeout=budget)
+    except TimeoutError as e:
+        if on_timeout is not None:
+            on_timeout(e)
+        raise
     while True:
         wait = max(0.1, deadline - time.monotonic())
         if wait_hook is not None:
@@ -163,7 +179,13 @@ async def _await_reply(ws: Any, rid: int, method: str, params: dict,
             raise ControlError(ERR_CDP_ERROR,
                                f"{method}: a frame that is not a JSON object "
                                f"({type(msg).__name__})")
-        if msg.get("id") == rid:
+        if msg.get("id") == rid and "method" not in msg:
+            # a REPLY, not an event that happens to carry this id. CDP tags an
+            # event with `method` and a reply with `id`; a frame carrying BOTH
+            # is an event, and reading it as the answer returned an empty
+            # success for a request nobody answered (a review found it). The
+            # `on_frame` hook below is where an event belongs — including one
+            # that names our id.
             err = msg.get("error")
             if err:
                 raise ControlError(ERR_CDP_ERROR, error_text(err))

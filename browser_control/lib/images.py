@@ -7,6 +7,8 @@ verbs that talk to a page live in the DOM tier; the file rules are pure.
 """
 from __future__ import annotations
 
+import math
+
 from browser_control.lib import sink
 from browser_control.lib.errors import (
     ERR_SCREENSHOT_NOT_VERIFIED,
@@ -49,16 +51,23 @@ def png_size(data: bytes) -> list[int]:
             int.from_bytes(data[20:24], "big")]
 
 
-def expected_pixels(css: int, dpr: float) -> int:
-    """CSS pixels → device pixels, or a refusal.
+def expected_pixels(css: int | float, dpr: float) -> int:
+    """CSS pixels → device pixels, HALF-UP, or a refusal.
 
     Both numbers come from the PAGE, so a nonsense pair must become a refusal
     rather than an exception or a silently wrong expectation: this is the value
     the PNG's own header is compared against.
+
+    The rounding is `floor(css × dpr + 0.5)` — round HALF-UP — not Python's
+    `round()`, which is half-EVEN. Chrome rounds the device size half-up
+    (measured live: 802 innerWidth at devicePixelRatio 1.25 gives 1003 pixels
+    while `int(round(802 * 1.25))` is 1002), so the banker's spelling refused a
+    screenshot Chrome had taken correctly whenever a product landed on an exact
+    `.5`.
     """
     try:
-        value = int(round(css * dpr))
-    except (OverflowError, ValueError) as e:
+        value = int(math.floor(css * dpr + 0.5))
+    except (OverflowError, TypeError, ValueError) as e:
         fail(ERR_SCREENSHOT_NOT_VERIFIED,
              f"the page reports {css} px at devicePixelRatio {dpr:g}, which is "
              f"not a size ({e}) — nothing was written")

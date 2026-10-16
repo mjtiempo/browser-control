@@ -49,8 +49,16 @@ def foreign(text: object, cap: int = 200) -> str:
     names the families). The rule is the character's Unicode CATEGORY, not a
     hand-kept list of code points: normal text is untouched, because no `Cf`
     character, tag or Hangul filler is text a reader wanted to see.
+
+    An ABSENT value (None) is the empty string, and a FALSY one is not: `False`
+    and `0` are the two most informative things a refusal about state can
+    report — `checked=False` is the whole finding when a page unchecks its own
+    box, and `selected=0` is a real index — and `str(text or "")` rendered both
+    as nothing, so the refusal named the value it had measured with an empty
+    space (a review measured it). `or ""` also turned a page-reported `0` into
+    no value at all in every message that quotes a count.
     """
-    line = " ".join(str(text or "").split())[:cap]
+    line = " ".join(("" if text is None else str(text)).split())[:cap]
     return "".join(ch for ch in line
                    if ch >= " " and not "\x7f" <= ch <= "\x9f"
                    and not _invisible(ch))

@@ -269,11 +269,27 @@ when the tab cannot report — unreadable is NOT absent. `accept`/`dismiss` are
 verified by the tab answering again; `--text` answers a prompt and goes only
 with `accept`. Nothing to handle → `no-dialog`.
 
-### `tab screenshot PATH | --path PATH [--full] [--force] [--tab SPEC]`
+### `tab screenshot PATH | --path PATH [--full | --selector CSS [--index N] | --clip X,Y,W,H] [--force] [--tab SPEC]`
 
-Write a PNG. Reply: `path`, `bytes`, `width`, `height`, `full`, `dpr`,
-`css_size`, `verified`, `note`. Dimensions come from the file's own IHDR, so
-`verified` is page-independent. Existing path → `file-exists` unless `--force`.
+Write a PNG. FOUR capture modes, ONE of them at most: the viewport
+(default), the whole document (`--full`), one element's border box
+(`--selector CSS [--index N]`) or a caller-named page rectangle
+(`--clip X,Y,W,H`, integer CSS px from the document origin). Reply: `path`,
+`bytes`, `width`, `height`, `full`, `mode` (`viewport|full|element|region`),
+`clip` (the effective `[x,y,w,h]`, or `null` for the two no-clip modes),
+`dpr` (`device_pixel_ratio`), `css_size`, `verified`, `note`, and — in element
+mode — the picked `element` descriptor.
+
+The dimensions come from the file's own IHDR, so `verified` is
+page-independent: the IHDR must equal the chosen region × `devicePixelRatio`,
+rounded half-up, or nothing is written (`screenshot-not-verified`). Element
+mode resolves exactly like `tab find --selector` (several matches →
+`ambiguous-element`, none rendered → `no-match`, hidden elements are not
+candidates), rounds the border box outward and captures it with
+`captureBeyondViewport`, so an element below the fold lands whole. `--index`
+goes only with `--selector`; a malformed, negative or zero-size clip, or one
+wholly outside the document, refuses `bad-args`. Existing path → `file-exists`
+unless `--force`.
 
 ### `tab scroll --by N [--at X,Y] [--tab SPEC]` / `--edge top|bottom` / `TEXT | --selector CSS [--index N]`
 

@@ -31,7 +31,8 @@ $ browser-control-cli tab click "Learn more" && browser-control-cli close --forc
   written only when you attach it.
 - **Made to be called.** One verb per process, one JSON object on stdout,
   `ERR[code]` on stderr with exit 2. No prompts, no screen, no parsing prose
-  to find out what happened.
+  to find out what happened. (`help`/`-h`/`--help` is the one exception: its
+  answer *is* the usage text, so it prints to stdout at exit 0.)
 - **Records, not code.** `tab extract` turns repeated page items into JSON
   with CSS selectors alone — no JavaScript, no scraping framework, bounded at
   the page so a huge document cannot flood the reply.

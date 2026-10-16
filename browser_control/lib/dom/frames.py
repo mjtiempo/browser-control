@@ -120,7 +120,7 @@ def frames_of(port: int, page_target: str,
     verify_port_owner(port)
     if census is None:
         census = cdp.evaluate(cdp.target_ws(port, page_target),
-                              fill(FRAME_CENSUS)) or []
+                              fill(FRAME_CENSUS), cap=None) or []
     owned = cdp.frame_targets(port)
     shared: dict[str, int] = {}
     attribution = ""
@@ -485,12 +485,13 @@ def _frame_summary(row: dict, tab_row: dict,
     port = row_port(row) or as_int(cdp.port_of(str(row["profile"])))
     try:
         if session is not None and not scope_state.current().frame_wanted:
-            census = session.evaluate(fill(FRAME_CENSUS))
+            census = session.evaluate(fill(FRAME_CENSUS), cap=None)
         else:
             # the one connection this helper opens on its own: judged first,
             # like every other websocket the DOM tier builds
             verify_port_owner(port)
-            census = cdp.evaluate(cdp.target_ws(port, page), fill(FRAME_CENSUS))
+            census = cdp.evaluate(cdp.target_ws(port, page), fill(FRAME_CENSUS),
+                                  cap=None)
     except ControlError as e:
         return {"error": f"{e.code}: {e.message}", "total": None,
                 "separate": None, "cross_origin": None, "visible": None,

@@ -73,8 +73,15 @@ PRELUDE = r"""
     ].filter((v) => typeof v === 'string' && v.trim() !== '')
      .join(' ').replace(/\s+/g, ' ').trim();
   const role = (el) => attr(el, 'role') || el.tagName.toLowerCase();
+  // The `#id` is clipped like everything else the page owns: `describe` feeds
+  // BOTH the `hit_element` a row reports and the probes that are compared
+  // against it (`actions._head` compares `role#id`), so a page with a
+  // 200 000-character id made `tab find` put megabytes on stdout — and the
+  // clip has to live HERE, where every producer shares it, or the two sides of
+  // that comparison would stop matching. An id is an identifier; 120 is
+  // generous.
   const describe = (el) => el
-    ? role(el) + (attr(el, 'id') ? '#' + attr(el, 'id') : '')
+    ? role(el) + (attr(el, 'id') ? '#' + clip(attr(el, 'id'), 120) : '')
       + (label(el) ? ' ' + label(el).slice(0, 40) : '')
     : null;
   // A STABLE identity for an element: tag, id and its place in the tree — no
@@ -175,12 +182,29 @@ FIND_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
                                      r.top + r.height / 2, vw, vh)
                              : {ok: false, at: null, what: null};
     out.push({tag: el.tagName.toLowerCase(), role: role(el),
-              name: attr(el, 'aria-label') || attr(el, 'name') || null,
-              type: attr(el, 'type'), href: el.href || null,
+              // the page's OWN attributes, so each is clipped to what it is:
+              // a label like `text`'s, a type token, and a URL. They rode raw
+              // while the `text` beside them was sliced, and a page with 100
+              // buttons carrying 50 000-character `aria-label`s put 5 045 152
+              // bytes on stdout at exit 0 — a "page-bounded" read that was not
+              // one, and 16 MiB of them killed the verb (a review measured
+              // both). `name`/`href` keep their null-when-absent shape; `type`
+              // is a string like every other `clip` (see PRELUDE).
+              name: clip(attr(el, 'aria-label') || attr(el, 'name'), 120)
+                    || null,
+              type: clip(attr(el, 'type'), 40), href: clip(el.href, 2000) || null,
               text: label(el).slice(0, 120),
               in_viewport: g.inViewport, clipped: g.clipped,
               box: [Math.round(r.left + scrollX), Math.round(r.top + scrollY),
                     Math.round(r.width), Math.round(r.height)],
+              // the RAW page-coordinate border box, UNROUNDED, beside the
+              // rounded `box` above: element screenshots round it OUTWARD
+              // (floor left/top, ceil right/bottom) so an element below the
+              // fold captures whole, and a pre-rounded box would already have
+              // lost the sub-pixel edge the outward rounding needs. Only
+              // `lib/dom/screenshot.py` reads it; `find` drops it when it
+              // builds its reply (`queries.py`), so no reply carries it.
+              rect: [r.left + scrollX, r.top + scrollY, r.width, r.height],
               center: [Math.round(r.left + scrollX + r.width / 2),
                        Math.round(r.top + scrollY + r.height / 2)],
               viewport: [Math.round(r.left), Math.round(r.top),
@@ -310,8 +334,22 @@ SCROLL_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
           nested: nested};
 })())""")
 
+# The CLICK read-back (`click` and `click --at`, before and after): the page's
+# own title and address ride here, so they are clipped IN THE PAGE like every
+# other expression's (`clip`'s docstring says why). They were the one pair left
+# raw, and this is the expression on the WRITE path: a page with a 70 000-char
+# `document.title` made `tab click` refuse `result-too-large` against the
+# transport cap BEFORE the click was dispatched, naming an expression the
+# caller never wrote — so the verb could not click at all (a review measured
+# it). `find`/`text`/`extract` had obeyed the rule since the 2 MB title.
+#
+# What the clip costs: `PageState.changed` compares url and title, so a click
+# whose ONLY effect is past character 2000 of the address or 300 of the title
+# now reads `changed: false`. That is the boundary `find`'s payload already
+# carried — a `PageState` can be built from either — so the two sources agree
+# on it now instead of one of them being silently unbounded.
 STATE_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
-  return {url: location.href, title: document.title,
+  return {url: clip(location.href, 2000), title: clip(document.title, 300),
           active: describe(document.activeElement),
           x: Math.round(scrollX), y: Math.round(scrollY)};
 })())""")
@@ -478,15 +516,33 @@ SELECT_PROBE = ("JSON.stringify((() => {" + PRELUDE + r"""
             (o) => optionLabel(o).slice(0, 40))};
 })())""")
 
+# `url`/`title` here are REPORTED (the screenshot reply names the page it
+# captured), so they are clipped in the page like every other reported pair: a
+# page with a 2 MB `document.title` made `tab screenshot` refuse
+# `result-too-large` before it could write anything, for a file whose dimensions
+# it had already proven. The GEOMETRY this expression exists for (`iw`/`ih`/
+# `sw`/`sh`/`dpr`) is untouched — `expected_pixels` compares those against the
+# PNG's own header, and none of them is page text.
 SHOT_METRICS = ("JSON.stringify((() => {" + PRELUDE + r"""
   return {iw: Math.round(innerWidth), ih: Math.round(innerHeight),
           dpr: devicePixelRatio,
           sw: document.documentElement.scrollWidth,
           sh: document.documentElement.scrollHeight,
-          url: location.href, title: document.title,
+          url: clip(location.href, 2000), title: clip(document.title, 300),
           visibility: document.visibilityState};
 })())""")
 
+# One row per IFRAME, so this answer is as big as the page's frame list — which
+# is what the verb reports, and why the census is evaluated with `cap=None`
+# (`frames.py`, all three sites) rather than against the 64 k post-transfer
+# cap: an ordinary 400-iframe page (1.2 KB `src` each, ~528 KB) made `tab
+# frames` — the verb whose whole job is to report frames — refuse
+# `result-too-large`, with the message telling a caller to "ask the page for
+# LESS" when there is no less to ask for (a review measured it). `url` and
+# `name` stay UNSLICED here on purpose: `frames` matches a census row by
+# `role#url` against the browser's own target list, so a clip would stop a
+# long-`src` frame from ever binding (see `_UNCLIPPED_BY_DESIGN` in the suite).
+# The 16 MiB frame limit is the backstop that still bounds the transfer.
 FRAME_CENSUS = ("JSON.stringify((() => {" + PRELUDE + r"""
   return frames().map((f, index) => {
     const r = f.getBoundingClientRect();
@@ -564,8 +620,22 @@ EXTRACT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
     // `#fields × --chars`, so a handful of fields blew the CDP transport cap
     // and `tab extract` refused `result-too-large` naming an expression the
     // caller never wrote (a review found it)
+    //
+    // ...but the FIRST row is pushed whatever it costs. `#fields × --chars` can
+    // legitimately exceed the budget — `--chars` is allowed up to
+    // `EXTRACT_FIELD_MAX`, which IS the budget, so ONE field at its documented
+    // maximum can never fit — and the old unconditional `break` then answered
+    // `matches: []` for a page full of records, which reads as "nothing
+    // matched" when the truth is "the first row is bigger than the budget"
+    // (a review measured 6 records and 8 fields × `--chars 5000` answering
+    // `count: 0, total: 6, truncated: true`). The exemption is BOUNDED: one row
+    // is at most `EXTRACT_MAX_FIELDS × EXTRACT_FIELD_MAX` = 640 000 characters,
+    // well under the transport cap, and `truncated` below still says the rest
+    // was cut. An honest one-row answer beats a silent empty one.
     const n = JSON.stringify(row).length;
-    if (used + n > schema.budget) { budget_hit = true; break; }
+    if (used + n > schema.budget && records.length) {
+      budget_hit = true; break;
+    }
     used += n;
     records.push(row);
   }

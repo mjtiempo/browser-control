@@ -31,7 +31,11 @@ $ browser-control-cli tab extract --each article \
 - `--unique FIELD` — keep the first record per value of FIELD.
 - The whole reply is budgeted at 20000 characters of field text, and values
   are sliced **in the page**, so a huge document cannot flood the reply.
-  Long fields mean fewer records before `truncated` flips true.
+  Long fields mean fewer records before `truncated` flips true — down to a
+  floor of **one**: a selector that matched always answers at least one record,
+  even when that row alone is over the budget (`--chars 20000` across several
+  fields is the case), because `matches: []` beside a non-zero `total` reads as
+  "nothing matched" when the truth is "the first row is too big to fit".
 
 The reply says what happened: `count` is the records returned, `total` is what
 the selector reached, and `truncated` is true when the cap or the budget cut

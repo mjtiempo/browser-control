@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import http.server
 import json
+import math
 import os
 import re
 import shutil
@@ -1222,6 +1223,34 @@ def c_tab_select() -> str:
     return "value then label, and the page's change handler sees isTrusted"
 
 
+def _shot_geometry(expr: str) -> dict:
+    """The page's OWN border box for an element JS expression, plus scroll.
+
+    The independent oracle for a screenshot's IHDR: the numbers come from
+    `getBoundingClientRect()` read back through `tab js`, never from the
+    screenshot reply itself.
+    """
+    source = ("JSON.stringify((() => { const el = " + expr
+              + "; const r = el.getBoundingClientRect();"
+              " return {left: r.left, top: r.top, width: r.width,"
+              " height: r.height, sx: scrollX, sy: scrollY}; })())")
+    return json.loads(ok_json("tab", "js", source)["value"])
+
+
+def _outward_clip(g: dict) -> list[int]:
+    """The element's raw page box rounded OUTWARD, as `tab screenshot` does."""
+    x = math.floor(g["left"] + g["sx"])
+    y = math.floor(g["top"] + g["sy"])
+    return [x, y,
+            math.ceil(g["left"] + g["sx"] + g["width"]) - x,
+            math.ceil(g["top"] + g["sy"] + g["height"]) - y]
+
+
+def _half_up(css: float, dpr: float) -> int:
+    """The device size Chrome's own IHDR uses: round HALF-UP, not `round()`."""
+    return math.floor(css * dpr + 0.5)
+
+
 def c_tab_screenshot() -> str:
     """`tab screenshot` writes a PNG whose own header matches the page."""
     ok_json("tab", "nav", f"{base_url()}/dom")
@@ -1242,7 +1271,55 @@ def c_tab_screenshot() -> str:
     assert full["full"] is True and full["height"] >= reply["height"], full
     refuses("bad-args", "tab", "screenshot", os.path.join(ROOT, "shot.jpg"))
     refuses("bad-args", "tab", "screenshot", os.path.join(ROOT, "no", "x.png"))
-    return f'{reply["width"]}x{reply["height"]} on disk; --full is taller'
+    # element mode: ONE element's border box, rounded outward, below the fold
+    # (the geometry is read back independently through `tab js`)
+    el_path = os.path.join(ROOT, "shot-element.png")
+    el = ok_json("tab", "screenshot", el_path, "--selector", "#below")
+    assert el["mode"] == "element" and el["verified"] is True, el
+    g = _shot_geometry("document.querySelector('#below')")
+    assert el["clip"] == _outward_clip(g), (el["clip"], g)
+    assert [el["width"], el["height"]] == [
+        _half_up(el["clip"][2], el["device_pixel_ratio"]),
+        _half_up(el["clip"][3], el["device_pixel_ratio"])], el
+    assert el["element"]["in_viewport"] is False, el["element"]
+    assert el["element"]["tag"] == "button", el["element"]
+    # --index picks the Nth match of a selector that names several
+    idx_path = os.path.join(ROOT, "shot-index.png")
+    idx = ok_json("tab", "screenshot", idx_path, "--selector", "button",
+                  "--index", "1")
+    g1 = _shot_geometry("document.querySelectorAll('button')[1]")
+    assert idx["mode"] == "element" and idx["clip"] == _outward_clip(g1), \
+        (idx["clip"], g1)
+    # region mode: a caller-named rectangle in page coordinates
+    reg_path = os.path.join(ROOT, "shot-region.png")
+    reg = ok_json("tab", "screenshot", reg_path, "--clip", "40,40,300,200")
+    assert reg["mode"] == "region" and reg["clip"] == [40, 40, 300, 200], reg
+    assert [reg["width"], reg["height"]] == [
+        _half_up(300, reg["device_pixel_ratio"]),
+        _half_up(200, reg["device_pixel_ratio"])], reg
+    # the RAW page rect stays out of `find`'s reply (it is element mode's)
+    found = ok_json("tab", "find", "--selector", "#below")
+    assert found["matches"] and "rect" not in found["matches"][0], found
+    # refusals: ONE mode at most, --index only with --selector, a clip syntax
+    # Chrome could not capture, and a rectangle wholly outside the document
+    refpath = os.path.join(ROOT, "shot-refuse.png")
+    refuses("bad-args", "tab", "screenshot", refpath, "--full",
+            "--selector", "#below")
+    refuses("bad-args", "tab", "screenshot", refpath, "--clip", "1,2,3,4",
+            "--full")
+    refuses("bad-args", "tab", "screenshot", refpath, "--index", "1")
+    refuses("bad-args", "tab", "screenshot", refpath, "--clip", "1,2,3")
+    refuses("bad-args", "tab", "screenshot", refpath, "--clip", "1,2,0,4")
+    outside = refuses("bad-args", "tab", "screenshot", refpath, "--clip",
+                      "99999,99999,10,10")
+    assert "wholly outside" in outside, outside
+    refuses("no-match", "tab", "screenshot", refpath, "--selector", "#nope")
+    refuses("ambiguous-element", "tab", "screenshot", refpath,
+            "--selector", "button")
+    assert not os.path.exists(refpath), \
+        "a refused capture left a file behind"
+    return (f'{reply["width"]}x{reply["height"]} on disk; --full is taller; '
+            f'element {el["clip"]} and region 300x200 verified')
 
 
 def c_tab_dialog() -> str:

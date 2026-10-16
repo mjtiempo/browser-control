@@ -180,7 +180,8 @@ Page-level, under `tab`:
 `tab press KEY` · `tab insert TEXT` · `tab type TEXT` ·
 `tab check TEXT|--selector CSS [--uncheck]` ·
 `tab select TEXT|--selector CSS --value V` ·
-`tab upload FILE [--selector CSS]` · `tab screenshot PATH [--full] [--force]` ·
+`tab upload FILE [--selector CSS]` · `tab screenshot PATH [--full | --selector
+CSS [--index N] | --clip X,Y,W,H] [--force]` ·
 `tab dialog [state|accept|dismiss] [--text V]` ·
 `tab media state|play|pause` · `tab ad-state` · `tab skip-ad` (the ad verbs
 are DEFERRED by decision: site-specific knowledge belongs to the plugin tier).
@@ -224,6 +225,25 @@ or to an attached one** — `attach` grants tab writes to a browser this tool
 did not start, `detach` revokes it, and `close` never stops an attached one
 (attaching is not ownership). `list` and `info` report `managed` and
 `attached` on every browser.
+
+`tab screenshot` has FOUR capture modes — the viewport (default), the whole
+document (`--full`), one element (`--selector CSS [--index N]`) and one
+caller-named region (`--clip X,Y,W,H`, integer CSS px from the document's
+origin; `--full`/`--selector`/`--clip` are ONE choice, and `--index` goes only
+with `--selector`). All four rest on one oracle: the PNG's own IHDR must equal
+`floor(region_css × devicePixelRatio + 0.5)` per dimension — round HALF-UP
+(the live probe measured Chrome's own rounding; Python's `round()` is
+half-EVEN and sat one pixel low on an exact `.5`) — or nothing is written.
+Element mode resolves exactly like `tab find --selector` (`no-match` and
+`ambiguous-element` unchanged, hidden elements are not candidates) through a
+READ-opened tab, so the verb stays `read`+`file`; the picked element's border
+box rounds OUTWARD to whole CSS px (floor left/top, ceil right/bottom) and is
+sent as CDP `clip` with `captureBeyondViewport`, so an element below the fold
+captures whole. Decided out: no format switch (the PNG IHDR is the oracle), no
+`--scale`, no `--frame` offset math (element mode follows the same `--frame`
+scope as `tab find`; no extra offset math is applied), no
+OS window chrome (`Page.captureScreenshot` renders the page, not the window).
+All four modes ship (progress.md §5.37).
 
 Shape: one `cmd_*` per verb in a `HANDLERS` table (`tab`'s subcommands in
 `TAB_SUBCOMMANDS`); `main` parses `--browser`, dispatches, logs, prints
@@ -330,7 +350,7 @@ unclear oracle into a claim of absence.**
 | `tab select` | mutation | the control's own `value`/`selectedIndex` after REAL arrow keys, by value then exact label | L2 | `not-a-select`, `ambiguous-option`, `no-match`, `select-not-verified` |
 | `tab dialog state` | read | the tab answering at all is proof no dialog blocks it; a tab that cannot answer reports `open: null, verified: false`, never a claim of absence | L2 | `blocked` (as a report, not a refusal) |
 | `tab dialog accept\|dismiss` | mutation | the renderer answering AGAIN inside a bounded poll; the browser's own “No dialog is showing” makes the refusal definitive | L3 | `no-dialog`, `dialog-not-verified` |
-| `tab screenshot` | read (+ a local file) | the PNG's own IHDR against the page's `innerWidth/Height` (or `scrollWidth/Height` with `--full`) × `devicePixelRatio`; a mismatch writes nothing | L4 | `screenshot-not-verified`, `file-exists`, `write-failed` |
+| `tab screenshot` | read (+ a local file) | the PNG's own IHDR against the region the page reported in the chosen mode — `innerWidth/Height` (default), `scrollWidth/Height` (`--full`), the picked element's border box (`--selector`), or the caller's `--clip` — × `devicePixelRatio`; a mismatch writes nothing | L4 | `screenshot-not-verified`, `file-exists`, `write-failed`, `bad-args` (mode conflicts, clip geometry), and element mode's `no-match`/`ambiguous-element` |
 | `tab scroll` | mutation | the polled scroll position of the document and of the scroller under the point | L3 | `scroll-not-verified` |
 | `tab focus` | mutation | `document.activeElement === el` | L2 | `focus-not-verified` (the protocol's own reason) |
 | `tab press` | mutation | the strict dispatch only | L1 | `cdp-error` (the caller reads the effect) |
@@ -377,6 +397,11 @@ Desktop/compositor integration · window-scoped tabs · `--workspace`
 placement · screen coordinates/monitors/clicks · site adapters in core ·
 remote/forwarded CDP · writes to the user's profile · `file://`/`data:`/
 `chrome://` navigation · shelling out to a launcher.
+
+One exclusion has a use case with a draft behind it — remote CDP through a
+loopback tunnel (a Firecracker microVM's guest browser):
+[plan-remote-cdp.md](plan-remote-cdp.md). It is a DRAFT, not a decision, and
+this list stands until the draft reverses it.
 
 ## 8. Build order
 

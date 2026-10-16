@@ -47,7 +47,8 @@ PID_FILE_CAP = 64
 __all__ = ["BROWSER_EXES", "HEADLESS_EXES", "cmdline_value", "exe_name",
            "exe_path", "find_pid", "is_headless_cmd", "listener_of",
            "main_processes", "pid_alive", "pid_of", "pid_on_marker",
-           "pid_on_profile", "proc_text", "record_pid", "spawn"]
+           "pid_on_profile", "proc_text", "record_pid", "small_file",
+           "spawn"]
 
 
 def pid_alive(pid: int) -> bool:
@@ -220,7 +221,7 @@ def pid_on_profile(pid: int, profile: str) -> bool:
                for found, _exe, cmd in main_processes())
 
 
-def _small_file(path: str, cap: int) -> bytes:
+def small_file(path: str, cap: int) -> bytes:
     """At most `cap` bytes of a REGULAR file this process did not write.
 
     The same rule `cdp.endpoint` applies to `DevToolsActivePort`, spelled here
@@ -231,6 +232,11 @@ def _small_file(path: str, cap: int) -> bytes:
     a writer, before any read — and the `fstat` refuses anything that is not a
     small regular file. `b""` is "no record", which is what the caller wants;
     a refusal would turn a degraded `close` into an error.
+
+    PUBLIC as of the `attached.json` read: a third file in the same
+    caller-writable root needs the same rule, and a second spelling of it is a
+    second answer (`lib/attachments.py` is the caller). Every reader of a file
+    this process did not write belongs here.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -257,11 +263,11 @@ def pid_of(profile: str) -> int:
     fallback, and it refuses to hand back a renderer or a stranger.
 
     The record is read like any file another process may have written
-    (`_small_file`): a FIFO, a symlink or a device at the pid path is "no
+    (`small_file`): a FIFO, a symlink or a device at the pid path is "no
     record", not a hung CLI — the profile directory is exactly the place a
     stranger can plant one.
     """
-    raw = _small_file(pid_file(profile), PID_FILE_CAP)
+    raw = small_file(pid_file(profile), PID_FILE_CAP)
     try:
         pid = int(raw.strip())
     except ValueError:

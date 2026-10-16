@@ -3,8 +3,9 @@
 Adapters for the verbs, registered in `registry.HANDLERS`; `main` parses
 `--browser`, dispatches, prints the reply as one JSON object on stdout, and
 maps a refusal to `ERR[code]: message` on stderr with exit 2. The reply is the
-only thing on stdout — the no-verb path prints the usage text to stderr — and
-no caller-producible input can produce a traceback.
+only thing on stdout — with ONE exception, `help` (below) — the no-verb path
+prints the usage text to stderr — and no caller-producible input can produce a
+traceback.
 """
 from __future__ import annotations
 
@@ -128,7 +129,7 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                      sweeps substrings, --all is everything, --except keeps;
                      --dry instead reports `would_close` and closes NOTHING
   tab nav URL [--tab SPEC]       navigate, then read the address back
-  tab back|forward [--tab SPEC]  history, verified by the address changing
+  tab back|forward [--tab SPEC]   history, verified by the address changing
   tab reload [--tab SPEC]        a NEW document, verified
   tab activate [SPEC]            bring a tab forward (it raises its window)
   tab check TEXT|--selector CSS [--index N] [--uncheck] [--tab SPEC]
@@ -137,9 +138,16 @@ USAGE = """usage: browser-control-cli VERB [ARGS]
                                  choose one <option> with real arrow keys
   tab dialog [state|accept|dismiss] [--text VALUE] [--tab SPEC]
                                  read, accept or dismiss a JavaScript dialog
-  tab screenshot PATH|--path PATH [--full] [--force] [--tab SPEC]
+  tab screenshot PATH|--path PATH [--full | --selector CSS [--index N]
+           | --clip X,Y,W,H] [--force] [--tab SPEC]
                                  write a PNG of the page; its own header
-                                 vouches for the size, not the page's geometry
+                                 vouches for the size, not the page's geometry:
+                                 the viewport (default), the whole document
+                                 (--full), one element's border box
+                                 (--selector, several matches need --index), or
+                                 a caller-named page rectangle (--clip X,Y,W,H
+                                 in integer CSS px from the document origin)
+                                 — ONE of the three at most
   tab js EXPR [--out FILE] [--force] [--tab SPEC]
                                  evaluate an expression (can write; unverified);
                                  --out writes the value to FILE as JSON — the
@@ -230,7 +238,11 @@ gate:  --allow/--deny, or BROWSER_CONTROL_ALLOW/BROWSER_CONTROL_DENY for a
 reads: every drivable browser.  writes: a managed browser, or an attached one
        — `attach` grants TAB writes only, `close` never stops one; `tab js`
        and `tab wait --for js` count as writes (they run caller code)
-out:   one JSON object on stdout; ERR[code]: message on stderr, exit 2"""
+out:   one JSON object on stdout; ERR[code]: message on stderr, exit 2
+       `help` (and `-h`/`--help`) is the ONE exception: it prints this text to
+       STDOUT with exit 0, because the text IS its answer — a caller that
+       branches on "stdout parses as JSON" must special-case it, and every
+       other verb keeps the contract"""
 
 #: A refusal that names a flag the verb does not take gets the verb's OWN usage
 #: line appended: the message already says WHAT was misread, and the usage says
@@ -245,9 +257,23 @@ def _usage_head(line: str) -> str:
     """The flags half of one usage line, or "" for a description line.
 
     The help text puts a call's shape on the left and its explanation on the
-    right, separated by a run of spaces; the continuation lines are
-    explanation-only, so they cannot match a verb phrase. A plugin's `usage`
-    splits the same way on an em dash.
+    right, separated by a run of spaces; prose continues on explanation-only
+    lines, which cannot match a verb phrase. A call shape too long for one line
+    wraps onto a line beginning with a flag token — `_usage_lines` joins those
+    back together BEFORE this function sees them. A plugin's `usage` splits the
+    same way on an em dash.
+
+    The run must be THREE spaces or more, and that is the one thing a line can
+    get wrong on its own: `tab back|forward` was written with two (its
+    neighbours align their descriptions past a shape of a different length),
+    so this function handed back the shape AND its explanation, and every
+    `bad-args` refusal for `tab back`/`tab forward` appended
+    "…— usage: tab back|forward [--tab SPEC]  history, verified by the address
+    changing" — the description carried into the reply as if it were part of
+    the call (a review found it). A call shape may contain commas of its own
+    (`--at X,Y`, `--clip X,Y,W,H`); the rule the suite asserts is narrower — a
+    SHAPE's comma is never followed by a space and a lowercase word, which is
+    what every English explanation here has.
     """
     text = str(line).strip().split(" — ", 1)[0].strip()
     if not text or text.startswith("usage:"):
@@ -256,8 +282,24 @@ def _usage_head(line: str) -> str:
 
 
 def _usage_lines() -> list[str]:
-    """Every verb's usage, from the help text and the installed plugins."""
-    lines = [_usage_head(raw) for raw in USAGE.splitlines()]
+    """Every verb's usage, from the help text and the installed plugins.
+
+    A call too long for one line continues on the next, which begins with a
+    flag token (`|` or `[`) rather than a verb; those lines are joined onto
+    their verb BEFORE `_usage_head` sees them. Without the join, `_usage_head`
+    read only the first physical line, so `tab screenshot --bogus` got a shape
+    cut mid-bracket (`--clip`, `--force` and `--tab` missing, no bracket
+    closed) and the continuation became a junk entry of its own — while
+    `_hinted` promises the caller the WHOLE line. A description line never
+    starts with `|` or `[`, so prose is never joined.
+    """
+    joined: list[str] = []
+    for raw in USAGE.splitlines():
+        if joined and raw.strip().startswith(("|", "[")):
+            joined[-1] = f"{joined[-1]} {raw.strip()}"
+        else:
+            joined.append(raw)
+    lines = [_usage_head(raw) for raw in joined]
     lines += [_usage_head(usage) for usage in registry.PLUGINS.usages()]
     return [line for line in lines if line]
 
@@ -585,6 +627,7 @@ def _run_invocation(args: list[str]) -> int:
         registry.POLICY.update(policy_lib.Policy.from_sources(flags["allow"],
                                                              flags["deny"]))
         handler = registry.HANDLERS.get(verb)
+        plugin = None
         if handler is None:
             plugin = registry.PLUGINS.actions.get(verb)
             handler = plugin.run if plugin is not None else None
@@ -594,7 +637,21 @@ def _run_invocation(args: list[str]) -> int:
                                + ", ".join(registry.verb_names()) + ")")
         head = _head_of(rest)
         _authorise(verb, rest, flags)
-        reply = handler(rest, browser)
+        if plugin is None:
+            reply = handler(rest, browser)
+        else:
+            # a plugin's own `print` would land on stdout AHEAD of the reply,
+            # which IS the contract: the verb runs with stdout diverted, and
+            # what it said is carried as a warning rather than corrupting the
+            # one JSON object a caller is parsing (`plugins.captured_stdout`)
+            with plugins_lib.captured_stdout() as said:
+                reply = handler(rest, browser)
+            chatter = said.getvalue()
+            if chatter and isinstance(reply, dict):
+                reply["warning"] = (
+                    f"{reply['warning']}; " if "warning" in reply else "") + (
+                    f"the plugin wrote {len(chatter)} character(s) to stdout — "
+                    "they were discarded, because stdout is this CLI's reply")
         # ONE JSON object on stdout is the contract the usage text states and
         # every plugin is told to keep: a handler that returns a list, a string
         # or None used to print it with exit status 0, breaking every consumer

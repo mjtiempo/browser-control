@@ -295,8 +295,20 @@ def history(direction: str, tab: str = "", browser: str = "") -> dict:
         fail(ERR_NAV_FAILED,
              f"the tab is at history entry {index + 1} of {len(entries)} — "
              f"there is no {direction} entry to move to")
-    cdp.call(tab_ws, "Page.navigateToHistoryEntry",
-             {"entryId": (entries[wanted] or {}).get("id")})
+    entry = entries[wanted]
+    if not isinstance(entry, dict):
+        # the ENTRIES are peer data: a browser that answers the list with
+        # something other than entry objects used to reach `.get` on a string
+        # and come back `ERR[internal]: AttributeError: 'str' object has no
+        # attribute 'get'` — the one shape a refusal contract must never take,
+        # and the shape this transport widened three times to avoid (a review
+        # reproduced it). The `or {}` that was here shows the intent; a truthy
+        # non-object is what slipped past it.
+        fail(ERR_NAV_FAILED,
+             f"the browser reports history entry {wanted + 1} of "
+             f"{len(entries)} as {type(entry).__name__}, not an entry with an "
+             f"id — there is no {direction} entry to move to")
+    cdp.call(tab_ws, "Page.navigateToHistoryEntry", {"entryId": entry.get("id")})
     if not _wait_url_change(profile, target_id, before, port=port):
         if not before:
             # the address could not be read BEFORE, so "it changed" has no

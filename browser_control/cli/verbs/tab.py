@@ -160,10 +160,14 @@ def cmd_tab_dialog(rest: list[str], browser: str) -> dict:
     return dom.dialog(mode, text=text, tab=spec, browser=browser)
 
 def cmd_tab_screenshot(rest: list[str], browser: str) -> dict:
-    """`tab screenshot PATH | --path PATH [--full] [--force] [--tab SPEC]`."""
+    """`tab screenshot PATH | --path PATH [--full | --selector CSS [--index N]
+    | --clip X,Y,W,H] [--force] [--tab SPEC]`."""
     rest, spec = _tab_flag(rest, "tab screenshot")
     rest, path = _pop(rest, "--path", "tab screenshot")
     rest, full = _switch(rest, "--full")
+    rest, selector = _pop(rest, "--selector", "tab screenshot")
+    rest, index = _pop(rest, "--index", "tab screenshot")
+    rest, clip = _pop(rest, "--clip", "tab screenshot")
     rest, force = _switch(rest, "--force")
     rest = _no_flags(rest, "tab screenshot")
     if len(rest) > 1:
@@ -176,8 +180,29 @@ def cmd_tab_screenshot(rest: list[str], browser: str) -> dict:
         fail(ERR_BAD_ARGS,
              "tab screenshot: a PATH is required (an absolute path ending in "
              ".png)")
-    return dom.screenshot(target, full=full, force=force, tab=spec,
-                          browser=browser)
+    # ONE mode at most, and all the syntax checks land BEFORE a browser is
+    # asked about anything: three ways to name a region that disagree is a
+    # mistake, not a preference, and `--clip`'s W,H must be positive because
+    # Chrome hangs on a negative size and refuses a zero one (measured)
+    modes = [name for name, given in (("--full", full),
+                                      ("--selector", selector is not None),
+                                      ("--clip", clip is not None)) if given]
+    if len(modes) > 1:
+        fail(ERR_BAD_ARGS,
+             f"tab screenshot: name ONE of --full, --selector CSS or "
+             f"--clip X,Y,W,H, not {', '.join(modes)}")
+    if index is not None and selector is None:
+        fail(ERR_BAD_ARGS,
+             "tab screenshot: --index goes with --selector CSS")
+    if selector is not None and not str(selector).strip():
+        fail(ERR_BAD_ARGS,
+             "tab screenshot: --selector needs a CSS selector")
+    rect = (dom._clip_rect(clip, "tab screenshot")           # noqa: SLF001
+            if clip is not None else None)
+    return dom.screenshot(target, full=full, force=force,
+                          selector=selector,
+                          index=_opt_int(index, "tab screenshot --index"),
+                          clip=rect, tab=spec, browser=browser)
 
 def cmd_tab_extract(rest: list[str], browser: str) -> dict:
     """`tab extract --each CSS --field NAME=SPEC ...` — records, no code."""

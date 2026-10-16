@@ -19,6 +19,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from browser_control.lib import proc as proc_lib
 from browser_control.lib.coerce import as_int
 from browser_control.lib.errors import (
     ERR_ATTACH_FAILED,
@@ -28,8 +29,15 @@ from browser_control.lib.locks import LockState, profile_lock
 from browser_control.lib.paths import lock_path, norm, root
 
 ATTACH_FILE = "attached.json"
+#: How much of the attach store is a RECORD: one row is ~200 bytes (`profile`,
+#: `pid`, `port`, `exe`, `managed`, `attached_at`), so a megabyte is thousands
+#: of concurrent attachments — far past any real machine, and the point is only
+#: that the read is BOUNDED. A store past it reads as "no records", which is
+#: the fail-closed direction this file already documents for every other
+#: unusable shape (no attachment is not an authorization to write anywhere).
+ATTACH_FILE_CAP = 1 << 20
 
-__all__ = ["ATTACH_FILE", "STORE", "AttachmentStore"]
+__all__ = ["ATTACH_FILE", "ATTACH_FILE_CAP", "STORE", "AttachmentStore"]
 
 
 class AttachmentStore:
@@ -47,11 +55,26 @@ class AttachmentStore:
         return os.path.join(self.base, ATTACH_FILE)
 
     def records(self) -> dict[str, dict]:
-        """The attach records, keyed by absolute profile path."""
+        """The attach records, keyed by absolute profile path.
+
+        The file is chosen by whoever wrote the profile ROOT, so it is read the
+        way every other file this process did not write is read
+        (`proc.small_file`): `O_NOFOLLOW` refuses a symlink, `O_NONBLOCK` keeps
+        a reader-less FIFO from blocking the OPEN — which is where a bare
+        `open()` waits for ever, before any read — and the `fstat` refuses
+        anything that is not a small regular file. This was the ONE reader in
+        the tree without that guard, and the census asks it on every call: a
+        FIFO (or a symlink to `/dev/zero`) planted at `<root>/attached.json`
+        hung `info`, `list` and `tab list` for ever (a review measured it, and
+        the port/pid readers next door already had the rule). A file past the
+        cap reads as "no records" like every other unusable shape.
+        """
+        raw = proc_lib.small_file(self.path(), ATTACH_FILE_CAP)
+        if not raw:
+            return {}
         try:
-            with open(self.path()) as handle:
-                data = json.load(handle)
-        except (OSError, ValueError):
+            data = json.loads(raw)
+        except ValueError:
             return {}
         if not isinstance(data, list):
             return {}

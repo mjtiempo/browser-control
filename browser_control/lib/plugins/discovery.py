@@ -2,7 +2,10 @@
 
 `BROWSER_CONTROL_PLUGIN_PATH` is an OVERRIDE: when it is set, only its
 directories are searched, so a test (or a deployment that wants a fixed set)
-does not pick up whatever the user's plugin directory happens to contain.
+does not pick up whatever the user's plugin directory happens to contain. SET
+and UNSET are the two states — a variable set to "" searches NO directory
+rather than falling back to the default one, which is what makes "lock plugins
+out" a thing a deployment can actually ask for (`_entries` has the reasoning).
 
 A RELATIVE entry is refused, never resolved against the current directory. A
 plugin is local code running in this process with the CLI's own credentials and
@@ -11,7 +14,8 @@ its CDP access, and an entry like `plugins` in a shell rc would import whatever
 untrusted tree's code on every invocation, before the policy gate exists. So
 `dirs()` returns only entries that name an absolute path (or start with `~`),
 and `refused()` reports the rest with the reason, which the plugin set carries
-as typed errors (`PluginSet.load`).
+as typed errors (`PluginSet.load`). An entry that names NO path at all is
+reported the same way, so nothing on the search path is dropped in silence.
 
 `import_module` is the OTHER boundary: it catches `BaseException`, because a
 plugin's `sys.exit` or `KeyboardInterrupt` at import is exactly what it exists
@@ -38,14 +42,28 @@ def _entries() -> list[tuple[str, str]]:
 
     One parse for `dirs()` and `refused()`, so the rule is spelled once and
     the two readers cannot disagree about which entries were searched.
+
+    UNSET and EMPTY are different answers, and the module docstring's promise
+    ("when it is set, only its directories are searched") needs the difference:
+    `os.environ.get(PLUGIN_ENV, "")` read a variable set to "" as unset, so a
+    deployment that locked plugins out with an empty value got the user's own
+    `~/.local/share/browser-control/plugins` imported instead — the opposite of
+    what it asked for, and the asymmetry this tree refuses everywhere else (a
+    blank `BROWSER_CONTROL_ALLOW`/`--allow` is a refusal precisely because a
+    blank value used to read as "no policy"). An entry that names NO directory
+    (`""`, or a stray `:` separator) is REPORTED rather than skipped in
+    silence, like every other entry that is not searched.
     """
-    raw = os.environ.get(PLUGIN_ENV, "")
-    if not raw.strip():
+    if PLUGIN_ENV not in os.environ:
         return [(expand(DEFAULT_PLUGIN_DIR), "")]
     out: list[tuple[str, str]] = []
-    for part in raw.split(os.pathsep):
+    for part in os.environ[PLUGIN_ENV].split(os.pathsep):
         text = part.strip()
         if not text:
+            out.append((part, (f"{PLUGIN_ENV} names no directory in this "
+                               "entry — an empty entry is not a path; unset "
+                               "the variable to search the default directory, "
+                               "or name an absolute path")))
             continue
         if text.startswith("~") or os.path.isabs(text):
             out.append((expand(text), ""))
@@ -83,14 +101,18 @@ def refused() -> list[tuple[str, str]]:
 def import_module(path: str) -> tuple[Any | None, str]:
     """Import one plugin file. `(module, "")` or `(None, reason)` — never raises.
 
-    `BaseException`, not `Exception`: this is the boundary a plugin cannot
-    cross. A plugin that calls `sys.exit(0)` while it is imported used to take
-    the WHOLE invocation down — every call exited 0 with empty stdout and no
-    audit line, indistinguishable from success to a JSON consumer — and a
+    `BaseException`, not `Exception`: this is the boundary a plugin cannot cross
+    by RAISING. A plugin that calls `sys.exit(0)` while it is imported used to
+    take the WHOLE invocation down — every call exited 0 with empty stdout and
+    no audit line, indistinguishable from success to a JSON consumer — and a
     `KeyboardInterrupt` at import exited 130 with a traceback. Swallowing even
     THAT is deliberate: the plugin is refused and named here (`import failed:
-    SystemExit: 0`), and this CLI's own exit status, its one-JSON-object
-    contract and its audit line stay its own.
+    SystemExit: 0`), and this CLI's own exit status and audit line stay its own.
+
+    What it cannot swallow, and does not claim to: `os._exit()`, which ends the
+    process below the interpreter. stdout is a separate question and is handled
+    by the CALLER (`plugins.captured_stdout` diverts it around this call), so a
+    plugin that prints does not put a second line ahead of the reply.
     """
     stem = os.path.basename(path)[:-3]
     module_name = "browser_control_plugin_" + re.sub(r"[^A-Za-z0-9_]",

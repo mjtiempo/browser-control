@@ -99,6 +99,33 @@ def _at_point(at: str, verb: str = "tab scroll") -> tuple[int, int]:
         fail(ERR_BAD_ARGS, f"{verb}: --at needs X,Y numbers, got {at!r}")
     return as_int(parts[0], -1), as_int(parts[1], -1)
 
+def _clip_rect(clip: str, verb: str = "tab screenshot",
+               ) -> tuple[int, int, int, int]:
+    """`--clip X,Y,W,H` as four integers — the SYNTAX, which needs no browser.
+
+    A clip is in PAGE coordinates from the document's origin: X and Y must not
+    be negative, and W and H must be POSITIVE. That is not a style rule —
+    Chrome refuses a zero width with `-32000 Cannot take screenshot with 0
+    width` and HANGS with no reply at all on a negative one (both measured
+    with a raw websocket), so a rectangle that cannot be captured is refused
+    here, by name, before any browser is asked about it. Whether the rectangle
+    lies within the DOCUMENT needs the page's own size and is checked in
+    `screenshot()`; this is the part argv can decide alone.
+    """
+    parts = str(clip).replace(" ", "").split(",")
+    if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts):
+        fail(ERR_BAD_ARGS, f"{verb}: --clip needs X,Y,W,H numbers, got {clip!r}")
+    x, y, w, h = (as_int(p, -1) for p in parts)
+    if x < 0 or y < 0:
+        fail(ERR_BAD_ARGS,
+             f"{verb}: --clip X,Y is from the document's origin and cannot be "
+             f"negative, got {clip!r}")
+    if w <= 0 or h <= 0:
+        fail(ERR_BAD_ARGS,
+             f"{verb}: --clip W,H must be positive (Chrome cannot take a "
+             f"screenshot of a zero or negative size), got {clip!r}")
+    return x, y, w, h
+
 def _point(at: str | None, viewport: list[int],
            verb: str = "tab scroll") -> tuple[int, int]:
     """The wheel's point: `--at X,Y` inside the viewport, else its middle.
@@ -216,13 +243,16 @@ def _reveal(session: cdp.Session, row: dict, tab_row: dict,
             data: dict) -> dict:
     """`DOM.scrollIntoViewIfNeeded` for one element, then prove it is visible."""
     needle, css = _pkg._query_args(text, selector, "tab scroll")
-    node_id = _pkg._node_of(session, _pkg._match_args(ELEMENT_EXPR, needle, css, index))
-    if not node_id:
+    handle = _pkg._node_of(session,
+                           _pkg._match_args(ELEMENT_EXPR, needle, css, index))
+    if not handle:
         fail(ERR_NO_MATCH,
              f"no rendered element matches {needle or css!r}"
              + (f" (--index {index} is past the end)" if index else "")
              + _pkg._frames_note(row, tab_row))
-    session.call("DOM.scrollIntoViewIfNeeded", {"nodeId": node_id})
+    # the remote object DIRECTLY: a `nodeId` would make the browser push the
+    # node's children first (`queries._node_of`)
+    session.call("DOM.scrollIntoViewIfNeeded", {"objectId": handle})
     # prove it: the SAME index (not "any match") is the one that must be
     # inside the viewport — accepting any in-viewport match reported an
     # already-visible earlier element as the one revealed (a review found the

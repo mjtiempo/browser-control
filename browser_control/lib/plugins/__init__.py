@@ -27,12 +27,23 @@ Loading is FAIL-OPEN for the CLI: a plugin that does not import, declares the
 wrong API, or collides with a verb already taken is recorded as a typed
 `PluginError` and skipped — the CLI keeps working, and the action it would have
 served is simply not available. That includes a plugin that tries to END the
-process while it is imported (`sys.exit`), or one interrupted with
+process from PYTHON while it is imported (`sys.exit(0)`, which used to make
+every invocation exit 0 with empty stdout), or one interrupted with
 `KeyboardInterrupt`: `import_module` catches `BaseException` and `PluginSet.load`
-never raises, so a plugin can never choose this CLI's exit status, empty its
-stdout, or skip its audit line. `PluginSet.load()` is the one loader;
-`lib/plugins/discovery.py` owns the search path and `lib/plugins/spec.py` owns
-validation.
+never raises. A plugin also cannot write AHEAD of the reply any more: the import
+and the handler both run with stdout diverted (`captured_stdout`), and anything
+they printed is reported instead — as a typed `stdout` error naming the plugin,
+or as a `warning` on the reply.
+
+Where that boundary ENDS, said out loud rather than implied: `os._exit()` and a
+raw `os.write(1, …)` go around the interpreter, so NO in-process loader can
+contain them — a plugin that calls `os._exit(7)` still chooses this process's
+exit status, and one that writes to fd 1 directly still reaches the caller's
+stdout. A plugin is not sandboxed (see TRUST below); these guards keep an
+ORDINARY plugin's mistakes — a stray `print`, a `sys.exit` in a helper — from
+breaking the CLI's contract, and nothing more. `PluginSet.load()` is the one
+loader; `lib/plugins/discovery.py` owns the search path and `lib/plugins/spec.py`
+owns validation.
 
 TRUST: a plugin is local code running in this process with the CLI's own access.
 The capability classes it declares are DECLARATIONS (exactly like
@@ -41,7 +52,10 @@ the tool.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
+import sys
 
 from browser_control.lib.plugins import (
     discovery,
@@ -56,10 +70,37 @@ from .spec import (
 )
 
 __all__ = ["PLUGIN_API", "PLUGIN_ENV", "PluginAction", "PluginError",
-           "PluginInfo", "PluginSet"]
+           "PluginInfo", "PluginSet", "captured_stdout"]
 
 PLUGIN_ENV = discovery.PLUGIN_ENV
 DEFAULT_PLUGIN_DIR = discovery.DEFAULT_PLUGIN_DIR
+
+
+@contextlib.contextmanager
+def captured_stdout():  # noqa: ANN201
+    """Run plugin code with its `print`s diverted, and answer what it said.
+
+    A plugin is local code, and local code prints: one stray `print()` — or a
+    library the plugin imports that prints — put an extra line on stdout AHEAD
+    of the reply, so `list` answered two lines, the first not JSON, and every
+    JSON consumer of a SUCCESSFUL invocation broke with no refusal to branch on
+    (a review measured it). stdout IS the reply, so plugin code runs with
+    `sys.stdout` pointed at a buffer; the caller reads what landed there and
+    decides — the loader records it as a typed error so `selftest` names the
+    plugin, and `cli.main` carries it as a `warning` on the reply.
+
+    What this reaches: `print`, and anything writing through `sys.stdout`. What
+    it does NOT reach: a raw `os.write(1, …)`, and `os._exit`, which ends the
+    process below the interpreter. The module docstring's TRUST note says how
+    far this boundary goes rather than implying it is airtight.
+    """
+    real = sys.stdout
+    buffer = io.StringIO()
+    sys.stdout = buffer
+    try:
+        yield buffer
+    finally:
+        sys.stdout = real
 
 
 class PluginSet:
@@ -123,12 +164,20 @@ class PluginSet:
                 if name.startswith("_") or not name.endswith(".py"):
                     continue
                 path = os.path.join(directory, name)
+                installed: list[PluginAction] = []
+                info: PluginInfo | None = None
                 try:
-                    module, why = discovery.import_module(path)
-                    if module is None:
-                        self.errors.append(PluginError(path, why, "import"))
-                        continue
-                    installed, info = register(module, path, self.errors, taken)
+                    # the IMPORT and the declaration both run with stdout
+                    # diverted: a plugin that prints while it loads would
+                    # otherwise write ahead of the reply on the one stream the
+                    # contract reserves for it (see `captured_stdout`)
+                    chatter = ""
+                    with captured_stdout() as said:
+                        module, why = discovery.import_module(path)
+                        if module is not None:
+                            installed, info = register(module, path,
+                                                       self.errors, taken)
+                        chatter = said.getvalue()
                 except BaseException as e:                     # noqa: BLE001
                     # a hostile PLUGIN dict (an object whose iteration exits,
                     # a `classes` list that raises) is a refused plugin too
@@ -137,6 +186,19 @@ class PluginSet:
                         f"the plugin declaration failed: "
                         f"{type(e).__name__}: {e}", "schema"))
                     continue
+                if module is None:
+                    self.errors.append(PluginError(path, why, "import"))
+                    continue
+                if chatter:
+                    # reported, never fatal: the output is already discarded,
+                    # and the CLI keeps working — but `selftest` names the
+                    # plugin that did it instead of hiding the habit
+                    self.errors.append(PluginError(
+                        path,
+                        f"{len(chatter)} character(s) were written to stdout "
+                        "while this plugin loaded — stdout IS this CLI's "
+                        "reply, so they were discarded; a plugin's own output "
+                        "belongs on stderr or in the action log", "stdout"))
                 for action in installed:
                     self.actions[action.verb] = action
                 if info is not None:

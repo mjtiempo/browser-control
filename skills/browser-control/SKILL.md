@@ -179,10 +179,26 @@ browser-control-cli tab text --selector '#result'
 ```bash
 browser-control-cli tab screenshot /tmp/page.png | jq '{path, bytes, width, height, verified}'
 browser-control-cli tab screenshot /tmp/full.png --full
+browser-control-cli tab screenshot /tmp/button.png --selector '#submit'
+browser-control-cli tab screenshot /tmp/button.png --selector 'button' --index 1
+browser-control-cli tab screenshot /tmp/region.png --clip 0,0,1024,768
 ```
 
+FOUR capture modes, ONE at most: the viewport (default), the whole document
+(`--full`), one element's border box (`--selector CSS [--index N]`; several
+matches need `--index`) or a caller-named page rectangle (`--clip X,Y,W,H`,
+integer CSS px from the document origin). The reply's `mode` says which ran,
+and `clip` is the effective `[x,y,w,h]` (`null` for viewport/`--full`).
+Element mode reads exactly like `tab find --selector`, rounds the border box
+outward and captures it with `captureBeyondViewport`, so an element below the
+fold lands whole.
+
 The reply dimensions come from the PNG's own IHDR header, not the page's
-geometry, so `verified: true` is page-independent. An existing path refuses
+geometry, so `verified: true` is page-independent: the IHDR must equal the
+chosen region × `devicePixelRatio`, or nothing is written
+(`screenshot-not-verified`). Element mode's `no-match`/`ambiguous-element` are
+the `find` refusals; a malformed, negative or zero-size clip, or one wholly
+outside the document, refuses `bad-args`. An existing path refuses
 `file-exists` unless `--force`.
 
 ### Wait for state
@@ -259,6 +275,7 @@ browser-control-cli --allow read tab text
 | `matches` / `count` / `total` / `truncated` | find, extract | returned vs reached; truncation is explicit |
 | `open` | dialog state | `true`/`false`, `null` = cannot tell |
 | `bytes` / `width` / `height` | screenshot | PNG header bytes — page-independent |
+| `mode` / `clip` | screenshot | which capture mode ran; the effective `[x,y,w,h]` |
 
 ## Failures → what to do
 

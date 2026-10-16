@@ -143,7 +143,10 @@ _CLIENT = re.compile(
     rf"^https?://{_SLACK_HOST}/client/"
     r"(?P<team>[A-Za-z0-9]+)/(?P<channel>[A-Za-z0-9]+)"
     r"/(?P<ts>\d{1,12}\.\d{1,9})$")
-_CLAIMED = re.compile(r"(\d+)\s+repl")
+#: The reply count a bar states, in ANY locale: the number is what is read, not
+#: the word after it (the client's UI follows the workspace's language — see
+#: `_claimed`).
+_BAR_COUNT = re.compile(r"(\d+)")
 #: `…/archives/<CHANNEL>` — the channel itself, with or without a message on
 #: the end (the message form opens the window AT that message).
 _CHANNEL = re.compile(
@@ -202,8 +205,21 @@ def _claimed(text: object) -> int | None:
 
     The page's own claim is kept beside what the pane rendered: a long thread
     is virtualized, so "we read 12" must never be read as "there are 12".
+
+    The count is read as the FIRST integer in the bar, not as `\\d+` followed by
+    the English word `repl`: the client renders its own UI in the WORKSPACE's
+    locale, and every locale that has been looked at puts the number first —
+    "11 replies", "11 Antworten", "4 réponses", "4 件の返信". The English-only
+    pattern answered None for all the others, and `truncated` below then fell
+    back to the payload's flag, so a virtualized thread reported
+    `truncated: false` — "this is the whole thread" — which is the one thing the
+    bar exists to prevent (a review found it). A bar whose text carries a number
+    somewhere other than a count is not a case Slack renders; the count is the
+    leading number in every locale observed, and a bar that cannot be read at
+    all answers None, which `truncated` now treats as UNPROVEN rather than as
+    zero.
     """
-    match = _CLAIMED.search(str(text or ""))
+    match = _BAR_COUNT.search(str(text or ""))
     if match is None:
         return None
     try:
@@ -721,11 +737,24 @@ def _message(args: list[str], browser: str) -> dict:
     thread = _thread(ts, tab, browser, chars)
     count = len(thread["replies"])
     # the bar's own number is the claim; fewer replies than that means the pane
-    # was virtualized and what was read is not the whole thread
+    # was virtualized and what was read is not the whole thread.
+    #
+    # A bar that rendered but whose count could NOT be read is UNPROVEN, not
+    # zero: `truncated` says the thread may be short of its own claim, because
+    # the one thing this flag must never do is certify a virtualized thread as
+    # whole (a localized bar used to answer `claimed: None` and fall through to
+    # the payload's flag, i.e. `truncated: false`, about a pane that had
+    # rendered 2 of 11 replies — a review measured it).
+    unread = claimed is None
     thread.update({"claimed": claimed, "count": count,
-                   "truncated": (claimed is not None and count < claimed
+                   "truncated": (unread or count < claimed
                                  or reply["truncated"])})
-    if thread["truncated"] and claimed is not None:
+    if unread:
+        thread["note"] = (
+            "the reply bar rendered but its count could not be read, so this "
+            "thread cannot be certified whole — the client virtualizes a long "
+            f"thread, and what came back is the {count} message(s) it mounted")
+    elif thread["truncated"] and claimed is not None:
         thread["note"] = (f"the reply bar says {claimed} replies; the pane "
                           f"rendered {count} — the client virtualizes a long "
                           "thread, so what came back is what was mounted")

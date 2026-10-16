@@ -114,6 +114,15 @@ WAIT_POLL_S = 0.4           # how often a `wait` samples
 WAIT_DEFAULT_S = 15.0
 
 IDLE_DEFAULT_MS = 500
+#: The longest quiet window `--for idle` accepts. The predicate is `now -
+#: responseEnd < __IDLE_MS__`, so a window larger than any wait can outlast is
+#: a wait that can never pass: `--idle-ms 1e300` is finite and non-negative, so
+#: it was accepted, every resource was always "inside the window", `!some(...)`
+#: was false on every sample, and the only possible ending was `wait-timeout`
+#: (a review found the missing upper bound). Ten minutes is far past any real
+#: quiet period and past the default budget by 40x, so a caller asking for more
+#: hears it by name rather than waiting to be told nothing happened.
+IDLE_MAX_MS = 600_000
 
 EVAL_TIMEOUT_S = 15.0
 
@@ -230,20 +239,32 @@ def _match_args(expression: str, needle: str, css: str,
     values.update(extra)
     return fill(expression, **values)
 
-def _node_of(session: cdp.Session, expression: str) -> int:
-    """The DOM node an element-returning expression resolves to.
+def _node_of(session: cdp.Session, expression: str) -> str:
+    """The remote-object handle an element-returning expression resolves to.
 
-    Without `returnByValue` the element comes back as a REMOTE OBJECT that
-    lives as long as the session, and `DOM.requestNode` turns it into the
-    nodeId a DOM method takes — which is how focus and reveal act without a
-    line of JavaScript.
+    The handle is what `DOM.focus` and `DOM.scrollIntoViewIfNeeded` take
+    DIRECTLY (`objectId`, measured against Chrome: both focus and reveal the
+    element and leave `document.activeElement` on it). `""` means the
+    expression matched nothing, which the callers already read as `no-match`.
+
+    Why not a nodeId — the shape this used to return, via
+    `DOM.getDocument` + `DOM.requestNode`. Escalating a JS object to a DOM
+    `nodeId` makes the browser PUSH the node into its DOM agent, children and
+    all, and `requestNode` sent `DOM.setChildNodes` frames of 387 B, 352 B and
+    **16 812 346 B** for a 30 000-`<option>` select before its own 30-byte
+    reply: `tab focus`, `tab scroll TEXT` and `tab select` all refused
+    `result-too-large` against the 16 MiB frame cap for a page whose element was
+    simply sitting under a long child list — three verbs lost to one lookup,
+    with a refusal telling the caller to narrow an expression none of them had
+    (a review measured it).
+
+    `DOM.describeNode` is NOT the way round it either, and the live check is
+    what said so: it answers `{"node": {"nodeId": 0, …}}` for a node the agent
+    has not pushed — the id is real only AFTER the push this exists to avoid —
+    so reading the nested id falls straight back to `requestNode` and the
+    blowup happens anyway. `objectId` needs no push at all.
     """
-    handle = session.handle(expression)
-    if not handle:
-        return 0
-    session.call("DOM.getDocument", {"depth": 0})
-    node = session.call("DOM.requestNode", {"objectId": handle})
-    return as_int(node.get("nodeId"))
+    return str(session.handle(expression) or "")
 
 def js(expression: str, tab: str = "", browser: str = "", out: str = "",
        force: bool = False) -> dict:
@@ -303,9 +324,20 @@ def js(expression: str, tab: str = "", browser: str = "", out: str = "",
     if target:
         # the page's `undefined` is not a JSON value; the file says `null` and
         # the reply still names what the page answered, exactly as the reply-
-        # shaped path does
-        payload = (json.dumps(None if value is UNDEFINED else value,
-                              ensure_ascii=False) + "\n").encode("utf-8")
+        # shaped path does.
+        #
+        # `ensure_ascii` is the DEFAULT here, and it is load-bearing: a page can
+        # answer a string holding an unpaired surrogate (`"\uD800"` is a valid
+        # JS string, and CDP's JSON carries it as `"\ud800"`), which Python's
+        # `json.loads` reproduces — and a lone surrogate CANNOT be encoded as
+        # UTF-8, so `ensure_ascii=False` raised `UnicodeEncodeError` out of this
+        # line. The verb then failed `internal` AFTER the caller's expression
+        # had already run and after `sink.claim` said the target was free: work
+        # done, nothing recorded, cause invisible (a review measured it). The
+        # default escapes it to `\ud800`, which is valid JSON, round-trips
+        # through `json.load`, and is exactly what the reply path already writes.
+        payload = (json.dumps(None if value is UNDEFINED else value)
+                   + "\n").encode("utf-8")
         written = sink.write_atomic("tab js", target, payload, force)
         if written != len(payload):
             fail(ERR_WRITE_FAILED,
@@ -340,12 +372,16 @@ def _idle_window(value: object) -> int:
     its FIRST sample over a page that was still loading (a review found it);
     a non-numeric value quietly became the 500 ms default instead of a
     refusal. `0` is a real window ("no quiet period at all") and stays valid.
+
+    The window is also bounded ABOVE (`IDLE_MAX_MS`): a huge one makes the
+    predicate true for ever, so the wait could only ever end in `wait-timeout`
+    — a refusal the caller can act on beats a wait that cannot succeed.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         fail(ERR_BAD_ARGS, _idle_offence(value))
     try:
         number = float(str(value).strip())
-        if not math.isfinite(number) or number < 0:
+        if not math.isfinite(number) or number < 0 or number > IDLE_MAX_MS:
             fail(ERR_BAD_ARGS, _idle_offence(value))
         return int(number)
     except (TypeError, ValueError, OverflowError):
@@ -357,7 +393,7 @@ def _idle_window(value: object) -> int:
 def _idle_offence(value: object) -> str:
     """The one refusal `_idle_window` makes, naming the caller's own value."""
     return ("tab wait: --idle-ms is a window in milliseconds, so it must be a "
-            f"number 0 or more, got {foreign(value, 60)!r}")
+            f"number from 0 to {IDLE_MAX_MS}, got {foreign(value, 60)!r}")
 
 def wait(mode: str, selector: str | None = None, expr: str | None = None,
          timeout: float = WAIT_DEFAULT_S, idle_ms: int = IDLE_DEFAULT_MS,
@@ -617,12 +653,19 @@ def find(text: str | None = None, selector: str | None = None,
         # `--frame` scoped that session to a frame
         frames_here = _pkg._frame_summary(row, tab_row, session)
     viewport = _pkg._viewport(data, str(tab_row["id"]))
-    matches = [dict(m, box=as_ints(m["box"]),
-                    center=as_ints(m.get("center")),
-                    viewport=as_ints(m.get("viewport")),
-                    point=as_ints(m.get("point")))
-               for m in _pkg._well_formed(data.get("matches") or [],
-                                     ("tag", "box"))]
+    matches = []
+    for m in _pkg._well_formed(data.get("matches") or [], ("tag", "box")):
+        # `dict(m, …)` below copies EVERY key of the page's row, and FIND_EXPR
+        # now also carries the RAW page rect (unrounded) that element
+        # screenshots round outward. `find`'s reply has always carried the
+        # rounded `box` alone, so the raw field is dropped HERE rather than
+        # leaking a new key into a verb the change does not touch.
+        m = dict(m)
+        m.pop("rect", None)
+        matches.append(dict(m, box=as_ints(m["box"]),
+                            center=as_ints(m.get("center")),
+                            viewport=as_ints(m.get("viewport")),
+                            point=as_ints(m.get("point"))))
     if not matches:
         offscreen = as_int(data.get("offscreen"))
         # the page's own words ride into the refusal, so they are flattened and

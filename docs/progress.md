@@ -138,7 +138,7 @@ the other verbs own the browser.
 | `tab check TEXT \| --selector CSS [--index N] [--uncheck]` | checks/unchecks a box or radio with **real input** | `checked` flipped, bounded poll; `check-not-verified`, `not-checkable` |
 | `tab select TEXT \| --selector CSS --value V [--index N]` | chooses one `<option>` with real arrow keys | the selected value/index read back; `select-not-verified`, `not-a-select`, `ambiguous-option` |
 | `tab dialog [state\|accept\|dismiss] [--text V]` | reads, accepts or dismisses a JavaScript dialog | `accept`/`dismiss` verify by the renderer returning; `state` may answer `open: null` (a suppressed dialog cannot be seen — §4.9); `no-dialog`, `dialog-not-verified` |
-| `tab screenshot PATH \| --path PATH [--full] [--force] [--tab SPEC]` | writes a PNG of the page | the file's **own PNG header** and size, not the page's geometry — a COMPLETE PNG is required (signature, a 13-byte IHDR with its CRC, a following chunk and a trailing IEND: a header-only stub is refused, a review measured it accepted as real); `screenshot-not-verified`, `file-exists` (without `--force`) |
+| `tab screenshot PATH \| --path PATH [--full \| --selector CSS [--index N] \| --clip X,Y,W,H] [--force] [--tab SPEC]` | writes a PNG of the page — the viewport (default), the whole document (`--full`), one element's border box (`--selector`, several matches need `--index`), or a caller-named page rectangle (`--clip`, integer CSS px from the document origin) | the file's **own PNG header** and size, not the page's geometry — a COMPLETE PNG is required (signature, a 13-byte IHDR with its CRC, a following chunk and a trailing IEND: a header-only stub is refused, a review measured it accepted as real); the IHDR must equal the chosen region × `devicePixelRatio`, rounded HALF-UP (`floor(region_css × dpr + 0.5)`, Chrome's own rounding — Python's `round()` is half-even), or nothing is written; element mode resolves through the `find` matcher on a READ-opened tab (no attach) and rounds the border box outward with `captureBeyondViewport`; region mode refuses a clip wholly outside the document; reply carries `mode`, `clip` (the effective `[x,y,w,h]`, or `null`), `element` (element mode), `full`, `css_size` and the existing fields; `screenshot-not-verified`, `no-match`/`ambiguous-element` (element), `bad-args` (mode conflict, clip geometry), `file-exists`, `write-failed` (without `--force`) |
 | `tab extract --each CSS --field NAME=SPEC [--cap N] [--chars N] [--visible] [--unique FIELD]` | a page's repeated items as records; CSS only, no code (a `read`) | the page's own DOM text/attributes, sliced **in the page**; same oracle as `find`/`text`, no claim beyond "this is what the page showed" — the reply budget is checked BEFORE a row is pushed (so `truncated` means the budget, not the budget plus one row) and the field count is bounded (`bad-args` past the maximum) |
 | `selftest` | proves the install without a browser | interpreter, `websockets`, verb table, browsers on PATH; **refuses** `no-websockets` when the dependency is missing |
 | `profile info [--profile DIR]` | the managed profiles: weight, age, whether a browser is on one, whether it is attached | one filesystem read |
@@ -292,10 +292,10 @@ off.)
 
 ## 5. What is next
 
-Ordered by "unblocks the most with the least". **5.1–5.7 and 5.10 through 5.29
+Ordered by "unblocks the most with the least". **5.1–5.7 and 5.10 through 5.37
 have landed** (§1, §2); **5.8 (search) and the ad functions are deferred by
 decision**, and **5.11 was built, measured and rejected**. Nothing is left in
-the core: 5.10's hardening items landed in §5.16–§5.18. Every later verb adds
+the core — 5.10's hardening items landed in §5.16–§5.18. Every later verb adds
 its check to `tests/live_test.py`; the CLI grammar is settled (§1).
 
 ### 5.1 `selftest` verb — done
@@ -1628,6 +1628,133 @@ Evidence: 169 hermetic checks green (three new: `tab js --out`'s file and its
 refusals, the channel merge/carry-forward/stop, the usage hint's source and its
 silence for non-argv refusals), `ruff check .` 0, `pyright` 0, live battery
 62/0, and the live runs quoted above on the RavenTrack workspace.
+
+### 5.37 `tab screenshot` capture modes — done
+
+The verb had two modes (viewport, `--full`); this added the two it lacked —
+one element and one caller-named region — without touching the existing
+paths:
+
+```console
+tab screenshot PATH|--path PATH [--full | --selector CSS [--index N] |
+                                 --clip X,Y,W,H] [--force] [--tab SPEC]
+```
+
+- `--selector CSS [--index N]` captures ONE element's border box. Resolution
+  is `tab find --selector`'s, reused (`lib/dom/queries.py::_matches_in` +
+  `_pick`), so several matches refuse `ambiguous-element` naming the indices,
+  nothing rendered refuses `no-match`, and hidden elements are not candidates —
+  all through a READ-opened tab (`Tab.open(..., for_write=False)`), so the verb
+  stays `read`+`file` and needs no `attach`.
+- `--clip X,Y,W,H` captures a caller-named rectangle in PAGE coordinates
+  (integer CSS px, document origin). Malformed, negative or zero-size geometry
+  refuses `bad-args`; a rectangle wholly outside the document refuses
+  `bad-args` naming the document's size.
+- Both modes round the element box OUTWARD to whole CSS px (floor left/top,
+  ceil right/bottom) and send it as CDP `clip` with `captureBeyondViewport:
+  true`, so an element below the fold captures whole.
+- The oracle generalizes, it does not weaken: the PNG's IHDR must equal
+  `hu(region_css × devicePixelRatio)` per dimension — `innerWidth/Height`
+  (default), `scrollWidth/Height` (`--full`), the element's border box, or the
+  caller's clip — and a mismatch writes nothing (`screenshot-not-verified`),
+  exactly as today. `hu(v) = floor(v + 0.5)`: round HALF-UP, which is how
+  Chrome rounds (measured — see step 1), not Python's half-even `round()`.
+- Reply: `mode` (`viewport|full|element|region`), `clip` `[x,y,w,h]` (the
+  EFFECTIVE clip after rounding, `null` for the two no-clip modes) and the
+  picked `element` descriptor; `full`, `css_size` and the rest stay.
+
+**Out of it, by decision**: no format switch (JPEG/WebP — the PNG IHDR is the
+whole oracle, and a second format needs its own header parser and suffix rule),
+no `--scale`, no OS window chrome (`Page.captureScreenshot` renders the page;
+the window is `computer-control screen`), no `--frame` offset math (element
+mode follows the same `--frame` scope as `tab find`; no extra offset math is
+applied), no base64 on stdout.
+
+Steps:
+1. **Measure the framing rule FIRST** (live probe, no shipped code): integer
+   clips at DPR 1, 2 and the machine's fractional DPR; clips with fractional
+   origins; clips overhanging the document. Record what Chrome returns —
+   `round`/`floor`/`ceil` of `clip × dpr`, and the blank remainder — HERE.
+   Element mode's outward rounding and the expectation arithmetic come from
+   that measurement; if it disagrees with plan.md §4, the plan updates before
+   code.
+
+   **Measured** (live probe, `/tmp/screenshot-clip-probe/REPORT.md`; the two
+   new modes use it, and it also corrected the shipped oracle):
+
+   | case | clip CSS | dpr | beyond | IHDR | rule |
+   |---|---|---|---|---|---|
+   | no-clip (viewport) | – | 1 | false | 800x600 | `hu(innerWidth·dpr)` |
+   | no-clip (full) | – | 1 | true | 2000x3000 | `hu(scrollWidth·dpr)` |
+   | integer clip | 0,0,300,200 | 1 / 2 / 1.25 / 1.5 | true | 300x200 / 600x400 / 375x250 / 450x300 | `hu(w·dpr)` |
+   | fractional origin | 10.5,20.25,300,200 | 1 / 2 | true | 300x200 / 600x400 | origin ignored |
+   | fractional size | 0,0,300.4,200.6 | 1 / 2 | true | 300x200 / 600x400 | Chrome truncates the CSS size, then ×dpr |
+   | overhang | 1950,2950,200,200 | 1 / 2 | true | 200x200 / 400x400 | exact size; remainder opaque WHITE |
+   | wholly outside | 2100,3100,200,200 | 1 | true | 200x200 | exact size, blank white, no error |
+   | w=0 | 0,0,0,100 | 1 | true | REFUSED | `-32000 Cannot take screenshot with 0 width` |
+   | w=-5 | 0,0,-5,100 | 1 | true | REFUSED | **no reply at all (hang)** |
+   | below fold, no-beyond | 20,1500,200,100 | 1 | false | 200x100 | size right, pixels unreliable |
+   | element outward | 10,20,101,51 | 1 / 2 | true | 101x51 / 202x102 | `hu(clip·dpr)` |
+
+   Rule: `hu(v) = floor(v + 0.5)` — round HALF-UP, not Python's `round()`.
+   Chrome rounded 802 innerWidth at dpr 1.25 to 1003 while
+   `int(round(802 * 1.25))` is 1002, so the shipped `expected_pixels` was one
+   pixel low on an exact `.5`; the oracle is `hu(region_css × dpr)` for ALL
+   FOUR modes (`lib/images.py::expected_pixels`). Element mode's clip is
+   `[floor(left+scrollX), floor(top+scrollY), ceil(right+scrollX)-floor(left+
+   scrollX), ceil(bottom+scrollY)-floor(top+scrollY)]`, sent as `clip` (with
+   `scale: 1`) and `captureBeyondViewport: true`; region mode sends the
+   caller's integers unchanged. A clip below the viewport MUST use
+   `captureBeyondViewport: true` (with false the size was right but the pixels
+   were not); negative width/height HANGS Chrome, so it is refused in argv.
+   plan.md §3 folded the `.5` rule in, exactly as this step anticipated.
+2. `cli/verbs/tab.py::cmd_tab_screenshot`: `--selector`, `--index`, `--clip`
+   (a `_clip_rect` reader beside `_at_point`, the same integer syntax); one
+   mode at most (`--full`/`--selector`/`--clip`), `--index` only with
+   `--selector`; frozen refusal strings.
+3. `lib/dom/screenshot.py` + `lib/dom/scripts.py`: FIND_EXPR's rows grow a RAW
+   page-coordinate `rect` (the rounded `box` stays), the `clip` +
+   `captureBeyondViewport` parameters, and the element box read on the same
+   session as the metrics. `lib/sink.py` is untouched; `lib/images.py` changed
+   only its `expected_pixels` to the measured half-up rule. `find`'s reply
+   never carries `rect` — its builder copies the page row with `dict(m, …)`,
+   so the raw field is dropped explicitly there (the plan's "copies named
+   fields" was not true of that line).
+4. Reply fields (`mode`, `clip`, `element`); `main.py` usage text.
+5. Manual AT CODE TIME (never before): `docs/verbs.md`, the skill's
+   `references/verbs.md` and `SKILL.md`, `docs/progress.md` §1 row;
+   `docs/refusals.md` only if a NEW code appears (the list above needs none).
+6. Tests: unit argv (conflicts, clip syntax, `--index` rules) and the
+   refusal-writes-nothing matrix for both modes; live battery
+   (`c_tab_screenshot`): element IHDR against the reply's `box`, `--index`, an
+   element below the fold, a `--clip` region, the conflict refusals, a
+   wholly-outside clip.
+
+**Evidence wanted**: the step-1 measurement table, one live capture per mode
+with its IHDR checked against the page's own numbers, and a refused capture
+leaving no file.
+
+**Landed**: all four modes; element mode is `read`+`file` (no new code, no
+new refusal), `lib/dom/screenshot.py` sends `clip` + `captureBeyondViewport`
+and does the documented-outward rounding, `lib/dom/scroll.py::_clip_rect` owns
+the argv-time clip syntax, and `lib/images.py::expected_pixels` is half-up for
+all four modes. Unit: two new hermetic checks (`clip syntax decides without a
+browser`; `element and region captures, and their refusals`) plus the extended
+argv check and the half-up pins. Live: `c_tab_screenshot` captures `--selector`
+(below the fold), `--index`, and `--clip`, checks each IHDR against geometry
+read back through `tab js`, and asserts every refusal writes nothing.
+
+**Verified**: a fresh-context review and an independent verification run
+(ruff 0; pyright 0 — a test-only typing fix in the in-flight suite restored
+HEAD's zero after the WIP had one; unit 185 passed with the one pre-existing
+WIP failure untouched; live battery 62/0, `c_tab_screenshot` included; a hand
+run compared each mode's IHDR to geometry read back independently, and the
+written PNGs were opened and seen to be the element). The review's findings
+were all folded in: the usage-hint continuation join (which also repaired
+`tab wait`/`tab extract`), the pre-capture ceiling (now DEVICE px — the
+oracle's own unit, before Chrome is asked), the `--frame` wording in plan.md
+and this section, and the `screenshot-not-verified` row in the refusal
+tables.
 
 ### 5.8 Headless search
 `search QUERY [--engine duckduckgo|google|searxng]`: own profile and port,

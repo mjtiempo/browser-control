@@ -348,7 +348,15 @@ def _writable_route(browser: str = "") -> tuple[str, int]:
                  f"--profile {_scoped()} is not a profile this CLI "
                  "manages or has attached — `open --profile DIR` starts one "
                  "under the root, or `attach --port N` hands one over")
-        return _scoped(), as_int(cdp.port_of(_scoped()))
+        # ...and the port comes from the SAME resolver the row-less path below
+        # uses (`driver_port`), never `cdp.port_of` — the port file ALONE, which
+        # is the oracle the docstring above rules out. The file is written only
+        # for an ephemeral port and survives a SIGKILL, so a stale one made
+        # `ensure_up` refuse `cdp-unreachable` about a browser that was right
+        # there: `tab --profile P URL` failed while `open --profile P` (which
+        # resolves the census way) worked — the two halves of one argv
+        # disagreeing (a review measured it).
+        return _scoped(), driver_port(_scoped())
     rows = _pkg._writable(browser)
     if len(rows) > 1:
         names = ", ".join(os.path.basename(str(r["profile"]))
@@ -874,16 +882,27 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
     target = str(row["profile"]) if row else managed_profile(browser)
     with _pkg._lock(lock_path(target), "close") as lock:
         target_pid = as_int(row["pid"]) if row else pid_of(target)
-        # the endpoint this call must prove GONE: the port the caller NAMED (a
-        # row's own — a browser started with an explicit
-        # --remote-debugging-port wrote no file to read), else the managed
-        # profile's own port file, which is what `open` starts. It is resolved
+        # the endpoint this call must prove GONE: the port of the row the
+        # caller NAMED (a browser started with an explicit
+        # --remote-debugging-port wrote no file to read), else the one
+        # `driver_port` resolves for a caller with no row — the SAME resolver
+        # `_page_count` and `ensure_up` use, which is the point. It is resolved
         # FIRST so that the tab count and the stop read the ONE port this call
         # is about: `_page_count(target)` used to resolve its own
         # (`driver_port`) while the proof below used the row's, so the count
         # could come from a different listener than the one being proven gone
         # (a review measured the two oracles).
-        endpoint = row_port(row) if row else as_int(cdp.port_of(target))
+        #
+        # The unnamed path used to read `cdp.port_of` — the port FILE alone —
+        # which is the one oracle `_page_count`'s own docstring warns against:
+        # a browser started with an explicit `--remote-debugging-port=N` writes
+        # no file, and `DevToolsActivePort` survives a SIGKILL, so a STALE file
+        # made `close` refuse `tabs-open` ("the page tabs could not be read")
+        # about a browser whose tabs were sitting there, and with a stranger on
+        # the stale port the final proof below failed `browser-not-stopped`
+        # AFTER the right pid had been killed — a false failure on a stop that
+        # worked (a review measured both).
+        endpoint = row_port(row) if row else driver_port(target)
         # ...and the count is read on THAT port. `endpoint` is 0 only when this
         # call resolved none at all, and there the one-argument form is the
         # same call: `_page_count`'s own default is the documented resolver for

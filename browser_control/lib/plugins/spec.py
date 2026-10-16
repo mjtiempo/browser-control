@@ -61,14 +61,21 @@ class PluginInfo:
 
 @dataclass(frozen=True)
 class PluginError:
-    """One refused plugin or action, with the kind of refusal."""
+    """One refused plugin or action, with the kind of refusal.
+
+    `kind` is in the STRING as well as the field: `selftest` reports these as
+    text (`PluginSet.report`), and a kind that only existed as an attribute
+    nobody read left every consumer parsing prose to tell a bad API version
+    from a verb collision — the exact job this field was added for (a review
+    found it set at eight sites and read at none).
+    """
 
     path: str
     message: str
     kind: str = "schema"
 
     def __str__(self) -> str:
-        return f"{self.path}: {self.message}"
+        return f"[{self.kind}] {self.path}: {self.message}"
 
 
 def register(module: object, path: str, errors: list[PluginError],

@@ -258,14 +258,19 @@ def run(rest: list[str], browser: str) -> dict:
     typed = plugin_api.type_text(query, tab=tab, browser=browser,
                                  delay_s=_delay(wpm))
     elapsed = time.monotonic() - started
-    verified = typed.get("verified")
-    # False is the page saying the text did NOT land (None is a field the core
-    # could not read, which is not proof either way)
-    if verified is not None and not verified:
-        fail(errors.ERR_TYPE_NOT_VERIFIED,
-             f"google search: the {len(query)}-character query did not land in "
-             f"{box} (the field reads {typed.get('length_after')!r} "
-             "chars) — refusing to submit a query the page does not hold")
+    # `verified` is TRI-STATE in the core, and only the RAISED half is proof of
+    # absence: `dom.type_text` refuses `type-not-verified` ITSELF when the probe
+    # proved the focus takes no text, so a reply that came back at all means the
+    # text landed or the oracle could not tell — an unreadable field, a focus
+    # that moved, a PARTIAL landing, or a length that did not move because the
+    # box ALREADY held the query (re-running a search is the everyday case; the
+    # core's own docstring names it). `typed["verified"]` is `bool(verdict)`, so
+    # a returned `False` is that UNCLEAR case, never "did not land" — reading it
+    # as a failure refused working searches with a message asserting the one
+    # thing the tri-state exists to avoid claiming (a review found it). The
+    # uncertainty is CARRIED instead: `typing.verified` reports what the core
+    # could prove, and the search goes ahead.
+    typed_verified = bool(typed.get("verified"))
     time.sleep(SUBMIT_PAUSE_S)          # a person's beat before Enter
     plugin_api.press("enter", tab=tab, browser=browser)
     results_sel, matched = _rendered(RESULT_CANDIDATES, WAIT_S, PROBE_S,
@@ -353,7 +358,12 @@ def run(rest: list[str], browser: str) -> dict:
             "delay_s": round(_delay(wpm), 4),
             "elapsed_s": round(elapsed, 2),
             "measured_wpm": measured,
-            "verified": verified,
+            # what the CORE could prove about the landing (see above): False
+            # means the oracle could not judge — an unreadable field, a moved
+            # focus, a partial landing, or a box that already held the query —
+            # NOT that the text missed. The search is submitted either way, and
+            # this is the flag that says the typing was not certified.
+            "verified": typed_verified,
         },
         "landed_on": landed_on,
         "count": len(results),

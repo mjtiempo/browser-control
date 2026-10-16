@@ -51,6 +51,8 @@ from browser_control.lib import (  # noqa: E402
 from browser_control.lib import argv as argv_lib  # noqa: E402
 from browser_control.lib import attachments as attachments_lib  # noqa: E402
 from browser_control.lib import coerce as coerce_lib  # noqa: E402
+from browser_control.lib.plugins import discovery as discovery_lib  # noqa: E402
+from browser_control.lib.plugins import spec as spec_lib  # noqa: E402
 from browser_control.lib import images as images_lib  # noqa: E402
 from browser_control.lib import poll as poll_lib  # noqa: E402
 from browser_control.lib import policy as policy_lib
@@ -323,6 +325,8 @@ def t_cli_new_verbs_grammar() -> None:
     shots = os.path.join(tempfile.gettempdir(), "browser-control-argv")
     shot_a, shot_b, shot_c = (f"{shots}/a.png", f"{shots}/b.png",
                               f"{shots}/c.png")
+    shot_d, shot_e, shot_f = (f"{shots}/d.png", f"{shots}/e.png",
+                              f"{shots}/f.png")
 
     def fake_activate(tab: str = "", browser: str = "") -> dict:
         calls.append(("activate", tab, browser))
@@ -352,8 +356,11 @@ def t_cli_new_verbs_grammar() -> None:
         return {"ok": True}
 
     def fake_shot(path: str, full: bool = False, force: bool = False,
+                  selector: str | None = None, index: int | None = None,
+                  clip: tuple[int, int, int, int] | None = None,
                   tab: str = "", browser: str = "") -> dict:
-        calls.append(("screenshot", path, full, force, tab, browser))
+        calls.append(("screenshot", path, full, force, selector, index, clip,
+                      tab, browser))
         return {"ok": True}
 
     originals = (browser.activate, dom.hover, dom.check, dom.select,
@@ -381,7 +388,11 @@ def t_cli_new_verbs_grammar() -> None:
                      ["tab", "screenshot", "--path", shot_b,
                       "--full"],
                      ["tab", "screenshot", shot_c, "--force",
-                      "--full"]):
+                      "--full"],
+                     ["tab", "screenshot", shot_d, "--selector", "#x"],
+                     ["tab", "screenshot", shot_e, "--selector", "#x",
+                      "--index", "2"],
+                     ["tab", "screenshot", shot_f, "--clip", "10,20,30,40"]):
             rc, _out, err = run_cli(argv)
             assert rc == 0, (argv, rc, err)
         assert calls == [
@@ -397,9 +408,13 @@ def t_cli_new_verbs_grammar() -> None:
             ("dialog", "accept", None, "", ""),
             ("dialog", "dismiss", None, "id:AB", ""),
             ("dialog", "accept", "yes", "", ""),
-            ("screenshot", shot_a, False, False, "", ""),
-            ("screenshot", shot_b, True, False, "", ""),
-            ("screenshot", shot_c, True, True, "", ""),
+            ("screenshot", shot_a, False, False, None, None, None, "", ""),
+            ("screenshot", shot_b, True, False, None, None, None, "", ""),
+            ("screenshot", shot_c, True, True, None, None, None, "", ""),
+            ("screenshot", shot_d, False, False, "#x", None, None, "", ""),
+            ("screenshot", shot_e, False, False, "#x", 2, None, "", ""),
+            ("screenshot", shot_f, False, False, None, None, (10, 20, 30, 40),
+             "", ""),
         ], calls
     finally:
         (browser.activate, dom.hover, dom.check, dom.select, dom.dialog,
@@ -416,7 +431,20 @@ def t_cli_new_verbs_grammar() -> None:
                  ["tab", "select", "a", "--value", "x", "--index", "y"],
                  ["tab", "dialog", "dismiss", "--text", "no"],
                  ["tab", "screenshot"],
-                 ["tab", "screenshot", "a.png", "--path", "b.png"]):
+                 ["tab", "screenshot", "a.png", "--path", "b.png"],
+                 # ONE mode at most, --index only with --selector, and a clip
+                 # whose syntax Chrome could not capture
+                 ["tab", "screenshot", "a.png", "--full", "--selector", "#x"],
+                 ["tab", "screenshot", "a.png", "--full",
+                  "--clip", "1,2,3,4"],
+                 ["tab", "screenshot", "a.png", "--selector", "#x",
+                  "--clip", "1,2,3,4"],
+                 ["tab", "screenshot", "a.png", "--index", "1"],
+                 ["tab", "screenshot", "a.png", "--selector", ""],
+                 ["tab", "screenshot", "a.png", "--clip", "1,2,3"],
+                 ["tab", "screenshot", "a.png", "--clip", "1,2,3,0"],
+                 ["tab", "screenshot", "a.png", "--clip", "-1,2,3,4"],
+                 ["tab", "screenshot", "a.png", "--clip", "1,2,-3,4"]):
         rc, _out, err = run_cli(argv)
         assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
 
@@ -492,6 +520,11 @@ def t_expressions_and_shot_rules() -> None:
     assert images_lib.png_size(header) == []
     assert images_lib.png_size(_png(1882, 842)) == [1882, 842]
     assert images_lib.expected_pixels(941, 2) == 1882
+    # Chrome rounds the device size HALF-UP; Python's `round()` is half-EVEN,
+    # so a product landing on an exact `.5` used to refuse a good screenshot
+    # (measured: 802 CSS px at devicePixelRatio 1.25 is 1003, not 1002)
+    assert images_lib.expected_pixels(802, 1.25) == 1003
+    assert images_lib.expected_pixels(2, 1.25) == 3
     for css, ratio in ((941, float("inf")), (941, float("nan")),
                        (10 ** 9, 2.0), (10, 0.0), (10, -1.0)):
         refusal(lambda css=css, ratio=ratio: images_lib.expected_pixels(
@@ -573,6 +606,113 @@ def t_page_expressions_compile() -> None:
              "new Function(require('fs').readFileSync(0,'utf8'))"],
             input=filled, capture_output=True, text=True, check=False)
         assert proc.returncode == 0, (name, proc.stderr[-400:])
+
+
+#: The page expressions whose `url`/`title` field is NOT display text and so is
+#: deliberately NOT clipped. `FRAME_CENSUS`'s `url` is a MATCHING KEY: `frames`
+#: compares it for exact equality against the browser's own target list to bind
+#: a cross-origin frame (`dom/frames.py`), so clipping it would silently stop
+#: long-`src` frames from ever binding. Its size is a separate, still-open
+#: problem (an in-page row cap), because a clip is not the fix there.
+_UNCLIPPED_BY_DESIGN = {"FRAME_CENSUS"}
+
+
+def t_reported_page_fields_are_clipped_in_the_page() -> None:
+    """Every `url:`/`title:` an expression REPORTS is clipped in the page.
+
+    The rule the PRELUDE's `clip` helper states — a page's own title and address
+    are the PAGE's to make huge, so they are sliced before they cross the wire —
+    is only worth anything if it is applied to every expression that reports
+    them. It was not: `STATE_EXPR`, the read-back on the `tab click` WRITE path,
+    returned them raw, so a page with a 70 000-character `document.title` made
+    `tab click` refuse `result-too-large` against the transport cap BEFORE the
+    click was dispatched — the verb could not click at all, and the refusal
+    named an expression the caller never wrote. `SHOT_METRICS` was raw too, so
+    the same page could not be photographed.
+
+    This walks the expressions the suite already collects (`_page_js_sources`),
+    strips their JavaScript comments — the PRELUDE *documents* the rule by
+    naming both fields, so an unstripped scan matches its own explanation — and
+    requires every REPORTED `url:`/`title:` value to be a `clip(...)` call. A
+    value used as a BOOLEAN (the `url` wait predicate's
+    `String(location.href).indexOf(...)`) has no `url:` key and is not a
+    reported field, so it is out of scope by construction.
+
+    `_UNCLIPPED_BY_DESIGN` is ASSERTED to be exactly the set of expressions
+    that break the rule, so a NEW offender fails here rather than joining a
+    silent allowlist; the one member carries its reason above.
+    """
+    field = re.compile(r"\b(url|title)\s*:\s*([^,}\n]+)")
+    offenders: set[str] = set()
+    seen = 0
+    for name, src in _page_js_sources():
+        body = re.sub(r"//[^\n]*", "",
+                      re.sub(r"/\*.*?\*/", "", src, flags=re.S))
+        for match in field.finditer(body):
+            seen += 1
+            if not match.group(2).strip().startswith("clip("):
+                offenders.add(name)
+    # the check is only meaningful if it actually looked at the fields
+    assert seen >= 8, seen
+    assert offenders == _UNCLIPPED_BY_DESIGN, (
+        sorted(offenders), sorted(_UNCLIPPED_BY_DESIGN))
+    # ...and the two that were fixed stay fixed, by name: this is the pair the
+    # review measured, so a regression names itself instead of only changing a
+    # set difference
+    for name in ("STATE_EXPR", "SHOT_METRICS"):
+        src = dict(_page_js_sources())[name]
+        assert "clip(location.href, 2000)" in src, name
+        assert "clip(document.title, 300)" in src, name
+
+
+def t_find_rows_bound_the_pages_own_attributes() -> None:
+    """Every page-owned string in a `find` row is sliced before it crosses.
+
+    `tab find` calls itself a page-bounded read, and `PAGE_BOUNDED_CAP = None`
+    means nothing else caps it — so the row's own fields are the whole bound.
+    `text` was sliced and its NEIGHBOURS were not: a page with 100 buttons
+    carrying 50 000-character `aria-label`s answered `tab find --cap 100` with
+    5 045 152 bytes on stdout at exit 0, and 16 MiB of them killed the verb with
+    `result-too-large` (a review measured both). The `#id` inside `describe()`
+    was raw too, and it feeds BOTH the `hit_element` a row reports and the
+    probes compared against it, so its clip has to sit in `describe` itself
+    where every producer shares it.
+
+    The field list is read from the row the expression actually builds, so a NEW
+    unbounded field added beside these fails here rather than shipping.
+    """
+    row = dom.FIND_EXPR.partition("out.push({")[2].partition("});")[0]
+    assert row, "the find row moved — this check has to be re-read"
+    # the expression documents these fields in place, and those comments carry
+    # both commas and colons: strip them before the row is read as field names
+    row = re.sub(r"//[^\n]*", "", row)
+    # top-level commas only: the values contain commas inside brackets
+    parts, depth, current = [], 0, ""
+    for char in row:
+        depth += char in "([{"
+        depth -= char in ")]}"
+        if char == "," and depth == 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += char
+    parts.append(current)
+    fields: dict[str, str] = {}
+    for part in parts:
+        key, sep, value = part.partition(":")
+        if sep:
+            fields[key.strip()] = value.strip()
+    # the four the page owns as TEXT; each is clipped or sliced
+    for name in ("name", "type", "href", "text"):
+        assert name in fields, (name, sorted(fields))
+        assert "clip(" in fields[name] or ".slice(" in fields[name], \
+            (name, fields[name])
+    # ...and the identity string every probe is compared against
+    assert "clip(attr(el, 'id'), 120)" in dom.FIND_EXPR, \
+        "the id inside describe() is unbounded — see _reads_as_the_pick"
+    # the geometry and the flags are numbers and booleans: no page text
+    for name in ("box", "center", "viewport", "point", "hit", "clipped"):
+        assert name in fields, (name, sorted(fields))
 
 
 def t_cli_dispatch() -> None:
@@ -2535,7 +2675,18 @@ def t_frames_bind_to_their_tab() -> None:
     # pinned by `t_the_frame_census_judges_its_port`
     real_judge = frames_lib.verify_port_owner
     frames_lib.verify_port_owner = lambda port: None         # type: ignore[assignment]
-    cdp.evaluate = lambda ws, expr, timeout=15.0: census    # type: ignore[assignment]
+    caps: list = []
+
+    def fake_evaluate(ws: str, expr: str, timeout: float = 15.0,
+                      raw: bool = False,
+                      cap: object = cdp_rpc.EVAL_RESULT_CAP) -> list:
+        # the default MIRRORS `cdp.evaluate`'s own: a fake that defaulted to
+        # None would answer `cap=None` for a call that passed NO cap at all, so
+        # the assertion below could not tell the fix from the bug it fixes
+        caps.append(cap)
+        return census
+
+    cdp.evaluate = fake_evaluate                           # type: ignore[assignment]
     cdp.port_of = lambda profile: 1234                      # type: ignore[assignment]
     cdp.target_ws = lambda port, target, kind="page": f"ws://{kind}/{target}"  # type: ignore[assignment]
     try:
@@ -2549,6 +2700,13 @@ def t_frames_bind_to_their_tab() -> None:
         rows = dom.frames_of(1234, "PAGE_A")
         assert [r["target"] for r in rows] == ["AAA"], rows
         assert rows[0]["candidates"] == 0, rows
+        # the census is evaluated WITHOUT the 64 k post-transfer cap: its size
+        # is the page's own frame list, which is exactly what `tab frames`
+        # reports, and capping it made the verb refuse on an ordinary
+        # 400-iframe page — telling the caller to "ask the page for LESS" when
+        # there is no less to ask for (a review measured 528 KB of census).
+        # The 16 MiB frame limit is the backstop either way.
+        assert caps and set(caps) == {None}, caps
         assert dom.frames_of(1234, "PAGE_B")[0]["target"] == "BBB"
         assert dom._frame_target(1234, "PAGE_A", "widget")["target"] == \
             "AAA"                                        # noqa: SLF001
@@ -2688,7 +2846,8 @@ def t_frames_bind_to_their_tab() -> None:
         patched = cdp.evaluate
 
         def no_census(ws: str, expression: str,
-                      timeout: float = 15.0) -> object:
+                      timeout: float = 15.0, raw: bool = False,
+                      cap: object = None) -> object:
             raise ControlError("cdp-error", "no census")
 
         cdp.evaluate = no_census                            # type: ignore[assignment]
@@ -2702,7 +2861,7 @@ def t_frames_bind_to_their_tab() -> None:
         finally:
             cdp.evaluate = patched                          # type: ignore[assignment]
         # a page with no frames says NOTHING (`{}`), not a zeroed census
-        cdp.evaluate = lambda ws, expr, timeout=15.0: []     # type: ignore[assignment]
+        cdp.evaluate = lambda ws, expr, timeout=15.0, cap=None: []  # type: ignore[assignment]  # noqa: E501
         try:
             assert dom._frame_summary(row, tab_row) == {}     # noqa: SLF001
             assert dom._frames_note(row, tab_row) == ""       # noqa: SLF001
@@ -3354,6 +3513,36 @@ def t_slack_plugin_offline() -> None:
             assert rc == 2 and "ERR[bad-args]" in err, (argv, rc, err)
             assert phrase in err, (argv, err)
         assert navs == [link, link, client, mid, mid], navs
+        # the bar is rendered in the WORKSPACE's language, so the count is the
+        # NUMBER in it and not the English word after it: the old
+        # `(\d+)\s+repl` answered None for every other locale, and `truncated`
+        # then fell back to the payload's flag — so a pane holding 2 of 11
+        # replies reported `truncated: false`, i.e. "this is the whole thread"
+        state["bar"] = "11 Antworten"
+        rc, out, _err = run_cli(["slack", "message", link, "--thread"])
+        assert rc == 0, rc
+        localized = json.loads(out)["thread"]
+        assert localized["claimed"] == 11, localized
+        assert localized["count"] == 2, localized
+        assert localized["truncated"] is True, localized
+        # ...and a localized bar whose count MATCHES the pane is still whole
+        state["bar"] = "2 réponses"
+        rc, out, _err = run_cli(["slack", "message", link, "--thread"])
+        assert rc == 0, rc
+        whole = json.loads(out)["thread"]
+        assert whole["claimed"] == 2, whole
+        assert whole["truncated"] is False, whole
+        # ...and a bar whose count cannot be read at ALL is UNPROVEN, never
+        # "complete": this flag must not certify what it could not check
+        state["bar"] = "Antworten"
+        rc, out, _err = run_cli(["slack", "message", link, "--thread"])
+        assert rc == 0, rc
+        unread = json.loads(out)["thread"]
+        assert unread["claimed"] is None, unread
+        assert unread["count"] == 2, unread
+        assert unread["truncated"] is True, unread
+        assert "could not be read" in unread["note"], unread
+        state["bar"] = "4 replies"
     finally:
         for name, value in real.items():
             setattr(plugin_api, name, value)
@@ -3969,6 +4158,203 @@ def t_screenshot_refusals_write_nothing() -> None:
             assert not os.path.exists(target), target
     finally:
         (dom._resolve, dom._session) = real                               # noqa: SLF001
+
+
+def t_clip_rect_syntax() -> None:
+    """`--clip X,Y,W,H`: the part argv can decide without a browser.
+
+    Chrome REFUSES a zero width and HANGS (no reply at all, measured with a
+    raw websocket) on a negative one, so a rectangle that cannot be captured
+    is refused `bad-args` by name, before any browser is involved. The
+    in-document check needs the page's own size and lives in `screenshot()`.
+    """
+    assert dom._clip_rect("10,20,30,40") == (10, 20, 30, 40)             # noqa: SLF001
+    assert dom._clip_rect(" 0,0,1,1 ") == (0, 0, 1, 1)                   # noqa: SLF001
+    for bad in ("1,2,3", "1,2,3,4,5", "a,b,c,d", "", "1,2,3,"):
+        refusal(lambda b=bad: dom._clip_rect(b), "bad-args")             # noqa: SLF001
+    for bad in ("-1,2,3,4", "1,-2,3,4", "1,2,0,4", "1,2,3,0", "1,2,-3,4"):
+        refusal(lambda b=bad: dom._clip_rect(b), "bad-args")             # noqa: SLF001
+
+
+def t_screenshot_capture_modes_refuse_before_writing() -> None:
+    """Element and region screenshots: the clip, the oracle, and no write.
+
+    The two new modes add a second way to be wrong — an element that resolves
+    to several matches, one that resolves to none, a region the document does
+    not contain — and the ONE promise every mode keeps is that a refused
+    capture leaves no file. A scripted page answers the metrics and the
+    matcher; the CDP call is recorded, so the `clip` + `captureBeyondViewport`
+    parameters are asserted, and the viewport/full paths are proven to still
+    send NO clip.
+    """
+    el_png, reg_png = _png(101, 51), _png(200, 100)
+    wrong = _png(640, 480)
+    metrics = {"iw": 800, "ih": 600, "dpr": 1.0, "sw": 2000, "sh": 3000,
+               "url": "u", "title": "t", "visibility": "visible"}
+    # the probe's own element: getBoundingClientRect right=110.890625,
+    # bottom=70.84375 — outward rounding gives [10, 20, 101, 51]
+    element = {"tag": "div", "role": "div", "name": "div#tall",
+               "text": "tall", "box": [10, 20, 101, 51],
+               "rect": [10.5, 20.25, 100.390625, 50.59375],
+               "center": [60, 45], "viewport": [10, 20, 101, 51],
+               "point": [60, 45], "hit": True, "hit_element": "div#tall",
+               "in_viewport": True}
+
+    def make_page(rows: list[dict], png: bytes = el_png,
+                  page_metrics: dict | None = None) -> _ScriptedPage:
+        def route(expression: str) -> object:
+            if "dpr" in expression:
+                return dict(page_metrics or metrics)
+            return _matches_data(*rows)
+
+        page = _ScriptedPage(route)
+
+        def call(method: str, params: dict | None = None,
+                 timeout: float = 0.0) -> dict:
+            page.calls.append({"method": method, **(params or {})})
+            return {"data": base64.b64encode(png).decode("ascii")}
+
+        page.call = call  # type: ignore[method-assign]
+        return page
+
+    def capture_calls(page: _ScriptedPage) -> list[dict]:
+        return [c for c in page.calls
+                if c.get("method") == "Page.captureScreenshot"]
+
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (dom._resolve, dom._session, dom._frame_summary)              # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                          # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._frame_summary = (lambda r, t, session=None: {})                 # noqa: SLF001
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. element mode: the outward-rounded clip IS what was sent, and
+            #    the matching IHDR is written
+            target = os.path.join(tmp, "element.png")
+            page = make_page([element])
+            dom._session = lambda _row, _tab: page                        # noqa: SLF001
+            reply = dom.screenshot(target, selector="#tall")
+            assert reply["mode"] == "element", reply
+            assert reply["clip"] == [10, 20, 101, 51], reply
+            assert reply["element"]["tag"] == "div", reply
+            assert reply["full"] is False and reply["verified"] is True, reply
+            shot = capture_calls(page)
+            assert len(shot) == 1 and shot[0].get("clip") == {
+                "x": 10, "y": 20, "width": 101, "height": 51,
+                "scale": 1}, shot
+            assert shot[0].get("captureBeyondViewport") is True, shot
+            assert Path(target).read_bytes() == el_png, target
+            # 2. several matches with no --index: refused, NO file
+            target = os.path.join(tmp, "ambiguous.png")
+            dom._session = (lambda _row, _tab: make_page([element, element]))  # noqa: SLF001
+            refusal(lambda: dom.screenshot(target, selector=".x"),
+                    "ambiguous-element")
+            assert not os.path.exists(target), target
+            # 3. nothing rendered: refused, NO file
+            target = os.path.join(tmp, "nomatch.png")
+            dom._session = lambda _row, _tab: make_page([])               # noqa: SLF001
+            refusal(lambda: dom.screenshot(target, selector=".x"), "no-match")
+            assert not os.path.exists(target), target
+            # 4. a zero-area element (no usable rect) is not verified
+            target = os.path.join(tmp, "zero.png")
+            dom._session = (lambda _row, _tab:                           # noqa: SLF001
+                            make_page([dict(element, rect=[10, 20, 0, 0])]))
+            refusal(lambda: dom.screenshot(target, selector="#tall"),
+                    "screenshot-not-verified")
+            assert not os.path.exists(target), target
+            # 5. element IHDR disagrees: refused, NO file
+            target = os.path.join(tmp, "elmismatch.png")
+            dom._session = (lambda _row, _tab:                           # noqa: SLF001
+                            make_page([element], png=wrong))
+            refusal(lambda: dom.screenshot(target, selector="#tall"),
+                    "screenshot-not-verified")
+            assert not os.path.exists(target), target
+            # 6. region mode: the caller's own clip, sent as given
+            target = os.path.join(tmp, "region.png")
+            page = make_page([], png=reg_png)
+            dom._session = lambda _row, _tab: page                        # noqa: SLF001
+            reply = dom.screenshot(target, clip=(10, 20, 200, 100))
+            assert reply["mode"] == "region", reply
+            assert reply["clip"] == [10, 20, 200, 100], reply
+            assert "element" not in reply, reply
+            shot = capture_calls(page)
+            assert shot and shot[0].get("clip") == {
+                "x": 10, "y": 20, "width": 200, "height": 100,
+                "scale": 1}, shot
+            assert shot[0].get("captureBeyondViewport") is True, shot
+            # 7. a region wholly outside the document: bad-args naming its size
+            target = os.path.join(tmp, "outside.png")
+            dom._session = lambda _row, _tab: make_page([])               # noqa: SLF001
+            try:
+                dom.screenshot(target, clip=(2000, 100, 50, 50))
+                raise AssertionError("a wholly-outside clip was accepted")
+            except ControlError as e:
+                assert e.code == "bad-args", e.code
+                assert "2000x3000" in str(e), e
+            assert not os.path.exists(target), target
+            # 8. a region IHDR disagrees: refused, NO file
+            target = os.path.join(tmp, "regmismatch.png")
+            dom._session = (lambda _row, _tab:                           # noqa: SLF001
+                            make_page([], png=wrong))
+            refusal(lambda: dom.screenshot(target, clip=(0, 0, 200, 100)),
+                    "screenshot-not-verified")
+            assert not os.path.exists(target), target
+            # 9. viewport and full are UNCHANGED: no clip, and
+            #    captureBeyondViewport keeps the old meaning
+            target = os.path.join(tmp, "viewport.png")
+            page = make_page([], png=_png(800, 600))
+            dom._session = lambda _row, _tab: page                        # noqa: SLF001
+            reply = dom.screenshot(target)
+            assert reply["mode"] == "viewport" and reply["clip"] is None, reply
+            assert capture_calls(page)[0].get("captureBeyondViewport") is False
+            assert "clip" not in capture_calls(page)[0]
+            target = os.path.join(tmp, "full.png")
+            page = make_page([], png=_png(2000, 3000))
+            dom._session = lambda _row, _tab: page                        # noqa: SLF001
+            reply = dom.screenshot(target, full=True)
+            assert reply["mode"] == "full" and reply["full"] is True, reply
+            assert reply["clip"] is None, reply
+            assert capture_calls(page)[0].get("captureBeyondViewport") is True
+            assert "clip" not in capture_calls(page)[0]
+            # 10. the RAW rect stays OUT of find's reply (it is element mode's)
+            dom._session = lambda _row, _tab: make_page([element])        # noqa: SLF001
+            found = dom.find(selector="div")
+            assert found["matches"], found
+            assert "rect" not in found["matches"][0], found["matches"][0]
+            # 11. a clip past the module's own dimension ceiling refuses
+            #     BEFORE the capture is sent: `expected_pixels` applies the
+            #     same ceiling, but only after Chrome was asked for a bitmap
+            #     it cannot render (a review found the post-hoc check)
+            target = os.path.join(tmp, "huge-clip.png")
+            page = make_page([], png=reg_png)
+            dom._session = lambda _row, _tab: page                        # noqa: SLF001
+            refusal(lambda: dom.screenshot(
+                target, clip=(0, 0, images_lib.MAX_PX + 1, 10)), "bad-args")
+            assert not capture_calls(page), capture_calls(page)
+            assert not os.path.exists(target), target
+            # 12. an element box past that ceiling refuses the same way
+            target = os.path.join(tmp, "huge-element.png")
+            page = make_page(
+                [dict(element, rect=[0, 0, images_lib.MAX_PX + 1, 50])])
+            dom._session = lambda _row, _tab: page                        # noqa: SLF001
+            refusal(lambda: dom.screenshot(target, selector="#tall"),
+                    "screenshot-not-verified")
+            assert not capture_calls(page), capture_calls(page)
+            assert not os.path.exists(target), target
+            # 13. the pre-capture ceiling is DEVICE px, like the oracle: a
+            #     60000 CSS px clip is over it at dpr 2 and still sends no
+            #     capture and writes nothing (a re-review found the CSS-only
+            #     comparison)
+            target = os.path.join(tmp, "huge-dpr2.png")
+            page = make_page([], png=reg_png,
+                             page_metrics=dict(metrics, dpr=2.0))
+            dom._session = lambda _row, _tab: page                        # noqa: SLF001
+            refusal(lambda: dom.screenshot(
+                target, clip=(0, 0, 60000, 10)), "bad-args")
+            assert not capture_calls(page), capture_calls(page)
+            assert not os.path.exists(target), target
+    finally:
+        (dom._resolve, dom._session, dom._frame_summary) = real           # noqa: SLF001
 
 
 def t_seed_refuses_a_partial_copy() -> None:
@@ -5926,6 +6312,46 @@ def t_extract_schema_and_records() -> None:
     assert dom._extract_records("not a list", ["a"]) == []
 
 
+def t_extract_never_answers_an_empty_list_for_a_page_with_rows() -> None:
+    """A page that HAS records never comes back with `matches: []`.
+
+    The budget is the whole reply's, and a row is charged before it is pushed —
+    which is right, because a row is `#fields × --chars` and a handful of fields
+    used to blow the transport cap. But the break was UNCONDITIONAL, and
+    `--chars` is allowed up to `EXTRACT_FIELD_MAX`, which IS the budget: six
+    records, eight fields and `--chars 5000` answered
+    `{"count": 0, "total": 6, "truncated": true, "matches": []}` — the near
+    silent empty answer a caller reads as "nothing matched", for a page full of
+    records (a review measured it).
+
+    The first row is now exempt from the break. This pins the exemption, the
+    PREMISE that makes it necessary (one field at its documented maximum cannot
+    fit the budget, so an over-budget first row is reachable by argv alone) and
+    the BOUND that makes it safe (one row can never approach the transport cap).
+    The behavioural half — a real page, real rows — belongs to
+    `tests/live_test.py`, which drives a browser; this is the arithmetic and the
+    guard it rests on.
+    """
+    match = re.search(r"if \(([^)]*schema\.budget[^)]*)\)\s*\{\s*budget_hit",
+                      dom.EXTRACT_EXPR)
+    assert match, ("the budget break in EXTRACT_EXPR moved — this check has to "
+                   "be re-read, not deleted")
+    assert "records.length" in match.group(1), match.group(1)
+    # the premise: `--chars` may be the WHOLE budget, so a single row can
+    # exceed it with no page cooperation at all
+    assert dom.EXTRACT_FIELD_MAX >= dom.EXTRACT_TOTAL_CHARS, (
+        dom.EXTRACT_FIELD_MAX, dom.EXTRACT_TOTAL_CHARS)
+    # ...and the bound: the exempt row is `#fields × --chars`, far under the
+    # 16 MiB frame cap, so keeping it cannot break the wire
+    worst_row = dom.EXTRACT_MAX_FIELDS * dom.EXTRACT_FIELD_MAX
+    assert worst_row < cdp_rpc.TRANSPORT_CAP, (worst_row,
+                                               cdp_rpc.TRANSPORT_CAP)
+    # the schema builder still refuses more fields than a row may carry
+    refusal(lambda: dom._extract_schema(                      # noqa: SLF001
+        "a", [f"f{i}=:scope" for i in range(dom.EXTRACT_MAX_FIELDS + 1)]),
+        "bad-args")
+
+
 def t_cli_extract_grammar() -> None:
     """`tab extract` argv reaches dom.extract once, flags intact."""
     calls: list[tuple] = []
@@ -6289,7 +6715,8 @@ def t_google_plugin_offline() -> None:
     os.environ["BROWSER_CONTROL_PLUGIN_PATH"] = os.path.join(repo, "plugins")
     calls: dict[str, list] = {"nav": [], "focus": [], "type": [], "press": [],
                               "scroll": [], "click": []}
-    state = {"verified": True, "served": 0, "missing": (), "failing": ()}
+    state = {"verified": True, "served": 0, "missing": (),
+             "failing": (), "raise_on_type": None}
     # two SERPs the fake serves in order — page 2 repeats nothing, so the
     # merge has something to merge and the `page` stamps differ
     pages = (
@@ -6312,7 +6739,7 @@ def t_google_plugin_offline() -> None:
         for key in calls:
             calls[key].clear()
         state.update({"verified": True, "served": 0, "missing": (),
-                      "failing": ()})
+                      "failing": (), "raise_on_type": None})
 
     def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
         calls["nav"].append((url, tab))
@@ -6343,6 +6770,12 @@ def t_google_plugin_offline() -> None:
     def fake_type(text: str, tab: str = "", browser: str = "",
                   delay_s: float | None = None) -> dict:
         calls["type"].append((text, delay_s))
+        if state["raise_on_type"]:
+            # the REAL core RAISES on a proven no-op (`dom.text_input`), so this
+            # is how a test drives "the field did not take the text" — a
+            # returned `verified: False` is the UNCLEAR verdict, not that
+            code, why = state["raise_on_type"]
+            raise plugin_api.ControlError(code, why)
         return {"ok": True, "chars": len(text),
                 "verified": state["verified"],
                 "length_after": len(text) if state["verified"] else 0}
@@ -6504,12 +6937,40 @@ def t_google_plugin_offline() -> None:
         # the declared classes are enforceable, not decorative
         rc, _out, err = run_cli(["--deny", "write", "google", "search", "q"])
         assert rc == 2 and "ERR[not-allowed]" in err, (rc, err)
-        # a field that did NOT take the text is refused, never submitted
+        # a PROVEN no-op is the CORE's own refusal: `dom.type_text` raises
+        # `type-not-verified` when the probe measured a focus that takes no
+        # text, so the plugin never sees a reply at all — and it must not
+        # submit the query it could not place
         fresh()
-        state["verified"] = False
+        state["raise_on_type"] = (plugin_api.errors.ERR_TYPE_NOT_VERIFIED,
+                                  "the focus takes no text")
         rc, _out, err = run_cli(["google", "search", "q"])
         assert rc == 2 and "ERR[type-not-verified]" in err, (rc, err)
         assert calls["press"] == [], calls
+        # ...and the UNCLEAR verdict — a returned `verified: false`, which is
+        # what the core answers for an unreadable field, a moved focus, a
+        # partial landing, or a box that ALREADY held the query (re-running a
+        # search) — is NOT that refusal. It used to be read as "did not land"
+        # and refuse a working search with a message asserting the one thing
+        # the tri-state exists to avoid; now the search goes ahead and the
+        # reply says the typing was not certified.
+        fresh()
+        state["verified"] = False
+        rc, out, err = run_cli(["google", "search", "q"])
+        assert rc == 0, (rc, err)
+        assert calls["press"] == ["enter"], calls
+        data = json.loads(out)
+        assert data["typing"]["verified"] is False, data
+        # the search really ran: the site built a search address and records
+        # came back (this call is the DEFAULT cap, so the count is the
+        # fixture's, not the 2 the `--cap 2` block above pins)
+        assert data["landed_on"].startswith("https://www.google.com/search"), data
+        assert data["results"], data
+        # ...while a certified landing says so
+        fresh()
+        rc, out, err = run_cli(["google", "search", "q"])
+        assert rc == 0, (rc, err)
+        assert json.loads(out)["typing"]["verified"] is True, out
     finally:
         for name, fn in real.items():
             setattr(plugin_api, name, fn)
@@ -6878,6 +7339,55 @@ def t_spec_matchers_share_the_id_rule_and_read_once() -> None:
             browser.browsers = real_browsers        # type: ignore[assignment]
             cdp.page_rows_at = real_rows            # type: ignore[assignment]
             _restore_root(keep_root)
+
+
+def t_the_node_lookup_does_not_drag_the_subtree() -> None:
+    """`_node_of` answers a remote OBJECT, and asks the page for nothing else.
+
+    Escalating a JS object to a DOM `nodeId` makes the browser PUSH the node
+    into its DOM agent, children and all: measured over a raw socket against a
+    30 000-`<option>` select, `requestNode` sent `DOM.setChildNodes` frames of
+    387 B, 352 B and **16 812 346 B** before its own 30-byte reply, so
+    `tab focus`, `tab scroll TEXT` and `tab select` all refused
+    `result-too-large` against the 16 MiB frame cap for a page whose element was
+    merely sitting under a long child list — three verbs lost to one lookup.
+
+    `DOM.focus` and `DOM.scrollIntoViewIfNeeded` take `objectId` DIRECTLY, so
+    the lookup is one `Runtime.evaluate` and nothing else. That is measured
+    against Chrome, not assumed: `DOM.describeNode` answers
+    `{"node": {"nodeId": 0, …}}` for a node the agent has not pushed, so the
+    id-shape of this function is a trap — an earlier version read the nested id,
+    fell back to `requestNode` on every real page, and the blowup happened
+    anyway. What is pinned here is that NO DOM method is called at all.
+    """
+    class FakeSession:
+        """A session that answers the handle lookup and records DOM calls."""
+
+        def __init__(self, handle: str) -> None:
+            self.calls: list[str] = []
+            self.handle_value = handle
+
+        def handle(self, expression: str) -> str:
+            return self.handle_value
+
+        def call(self, method: str, params: dict | None = None) -> dict:
+            self.calls.append(method)
+            return {}
+
+    session: Any = FakeSession("obj-1")
+    assert dom._node_of(session, "el") == "obj-1"               # noqa: SLF001
+    assert session.calls == [], \
+        f"the lookup asked the page for more: {session.calls}"
+    # nothing matched: an EMPTY handle, which every caller reads as `no-match`
+    session = FakeSession("")
+    assert dom._node_of(session, "el") == ""                    # noqa: SLF001
+    assert session.calls == [], session.calls
+    # ...and the two callers pass it as `objectId`, never as a node
+    for module, needle in ((actions_lib, "DOM.focus"),
+                           (scroll_lib, "DOM.scrollIntoViewIfNeeded")):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert '"nodeId"' not in source, (module.__name__, "a nodeId is back")
+        assert f'"{needle}", {{"objectId": handle}}' in source, module.__name__
 
 
 def t_focus_nodes_go_through_one_helper() -> None:
@@ -7271,6 +7781,76 @@ def t_stop_refuses_when_the_tab_count_is_unreadable() -> None:
         _restore_root(keep_root)
 
 
+def t_the_endpoint_is_resolved_the_census_way() -> None:
+    """`close` and a scoped write ask for the port like `open` — not the FILE.
+
+    `cdp.port_of` is `DevToolsActivePort`, the oracle the row-less resolvers
+    document AGAINST: Chrome writes that file only for an ephemeral port, and it
+    survives a SIGKILL, so a stale one holding a stranger's — or nobody's — port
+    is a normal state. Two verbs read it anyway. `_writable_route`'s scoped
+    branch fed `ensure_up`, so `tab --profile P URL` refused `cdp-unreachable`
+    about a browser that was right there while `open --profile P` (which
+    resolves the census way) worked. `stop`'s unnamed path fed both the tab
+    count and the final proof, so `close` refused `tabs-open` ("the tabs could
+    not be read") about readable tabs, and with a listener still on the stale
+    port it reported `browser-not-stopped` AFTER the right pid had been killed —
+    a false failure on a stop that worked. Both use `driver_port` now, the
+    resolver `_page_count`, `ensure_up` and `open` already share.
+
+    `cdp.port_of` is a TRIPWIRE: it raises if ANY of this asks it for the
+    endpoint, so a regression cannot pass by the two oracles happening to agree.
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    keep_scope = scope_lib.current().profile
+    target = os.path.join(root, "managed")
+    os.makedirs(target)
+    seen: list[int] = []
+    real = (lifecycle_lib.driver_port, lifecycle_lib.cdp.port_of,
+            lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+            lifecycle_lib.pid_on_profile, lifecycle_lib.pid_alive,
+            lifecycle_lib._page_count, lifecycle_lib.cdp.answers,
+            lifecycle_lib.os.kill)
+
+    def tripwire(profile: str) -> int:
+        raise AssertionError(f"the port FILE was read for {profile!r}")
+
+    try:
+        lifecycle_lib.driver_port = lambda profile: 9222
+        lifecycle_lib.cdp.port_of = tripwire            # type: ignore[assignment]
+        # A) a SCOPED tab write: (profile, port) both from the resolver
+        scope_lib.current().set_profile(target)
+        assert lifecycle_lib._writable_route("") == (target, 9222), \
+            lifecycle_lib._writable_route("")
+        # B) `close` with nothing named: the count AND the proof read the port
+        # the resolver answered, never the file's
+        scope_lib.current().set_profile("")
+        lifecycle_lib.managed_profile = (lambda browser="": target)  # type: ignore[assignment]
+        lifecycle_lib.pid_of = lambda profile: 4321      # type: ignore[assignment]
+        lifecycle_lib.pid_on_profile = (                 # type: ignore[assignment]
+            lambda pid, profile: True)
+        lifecycle_lib.pid_alive = lambda pid: False      # type: ignore[assignment]
+        lifecycle_lib._page_count = (                    # type: ignore[assignment]
+            lambda profile, port=0: (seen.append(port), 0)[1])
+        lifecycle_lib.cdp.answers = (                    # type: ignore[assignment]
+            lambda port: (seen.append(-port), False)[1])
+        lifecycle_lib.os.kill = (                        # type: ignore[assignment]
+            lambda pid, sig: None)
+        reply = lifecycle_lib.stop()
+        assert reply["stopped"] is True, reply
+        assert seen, "neither the count nor the proof ran"
+        assert all(abs(port) == 9222 for port in seen), seen
+    finally:
+        (lifecycle_lib.driver_port, lifecycle_lib.cdp.port_of,
+         lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
+         lifecycle_lib.pid_on_profile, lifecycle_lib.pid_alive,
+         lifecycle_lib._page_count, lifecycle_lib.cdp.answers,
+         lifecycle_lib.os.kill) = real
+        scope_lib.current().set_profile(keep_scope)
+        _restore_root(keep_root)
+
+
 def t_empty_profile_endpoint_never_verifies() -> None:
     """A browser that names no profile cannot be verified, ever.
 
@@ -7321,6 +7901,18 @@ def t_bidi_controls_are_flattened() -> None:
         for code in range(start, end + 1):
             assert chr(code) not in text_lib.foreign(f"a{chr(code)}b"), \
                 hex(code)
+    # ABSENT is empty; FALSY is a value. `str(text or "")` rendered `False` and
+    # `0` as nothing, so a refusal that quotes state printed `checked=` for the
+    # one case it exists to report (a page unchecking its own box) and lost a
+    # real `selected=0` index (a review measured it)
+    assert text_lib.foreign(None) == "", repr(text_lib.foreign(None))
+    assert text_lib.foreign("") == "", repr(text_lib.foreign(""))
+    assert text_lib.foreign(False) == "False", repr(text_lib.foreign(False))
+    assert text_lib.foreign(0) == "0", repr(text_lib.foreign(0))
+    assert text_lib.foreign(0.0) == "0.0", repr(text_lib.foreign(0.0))
+    # ...and the rule composes with the rest: a falsy value still carries no
+    # control character through, and is still bounded
+    assert text_lib.foreign(False, 2) == "Fa", repr(text_lib.foreign(False, 2))
 
 
 def t_js_reports_unserializable_values() -> None:
@@ -7492,6 +8084,13 @@ class _NoSignal:
 
     def __init__(self) -> None:
         self.signals: list[tuple[int, int]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        # Every attribute but `kill` delegates to the real module: `stop`
+        # reaches `os` for more than the signal (the port resolver walks
+        # `os.path`), and a shim that only carried `kill` turned those reads
+        # into an AttributeError instead of the code under test.
+        return getattr(os, name)
 
     def kill(self, pid: int, sig: int) -> None:
         self.signals.append((pid, sig))
@@ -7667,10 +8266,95 @@ def t_select_refuses_a_control_that_does_not_move() -> None:
         assert [k["type"] for k in keys] == ["rawKeyDown", "keyUp"] * 2, keys
         assert {k["code"] for k in keys} == {"ArrowDown"}, keys
         focused = [c for c in page.calls if c["method"] == "DOM.focus"]
-        assert focused == [{"method": "DOM.focus", "nodeId": 7}], page.calls
+        # the handle goes as `objectId`: a `nodeId` would make the browser push
+        # the node's children before it could focus anything (see `_node_of`)
+        assert focused == [{"method": "DOM.focus", "objectId": 7}], page.calls
     finally:
         (dom._resolve, dom._session, dom._matches_in,             # noqa: SLF001
          dom._node_of, actions_lib.poll) = real
+
+
+def t_select_bounds_the_arrow_key_walk() -> None:
+    """`tab select` refuses a walk longer than its budget, and says how far it got.
+
+    A `<select>` moves one option per arrow PAIR and no CDP method opens the
+    popup or jumps to an index, so the walk is as long as the page's own option
+    list. With no bound, a 3 000-option control took 24 s and a 16 000-option one
+    had not returned after 380 s (a review measured both, the second killed) —
+    a verb whose cost the page chooses and the caller cannot bound from argv.
+
+    The clock is driven here rather than slept on: `actions.time` is a fake
+    whose `monotonic` walks a scripted list and `actions.deadline` is pinned to
+    a fixed instant, so "expired" is exact and the check costs nothing. Two
+    cases: expired on the FIRST look (no key may be sent at all), and expired
+    only after one pair (the message has to account for the key that WAS sent).
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    probe = {"is_select": True, "disabled": False, "multiple": False,
+             "matched": 1, "target": 3, "selected": 0, "value": "a",
+             "target_value": "d", "target_label": "D", "by": "value",
+             "labels": ["a", "b", "c", "d"], "candidates": []}
+    real = (dom._resolve, dom._session, dom._matches_in,          # noqa: SLF001
+            dom._node_of, actions_lib.poll, actions_lib.deadline,
+            actions_lib.time)
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._matches_in = (lambda session, needle, css, cap:          # noqa: SLF001
+                       _matches_data(_element_row()))
+    dom._node_of = lambda session, expression: 7       # type: ignore[assignment]
+    actions_lib.deadline = lambda _budget: 100.0       # type: ignore[assignment]
+
+    class _Clock:
+        """`time`, with `monotonic` walking a scripted list — no sleeping."""
+
+        def __init__(self, values: list[float]) -> None:
+            self.values, self.seen = values, 0
+
+        def monotonic(self) -> float:
+            value = self.values[min(self.seen, len(self.values) - 1)]
+            self.seen += 1
+            return value
+
+    try:
+        # 1) out of budget on the very first look: NOT ONE key is dispatched
+        page = _ScriptedPage(lambda expression: (
+            dict(probe) if "is_select" in expression else {}))
+        dom._session = lambda _row, _tab: page                    # noqa: SLF001
+        actions_lib.time = _Clock([100.0])             # type: ignore[assignment]
+        with _capped_poll(actions_lib):
+            try:
+                dom.select(selector="#sel", value="d")
+            except ControlError as e:
+                assert e.code == "select-not-verified", e.code
+                assert "only 0" in e.message, e.message
+            else:
+                raise AssertionError("a walk with no budget did not refuse")
+        keys = [c for c in page.calls
+                if c["method"] == "Input.dispatchKeyEvent"]
+        assert keys == [], keys
+        # 2) one pair fits, the rest does not: the refusal counts what it sent
+        page = _ScriptedPage(lambda expression: (
+            dict(probe) if "is_select" in expression else {}))
+        dom._session = lambda _row, _tab: page                    # noqa: SLF001
+        actions_lib.time = _Clock([99.0, 101.0])       # type: ignore[assignment]
+        with _capped_poll(actions_lib):
+            try:
+                dom.select(selector="#sel", value="d")
+            except ControlError as e:
+                assert e.code == "select-not-verified", e.code
+                assert "only 1" in e.message, e.message
+                # the remedy is named: real keys cannot reach it, `tab js` can
+                assert "tab js" in e.message, e.message
+            else:
+                raise AssertionError("a walk past the budget did not refuse")
+        keys = [c for c in page.calls
+                if c["method"] == "Input.dispatchKeyEvent"]
+        assert [k["type"] for k in keys] == ["rawKeyDown", "keyUp"], keys
+        assert keys and {k["code"] for k in keys} == {"ArrowDown"}, keys
+    finally:
+        (dom._resolve, dom._session, dom._matches_in,             # noqa: SLF001
+         dom._node_of, actions_lib.poll, actions_lib.deadline,
+         actions_lib.time) = real
 
 
 def t_type_sends_three_events_per_character() -> None:
@@ -7765,7 +8449,7 @@ def t_js_out_writes_the_value_and_names_its_refusals() -> None:
     the sink's: exclusive without `--force`, absolute, parent must exist, and
     a directory is not a file.
     """
-    box = {"value": {"a": [1, 2, 3]}}
+    box: dict[str, object] = {"value": {"a": [1, 2, 3]}}
     page = _ScriptedPage(lambda expression: box["value"])
 
     class _Tab:
@@ -7823,6 +8507,26 @@ def t_js_out_writes_the_value_and_names_its_refusals() -> None:
             assert "value" not in undef, undef
             with open(undefined, encoding="utf-8") as handle:
                 assert json.load(handle) is None
+            # ...and the value a page can answer but UTF-8 cannot HOLD: an
+            # unpaired surrogate (`"\uD800"` is a valid JS string, and CDP
+            # carries it as `"\ud800"`). `ensure_ascii=False` raised
+            # UnicodeEncodeError out of the sink — AFTER the expression had run
+            # and after the target was claimed — so the verb failed `internal`
+            # with work done and nothing recorded. Escaped, the file is written
+            # and round-trips, exactly as the reply path already writes it.
+            box["value"] = json.loads('"\\ud800"')
+            lone = os.path.join(tmp, "lone.json")
+            reply = dom.js("x", out=lone)
+            assert reply["verified"] is True, reply
+            assert reply["bytes"] == os.stat(lone).st_size, reply
+            with open(lone, encoding="utf-8") as handle:
+                assert json.load(handle) == "\ud800"
+            # ...and non-ASCII TEXT still round-trips, escaped rather than raw
+            box["value"] = "café 😀"
+            text_file = os.path.join(tmp, "text.json")
+            dom.js("x", out=text_file)
+            with open(text_file, encoding="utf-8") as handle:
+                assert json.load(handle) == "café 😀"
             for bad in ("rel.json", tmp, os.path.join(tmp, "nope", "x.json")):
                 refusal(lambda bad=bad: dom.js("1", out=bad), "bad-args")
     finally:
@@ -7845,8 +8549,21 @@ def t_a_misread_flag_hints_at_the_verb_usage() -> None:
         for argv, phrase in (
                 (["tab", "js", "--code", "1"],
                  "usage: tab js EXPR [--out FILE] [--force] [--tab SPEC]"),
+                # a wrapped shape must arrive WHOLE: `tab wait`, `tab extract`
+                # and `tab screenshot` continue on a second physical line, and
+                # the hint used to stop at the first (a review found it)
                 (["tab", "wait", "--for", "load", "--math", "x"],
-                 "usage: tab wait --for load|idle|element|url|js"),
+                 "usage: tab wait --for load|idle|element|url|js "
+                 "[--selector CSS] [--expr EXPR] [--match SUBSTR] "
+                 "[--timeout S] [--idle-ms MS] [--tab SPEC]"),
+                (["tab", "extract", "--bogus"],
+                 "usage: tab extract --each CSS --field NAME=SPEC "
+                 "[--field ...] [--cap N] [--chars N] [--visible] "
+                 "[--unique FIELD] [--tab SPEC]"),
+                (["tab", "screenshot", "--bogus"],
+                 "usage: tab screenshot PATH|--path PATH [--full | "
+                 "--selector CSS [--index N] | --clip X,Y,W,H] [--force] "
+                 "[--tab SPEC]"),
                 (["tab", "text", "--nope"], "usage: tab text"),
                 (["page", "read", "https://a/", "--depth", "2"],
                  "usage: page read URL..."),
@@ -7876,6 +8593,41 @@ def t_a_misread_flag_hints_at_the_verb_usage() -> None:
                      ["tab", "wait", "--for", "load", "--timeout", "0"]):
             rc, _out, err = run_cli(argv)
             assert rc == 2 and "usage:" not in err, (argv, rc, err)
+        # NO hint may carry a line's EXPLANATION: the shape and the prose are
+        # separated by a run of three or more spaces, and a line written with
+        # two handed both halves back — `tab back|forward` appended "…
+        # [--tab SPEC]  history, verified by the address changing", the
+        # description riding into the reply as if it were part of the call (a
+        # review found it).
+        #
+        # What tells prose from a shape is PUNCTUATION, not the comma: a shape
+        # contains commas too (`--at X,Y`), but a sentence's comma is followed
+        # by a space and a lowercase word. Checked over the ENTRY lines only —
+        # a continuation line and the trailing reference block (`SPEC`,
+        # `flags:`, `gate:`, `reads:`, `out:`) are prose by construction, and
+        # they can never match a verb phrase anyway.
+        prose_re = re.compile(r",\s+[a-z]")
+        heads = []
+        for line in cli_main.USAGE.splitlines():
+            if not line.startswith("  ") or line.startswith("   "):
+                continue                       # continuation: explanation only
+            head = cli_main._usage_head(line)
+            if not head or head.split(" ", 1)[0] in ("SPEC", "flags:", "gate:",
+                                                     "reads:", "out:"):
+                continue                       # the reference block, not a call
+            heads.append(head)
+        heads += [cli_main._usage_head(usage)
+                  for usage in registry.PLUGINS.usages()]
+        prose = [head for head in heads if prose_re.search(head)]
+        assert len(heads) > 30, len(heads)      # the scan found the entries
+        assert not prose, prose
+        # ...and the specific line, whose `|` makes it the one that must ALSO
+        # place its second spelling: both verbs get the SAME clean shape
+        for verb in ("back", "forward"):
+            rc, _out, err = run_cli(["tab", verb, "--bogus"])
+            assert rc == 2, (verb, rc, err)
+            assert "usage: tab back|forward [--tab SPEC]" in err, err
+            assert "history," not in err and "changing" not in err, err
     finally:
         if keep is None:
             os.environ.pop("BROWSER_CONTROL_PLUGIN_PATH", None)
@@ -8188,6 +8940,110 @@ def t_the_last_unproduced_refusal_codes() -> None:
          media_lib.poll) = real                                   # noqa: SLF001
 
 
+def t_a_history_list_of_non_entries_refuses_cleanly() -> None:
+    """A peer's history ENTRIES are checked before anything is called on them.
+
+    `(entries[wanted] or {}).get("id")` shows the intent — tolerate a falsy
+    element — but a TRUTHY non-object goes straight to `.get`: a browser
+    answering `{"entries": ["a", "b"], "currentIndex": 0}` made `tab forward`
+    raise `AttributeError: 'str' object has no attribute 'get'` and come back
+    `ERR[internal]`, which is the one shape this transport widened three times
+    to keep out (`_json_object`, `_error_text`, `Session.handle`). A review
+    reproduced it; this drives the same answer through the real `history`.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    real = (nav_lib._pkg._one_tab, nav_lib.row_port, nav_lib._href,
+            nav_lib.page_ws, nav_lib.cdp.call)
+    nav_lib._pkg._one_tab = (lambda tab="", browser="", **kw:       # noqa: SLF001
+                             (row, tab_row))
+    nav_lib.row_port = lambda row: 9333                   # type: ignore[assignment]
+    nav_lib._href = (lambda profile, target, port: "https://x/")  # type: ignore[assignment]
+    nav_lib.page_ws = (lambda profile, target, port: object())  # type: ignore[assignment]
+    try:
+        for entries, wanted_index in ((["a", "b"], 0), ([None, 7], 0),
+                                      ([{"id": 1}, "x"], 1)):
+            nav_lib.cdp.call = (                          # type: ignore[assignment]
+                lambda ws, method, params=None, _e=entries, _i=wanted_index:
+                {"entries": _e, "currentIndex": _i})
+            refusal(lambda: nav_lib.history("forward"), "nav-failed")
+        # ...and a REAL entry list still moves, so the guard is not a blanket no
+        calls: list = []
+        nav_lib.cdp.call = (                              # type: ignore[assignment]
+            lambda ws, method, params=None: (
+                calls.append((method, params)) or
+                ({"entries": [{"id": 1}, {"id": 2}], "currentIndex": 0}
+                 if method == "Page.getNavigationHistory" else {"ok": True})))
+        nav_lib._wait_url_change = (                      # type: ignore[assignment]
+            lambda *a, **k: True)
+        got = nav_lib.history("forward")
+        assert got["ok"] is True, got
+        assert ("Page.navigateToHistoryEntry", {"entryId": 2}) in calls, calls
+    finally:
+        (nav_lib._pkg._one_tab, nav_lib.row_port, nav_lib._href,  # noqa: SLF001
+         nav_lib.page_ws, nav_lib.cdp.call) = real
+
+
+def t_the_cdp_reply_is_demuxed_and_the_send_is_bounded() -> None:
+    """A reply needs its `id` and NO `method`; a send that never drains stops.
+
+    Two edges of the same loop. CDP tags an EVENT with `method` and a REPLY
+    with `id`, and a frame carrying both was read as the answer — an empty
+    success for a request nobody answered (a review found it). And the budget
+    started AFTER `ws.send`, so a peer that completed the handshake and then
+    read nothing held the call past its own deadline indefinitely (measured: a
+    3 s call had not returned after 12 s). Both are driven here against a
+    scripted async peer, so neither needs a socket.
+    """
+    import asyncio                                          # noqa: PLC0415
+
+    from browser_control.lib.cdp import rpc as rpc_lib      # noqa: PLC0415
+
+    class Peer:
+        """A peer answering a scripted frame list, optionally never draining."""
+
+        def __init__(self, frames: list[str], wedge: bool = False) -> None:
+            self.frames, self.wedge, self.sent = list(frames), wedge, []
+
+        async def send(self, payload: str) -> None:
+            self.sent.append(payload)
+            if self.wedge:
+                await asyncio.sleep(30)        # the write buffer never drains
+
+        async def recv(self) -> str:
+            if not self.frames:
+                await asyncio.sleep(30)
+            return self.frames.pop(0)
+
+    def ask(peer: Peer, budget: float = 0.3) -> object:
+        async def call() -> object:
+            try:
+                return await rpc_lib._await_reply(
+                    peer, 1, "Runtime.evaluate", {}, budget,
+                    error_text=lambda err: str(err))
+            except TimeoutError:
+                return "timeout"
+        return asyncio.run(call())
+
+    # 1) an EVENT carrying our id is not the reply: it goes to `on_frame`, and
+    #    the request is still answered by the frame that IS the reply
+    seen: list = []
+
+    async def with_hook() -> object:
+        return await rpc_lib._await_reply(
+            Peer([json.dumps({"method": "Page.frameNavigated", "id": 1}),
+                  json.dumps({"id": 1, "result": {"value": 7}})]),
+            1, "Runtime.evaluate", {}, 0.3, error_text=lambda err: str(err),
+            on_frame=seen.append)
+
+    assert asyncio.run(with_hook()) == {"value": 7}
+    assert [frame.get("method") for frame in seen] == ["Page.frameNavigated"], \
+        seen
+    # 2) a send that never drains is bounded by the SAME budget
+    started = time.monotonic()
+    assert ask(Peer([], wedge=True)) == "timeout"
+    assert time.monotonic() - started < 5, time.monotonic() - started
+
+
 def t_http_read_deadline_holds_against_a_dribbling_peer() -> None:
     """`cdp._get_bytes` RETURNS against a peer that dribbles — it used to hang.
 
@@ -8259,10 +9115,108 @@ def t_http_read_deadline_holds_against_a_dribbling_peer() -> None:
         f"the read gave up in {elapsed:.2f}s — the peer never got to dribble"
 
 
-def t_a_hostile_port_or_pid_file_is_no_answer() -> None:
+def t_a_recycled_pid_is_never_taken_for_the_browsers() -> None:
+    """`pid_of` trusts a recorded pid only while it PROVES it runs that profile.
+
+    This is the guard behind the promise `close`/`stop` make — a stale pid
+    record plus a recycled pid must never aim SIGTERM at an unrelated process —
+    and it had NO hermetic coverage: every check that named it stubbed it out
+    (`lifecycle_lib.pid_on_profile = lambda pid, prof: True`), so the comparison
+    that decides was never driven, and deleting it (`pid_of` skipping
+    `pid_on_profile`, or `pid_on_marker` answering True for any Chromium main
+    process) left the suite green. Its only real exercise was a live-battery
+    check that CI deliberately never runs.
+
+    The seam is `main_processes` — the ONE reader of `/proc` — fed here with
+    synthetic (pid, exe, cmdline) rows, and the "alive" pid is this PROCESS's
+    own, so `pid_alive` is the real one rather than another stub. What is
+    pinned: the record is a HINT (checked against the profile, by NORMALISED
+    path, or ignored), the fallback is `find_pid`, and the `/proc` filter keeps
+    a main process while dropping a renderer and a non-Chromium binary.
+    """
+    me = os.getpid()
+    real = (proc_lib.main_processes, proc_lib.proc_text, proc_lib.exe_name,
+            proc_lib.os.listdir)
+    with tempfile.TemporaryDirectory() as profile:
+        record = paths_lib.pid_file(profile)
+        Path(record).write_text(str(me), encoding="utf-8")
+        # the profile as a LAUNCHER might spell it: a trailing slash and a `..`
+        # segment. `pid_on_marker` compares normalised paths on purpose — an
+        # exact string compare read a live profile as idle (a review found it)
+        spelled = os.path.join(profile, "sub", "..") + os.sep
+        on_profile = f"chrome\0--user-data-dir={spelled}\0"
+        other = tempfile.mkdtemp(prefix="bc-other-")
+        elsewhere = f"chrome\0--user-data-dir={other}\0"
+        try:
+            proc_lib.main_processes = lambda: [(me, "chrome", on_profile)]
+            # 1) the record PROVES it is this profile's browser: it is used
+            assert proc_lib.pid_of(profile) == me, "the record was not trusted"
+            assert proc_lib.pid_on_profile(me, profile) is True
+            assert proc_lib.find_pid(profile) == me
+            # ...and the SAME live pid on another profile is not this one's
+            assert proc_lib.pid_on_profile(me, other) is False
+            # 2) a RECYCLED pid: alive, but its command line names elsewhere.
+            # The record must be ignored — not "trusted because it is alive"
+            proc_lib.main_processes = lambda: [(me, "chrome", elsewhere)]
+            assert proc_lib.pid_on_profile(me, profile) is False
+            assert proc_lib.pid_of(profile) == 0, \
+                "a recycled pid was signalled on the record's word alone"
+            # 3) ...and the FALLBACK still finds the browser when the pid file
+            # is gone (a crash restart): the census names the profile
+            Path(record).unlink()
+            proc_lib.main_processes = lambda: [(me, "chrome", on_profile)]
+            assert proc_lib.pid_of(profile) == me, "find_pid was not the fallback"
+            # 4) no record and nothing on the profile: 0, never a guess
+            proc_lib.main_processes = lambda: []
+            assert proc_lib.pid_of(profile) == 0
+            assert proc_lib.find_pid(profile) == 0
+            # 5) a pid the census does not list at all is not this profile's
+            assert proc_lib.pid_on_profile(me, profile) is False
+        finally:
+            proc_lib.main_processes = real[0]        # type: ignore[assignment]
+        # the spellings `cmdline_value` accepts, and the one it must not lose:
+        # a NUL-preserving read keeps a path that CONTAINS A SPACE whole (the
+        # space-joined form a rewritten child has cannot)
+        assert proc_lib.cmdline_value(
+            "chrome\0--user-data-dir=/p\0", "--user-data-dir") == "/p"
+        assert proc_lib.cmdline_value(
+            "chrome\0--user-data-dir\0/p\0", "--user-data-dir") == "/p"
+        assert proc_lib.cmdline_value(
+            "chrome --user-data-dir=/p ", "--user-data-dir") == "/p"
+        assert proc_lib.cmdline_value(
+            "chrome\0--user-data-dir=/my profile\0",
+            "--user-data-dir") == "/my profile"
+        assert proc_lib.cmdline_value("chrome\0--other=1\0",
+                                      "--user-data-dir") == ""
+        # the `/proc` filter that decides WHICH pid may be compared at all:
+        # a renderer carries `--type=`, a stranger is not Chromium, and a MAIN
+        # process whose URL merely CONTAINS `--type=` stays a main process
+        cmdlines = {
+            "11": "chrome\0--user-data-dir=/p\0",
+            "12": "chrome\0--type=renderer\0--user-data-dir=/p\0",
+            "13": "firefox\0--user-data-dir=/p\0",
+            "14": "chrome\0--user-data-dir=/p\0--url=http://x/?q=--type=y\0",
+            "15": "chrome\0--type=gpu-process\0",
+        }
+        exes = {"11": "chrome", "12": "chrome", "13": "firefox", "14": "chrome",
+                "15": "chrome"}
+        try:
+            proc_lib.os.listdir = lambda _path: [*cmdlines, "not-a-pid"]
+            proc_lib.proc_text = lambda pid, name: cmdlines.get(str(pid), "")
+            proc_lib.exe_name = lambda pid: exes.get(str(pid), "")
+            found = [pid for pid, _exe, _cmd in proc_lib.main_processes()]
+        finally:
+            (proc_lib.main_processes, proc_lib.proc_text, proc_lib.exe_name,
+             proc_lib.os.listdir) = real
+        assert found == [11, 14], found
+
+
+def t_a_hostile_port_pid_or_attach_file_is_no_answer() -> None:
     """A FIFO, a device symlink and an oversized file at those paths are "no".
 
-    Both files are written by ANOTHER process, so both are hostile input: a
+    THREE files now, all written by ANOTHER process, so all hostile input: the
+    port file, the pid record, and the attach store the census reads on every
+    `info`/`list`/`tab list`. A
     FIFO at `DevToolsActivePort` made the read block forever (before any read
     — `open` waits for a writer), and a symlink to `/dev/zero` grew
     `readline()` until MemoryError (both reproduced by a review). The rule is
@@ -8309,6 +9263,31 @@ def t_a_hostile_port_or_pid_file_is_no_answer() -> None:
             os.unlink(pid_path)
         finally:
             proc_lib.main_processes = real_walk        # type: ignore[assignment]
+    # ...and the THIRD file another process can write in a managed root: the
+    # attach store, which the census reads on every `info`/`list`/`tab list`.
+    # It was the one reader left with a bare `open()`, so a FIFO here hung
+    # every one of those verbs for ever — the read blocks in the OPEN, before
+    # any parse, which is why this asserts a WALL CLOCK and not just `{}`.
+    with tempfile.TemporaryDirectory() as root:
+        store = attachments_lib.AttachmentStore(root)
+        path = os.path.join(root, attachments_lib.ATTACH_FILE)
+        os.mkfifo(path)
+        started = time.monotonic()
+        assert store.records() == {}, "a FIFO was read as attach records"
+        assert time.monotonic() - started < 2.0, "a FIFO blocked records()"
+        os.unlink(path)
+        os.symlink("/dev/zero", path)
+        started = time.monotonic()
+        assert store.records() == {}, "a device symlink was read as records"
+        assert time.monotonic() - started < 2.0, \
+            "a device symlink blocked records()"
+        os.unlink(path)
+        Path(path).write_bytes(b'[{"profile": "/x"}]' + b" " * (1 << 20))
+        assert store.records() == {}, "an oversized store was read as records"
+        # ...and a real store still reads, so the guard is not a blanket "no"
+        Path(path).write_text(json.dumps(
+            [{"profile": "/p", "pid": 5, "port": 6}]), encoding="utf-8")
+        assert list(store.records()) == ["/p"], store.records()
 
 
 def t_a_crafted_cookie_store_is_capped_not_fatal() -> None:
@@ -8467,6 +9446,83 @@ def t_a_plugin_baseexception_cannot_choose_the_exit() -> None:
                 os.environ[plugin_env] = keep
 
 
+def t_a_plugin_cannot_print_ahead_of_the_reply() -> None:
+    """A plugin's `print` cannot put a second line on the reply's stream.
+
+    stdout IS the reply, so a plugin that prints — a stray debug line, or a
+    library it imports that prints — used to answer `list` with TWO lines, the
+    first not JSON, at exit 0: a successful invocation that broke every JSON
+    consumer, with no refusal to branch on (a review measured it). Plugin code
+    now runs with stdout diverted, at BOTH boundaries: the import (where the
+    loader records a typed error naming the plugin, and still loads it — the
+    loader is fail-open) and the handler (where the reply carries a warning).
+
+    What this pins is the CONTRACT, not the mechanism: one JSON object on
+    stdout, exactly one line, whatever the plugin printed. A raw
+    `os.write(1, …)` or an `os._exit` is out of reach by construction, and the
+    loader's docstring says so instead of implying the boundary is airtight.
+    """
+    plugin_env = "BROWSER_CONTROL_PLUGIN_PATH"
+    keep = os.environ.get(plugin_env)
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "chatty.py").write_text(
+            "PLUGIN = {'api': 1, 'name': 'chatty', 'description': 'prints',\n"
+            "          'actions': {'chatty': {'run':\n"
+            "              lambda rest, browser: {'ok': True},\n"
+            "                               'classes': ('read',),\n"
+            "                               'usage': 'chatty'}}}\n"
+            "print('IM-A-STRAY-PRINT')\n", encoding="utf-8")
+        os.environ[plugin_env] = tmp
+        try:
+            rc, out, err = run_cli(["list"])
+            assert rc == 0, (rc, err)
+            # the whole assertion: ONE line, and it parses
+            assert out.strip().count("\n") == 0, \
+                f"a plugin's print reached stdout: {out!r}"
+            json.loads(out)
+            assert "IM-A-STRAY-PRINT" not in out, out
+            # ...and the plugin is still loaded (fail-open), with the habit
+            # REPORTED where a caller looks for it
+            rc, out, err = run_cli(["selftest"])
+            assert rc == 0, (rc, err)
+            data = json.loads(out)
+            errors = "\n".join(data["plugin_errors"])
+            assert "chatty.py" in errors and "stdout" in errors, errors
+            assert [p["name"] for p in data["plugins"]] == ["chatty"], \
+                data["plugins"]
+        finally:
+            if keep is None:
+                os.environ.pop(plugin_env, None)
+            else:
+                os.environ[plugin_env] = keep
+    # the HANDLER boundary: a plugin that prints while it runs
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "loud.py").write_text(
+            "def run(rest, browser):\n"
+            "    print('IM-LOUD')\n"
+            "    return {'ok': True, 'ran': True}\n"
+            "PLUGIN = {'api': 1, 'name': 'loud', 'description': 'prints',\n"
+            "          'actions': {'loud': {'run': run,\n"
+            "                               'classes': ('read',),\n"
+            "                               'usage': 'loud'}}}\n",
+            encoding="utf-8")
+        os.environ[plugin_env] = tmp
+        try:
+            rc, out, err = run_cli(["loud"])
+            assert rc == 0, (rc, err)
+            assert out.strip().count("\n") == 0, \
+                f"a plugin's print reached stdout: {out!r}"
+            reply = json.loads(out)
+            assert reply["ok"] is True and reply["ran"] is True, reply
+            assert "IM-LOUD" not in out, out
+            assert "stdout" in reply.get("warning", ""), reply
+        finally:
+            if keep is None:
+                os.environ.pop(plugin_env, None)
+            else:
+                os.environ[plugin_env] = keep
+
+
 def t_a_relative_plugin_path_imports_nothing() -> None:
     """A RELATIVE plugin entry is refused, so the CWD is never imported.
 
@@ -8509,6 +9565,91 @@ def t_a_relative_plugin_path_imports_nothing() -> None:
             assert rc == 2 and "ERR[unknown-command]" in err, (rc, err)
         finally:
             os.chdir(cwd)
+            if keep is None:
+                os.environ.pop(plugin_env, None)
+            else:
+                os.environ[plugin_env] = keep
+
+
+def t_an_empty_plugin_path_searches_nothing() -> None:
+    """`BROWSER_CONTROL_PLUGIN_PATH=""` means NO plugins, not the default set.
+
+    UNSET and EMPTY are different answers, and only one of them is a
+    deployment's way of switching plugins off. `os.environ.get(PLUGIN_ENV, "")`
+    read the empty value as unset, so a host that locked plugins out got the
+    user's own `~/.local/share/browser-control/plugins` imported instead — the
+    exact opposite of the request, and the asymmetry this tree refuses
+    everywhere else (a blank `--allow`/`BROWSER_CONTROL_ALLOW` is a refusal
+    precisely because a blank value once read as "no policy"). A stray `:`
+    separator is REPORTED rather than skipped in silence, like every other
+    entry that is not searched.
+    """
+    plugin_env = "BROWSER_CONTROL_PLUGIN_PATH"
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    real_plugins = os.path.join(repo, "plugins")
+    keep = os.environ.get(plugin_env)
+    try:
+        # UNSET: the default directory, exactly as before
+        os.environ.pop(plugin_env, None)
+        assert discovery_lib.dirs() == [
+            discovery_lib.expand(discovery_lib.DEFAULT_PLUGIN_DIR)]
+        # EMPTY, with a real plugin directory standing in as the default: it
+        # must NOT be searched, and `selftest` must say the entry was refused
+        with tempfile.TemporaryDirectory() as empty_default:
+            real_expand = discovery_lib.expand
+            discovery_lib.expand = (lambda path: empty_default      # type: ignore[assignment]
+                                    if "browser-control" in str(path)
+                                    else real_expand(path))
+            try:
+                os.environ[plugin_env] = ""
+                assert discovery_lib.dirs() == [], discovery_lib.dirs()
+                refused = discovery_lib.refused()
+                assert len(refused) == 1 and "names no directory" in refused[0][1], \
+                    refused
+            finally:
+                discovery_lib.expand = real_expand      # type: ignore[assignment]
+        # a bare separator is the same answer, reported the same way
+        os.environ[plugin_env] = real_plugins + os.pathsep
+        assert discovery_lib.dirs() == [real_plugins], discovery_lib.dirs()
+        assert [why for _e, why in discovery_lib.refused()] and \
+            "names no directory" in discovery_lib.refused()[0][1], \
+            discovery_lib.refused()
+    finally:
+        if keep is None:
+            os.environ.pop(plugin_env, None)
+        else:
+            os.environ[plugin_env] = keep
+
+
+def t_a_plugin_error_carries_its_kind() -> None:
+    """A refused plugin's KIND is in the string `selftest` reports.
+
+    `PluginError.kind` exists so a consumer can tell a bad API version from a
+    verb collision "without parsing prose" — and it was set at eight sites and
+    read at NONE, while `PluginSet.report` shipped `str(error)`, which was
+    `path: message`. The field has to reach the reader, so the kind leads the
+    line; `plugins/__init__.py`'s docstring promises exactly that.
+    """
+    api = spec_lib.PluginError("/p/a.py", "PLUGIN api 9 != 1", "api")
+    collided = spec_lib.PluginError("/p/b.py", "'tab' is already taken",
+                                    "collision")
+    assert str(api) == "[api] /p/a.py: PLUGIN api 9 != 1", str(api)
+    assert str(collided).startswith("[collision] "), str(collided)
+    assert spec_lib.PluginError("/p/c.py", "no actions").kind == "schema"
+    # ...and one really reaches a caller through the loader's report
+    plugin_env = "BROWSER_CONTROL_PLUGIN_PATH"
+    keep = os.environ.get(plugin_env)
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "wrongapi.py").write_text(
+            "PLUGIN = {'api': 99, 'name': 'wrong', 'actions': {}}\n",
+            encoding="utf-8")
+        os.environ[plugin_env] = tmp
+        try:
+            rc, out, err = run_cli(["selftest"])
+            assert rc == 0, (rc, err)
+            errors = json.loads(out)["plugin_errors"]
+            assert errors and errors[0].startswith("[api] "), errors
+        finally:
             if keep is None:
                 os.environ.pop(plugin_env, None)
             else:
@@ -8828,8 +9969,32 @@ def t_wait_rejects_a_negative_idle_window_and_measures_monotonically() -> None:
     """
     rc, _out, err = run_cli(["tab", "wait", "--for", "idle", "--idle-ms", "-5"])
     assert rc == 2 and "ERR[bad-args]" in err, (rc, err)
-    assert "0 or more" in err, err
+    assert "0 to" in err, err
     refusal(lambda: dom.wait("idle", idle_ms=-5), "bad-args")
+    # ...and the window is bounded ABOVE too, which it was not: `1e300` is
+    # finite and non-negative, so it was accepted, `now - responseEnd < 1e300`
+    # was true for every resource for ever, `!some(...)` was false on every
+    # sample, and `--for idle` could only ever end in `wait-timeout` — a wait
+    # that cannot succeed, refused by name instead (a review found it). The
+    # validator is pure, so both ends are checked without a browser.
+    queries = import_module("browser_control.lib.dom.queries")
+    assert queries._idle_window(dom.IDLE_MAX_MS) == dom.IDLE_MAX_MS
+    assert queries._idle_window(0) == 0            # "no quiet period at all"
+    assert queries._idle_window("250") == 250
+    # the LIBRARY path is where a float reaches the validator (`--idle-ms` is an
+    # integer spelling by the time the CLI hands it over, so `1e300` is refused
+    # a layer earlier as "needs a number"), and a huge INTEGER is spelled
+    # identically on both paths
+    for too_long in ("1e300", "inf", float("inf"), dom.IDLE_MAX_MS + 1):
+        # `Any`: the values are deliberately NOT the declared `int` — the
+        # runtime validator is what is under test here
+        bad_idle: Any = too_long
+        refusal(lambda v=bad_idle: dom.wait("idle", idle_ms=v), "bad-args")
+    for too_long in (str(dom.IDLE_MAX_MS + 1), "9" * 40):
+        rc, _out, err = run_cli(["tab", "wait", "--for", "idle",
+                                 "--idle-ms", too_long])
+        assert rc == 2 and "ERR[bad-args]" in err, (too_long, rc, err)
+        assert str(dom.IDLE_MAX_MS) in err, (too_long, err)
 
     class _Clock:
         """`time`, with `monotonic` answering a scripted sequence."""
@@ -8964,6 +10129,74 @@ def t_help_is_audited_and_never_gated() -> None:
         rc, out, _err = run_cli(argv)
         assert rc == 0, (argv, rc)
         assert "browser-control-cli" in out, (argv, out[:80])
+    # `help` is the ONE documented exception to "one JSON object on stdout",
+    # and the exception has to be VISIBLE from both sides: prose on stdout at
+    # exit 0 for the three spellings, and the no-verb path still on stderr at
+    # exit 2 — a caller branching on "stdout parses as JSON" can only
+    # special-case what the contract names.
+    for argv in (["help"], ["-h"], ["--help"], ["--browser", "chrome", "--help"]):
+        rc, out, err = run_cli(argv)
+        assert rc == 0, (argv, rc, err)
+        assert out.strip().startswith("usage: browser-control-cli"), (argv, out[:60])
+        with_exc = None
+        try:
+            json.loads(out)
+        except ValueError as e:
+            with_exc = e
+        assert with_exc is not None, ("help answered JSON?", argv)
+    rc, out, err = run_cli([])
+    assert rc == 2 and out == "" and err.strip(), (rc, out, err)
+    # ...and the help text SAYS so, beside the contract it excepts
+    assert "`help` (and `-h`/`--help`) is the ONE exception" in cli_main.USAGE, \
+        "the `out:` line no longer names its own exception"
+
+
+def t_every_package_and_entry_point_is_declared() -> None:
+    """pyproject declares every package that holds code, and a real entry point.
+
+    `[tool.setuptools] packages` is a HAND-KEPT list, and nothing checked it:
+    the suite imports `browser_control` from the CHECKOUT (`sys.path.insert`,
+    above), so a subpackage missing from that list would be absent from an
+    installed wheel while CI stayed green — `pip install .` then
+    `import browser_control.lib.dom` is exactly what a user does and exactly
+    what nothing here did (a review reasoned it out but could not build it).
+    This is the check that costs nothing: walk the package tree, and read the
+    console script's target.
+
+    `plugins/` is deliberately NOT a package (the shipped plugins are examples
+    a user installs into their own directory), so the walk is rooted at
+    `browser_control/`.
+    """
+    import tomllib                                           # noqa: PLC0415
+
+    repo = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    config = tomllib.loads(
+        (repo / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = set(config["tool"]["setuptools"]["packages"])
+    root = repo / "browser_control"
+    found = set()
+    for path in root.rglob("*.py"):
+        directory = path.parent
+        if directory == root:
+            found.add("browser_control")
+            continue
+        found.add(".".join(directory.relative_to(repo).parts))
+    missing = sorted(found - declared)
+    assert not missing, (
+        f"these packages hold code but are not declared in pyproject: {missing}")
+    # the other direction: a declared name that is not a directory would make
+    # the build fail, which is worth catching here rather than in a release
+    ghosts = sorted(name for name in declared
+                    if not (repo / name.replace(".", "/")).is_dir())
+    assert not ghosts, ghosts
+    # ...and the console script really points at something callable. Checked
+    # WITHOUT calling it: running the CLI from inside a check would print to
+    # stdout and write an audit line, which is the check's own side effect.
+    target = config["project"]["scripts"]["browser-control-cli"]
+    module_name, _, attribute = target.partition(":")
+    assert module_name and attribute, target
+    module = import_module(module_name)
+    assert callable(getattr(module, attribute, None)), target
 
 
 def t_end_of_flags_reaches_the_verb() -> None:
@@ -9063,6 +10296,10 @@ def main() -> int:
          t_expressions_and_shot_rules),
         ("page expressions compile as JavaScript",
          t_page_expressions_compile),
+        ("reported page url/title are clipped in the page",
+         t_reported_page_fields_are_clipped_in_the_page),
+        ("find rows bound the page's own attributes",
+         t_find_rows_bound_the_pages_own_attributes),
         ("keys, verdicts and secrets", t_keys_and_verdicts),
         ("the log redacts and never fails a verb", t_audit_redaction),
         ("the action log lands on disk", t_action_log_lands_on_disk),
@@ -9102,6 +10339,8 @@ def main() -> int:
         ("a fractional page number is a number",
          t_a_fractional_page_number_is_a_number),
         ("extract schema and records", t_extract_schema_and_records),
+        ("extract never answers an empty list for a page with rows",
+         t_extract_never_answers_an_empty_list_for_a_page_with_rows),
         ("tab extract grammar", t_cli_extract_grammar),
         ("plugins load, dispatch and gate", t_plugin_system),
         ("x plugin maps records offline", t_x_plugin_offline),
@@ -9151,6 +10390,9 @@ def main() -> int:
          t_mutation_readbacks_refuse_when_the_page_says_no),
         ("a refused screenshot writes nothing",
          t_screenshot_refusals_write_nothing),
+        ("clip syntax decides without a browser", t_clip_rect_syntax),
+        ("element and region captures, and their refusals",
+         t_screenshot_capture_modes_refuse_before_writing),
         ("a partial seed never reports verified",
          t_seed_refuses_a_partial_copy),
         ("nav/reload/activate refuse on a failed read-back",
@@ -9223,6 +10465,8 @@ def main() -> int:
          t_launch_resolves_the_mode),
         ("select and focus share the focus path",
          t_focus_nodes_go_through_one_helper),
+        ("the node lookup does not drag the subtree",
+         t_the_node_lookup_does_not_drag_the_subtree),
         ("a handler's reply is one JSON object",
          t_handler_reply_must_be_a_json_object),
         ("the plugin package has no dead shims",
@@ -9263,12 +10507,16 @@ def main() -> int:
          t_seed_destination_parent_is_0700),
         ("a click's `changed` compares the page state",
          t_click_changed_compares_the_page_state),
+        ("the endpoint is resolved the census way",
+         t_the_endpoint_is_resolved_the_census_way),
         ("stop refuses on a known tab count, --force goes through",
          t_stop_refuses_a_known_tab_count),
         ("tab wait names its predicate, deadline and samples",
          t_wait_names_its_predicate_and_reports_its_samples),
         ("tab check in the wanted state sends no click",
          t_check_already_in_the_wanted_state_sends_no_click),
+        ("tab select bounds the arrow key walk",
+         t_select_bounds_the_arrow_key_walk),
         ("tab select refuses a control that did not move",
          t_select_refuses_a_control_that_does_not_move),
         ("tab type sends three key events per character",
@@ -9281,16 +10529,28 @@ def main() -> int:
          t_cli_profile_grammar),
         ("the last unproduced refusal codes are produced",
          t_the_last_unproduced_refusal_codes),
+        ("a history list of non-entries refuses cleanly",
+         t_a_history_list_of_non_entries_refuses_cleanly),
+        ("the cdp reply is demuxed and the send is bounded",
+         t_the_cdp_reply_is_demuxed_and_the_send_is_bounded),
         ("the HTTP read deadline holds against a dribbling peer",
          t_http_read_deadline_holds_against_a_dribbling_peer),
-        ("a hostile port or pid file is no answer",
-         t_a_hostile_port_or_pid_file_is_no_answer),
+        ("a recycled pid is never taken for the browser's",
+         t_a_recycled_pid_is_never_taken_for_the_browsers),
+        ("a hostile port, pid or attach file is no answer",
+         t_a_hostile_port_pid_or_attach_file_is_no_answer),
         ("a crafted cookie store is capped, not fatal",
          t_a_crafted_cookie_store_is_capped_not_fatal),
         ("a directory at the lock path refuses seed and reset",
          t_a_directory_at_the_lock_path_refuses_seed_and_reset),
+        ("a plugin cannot print ahead of the reply",
+         t_a_plugin_cannot_print_ahead_of_the_reply),
         ("a plugin's BaseException cannot choose the exit",
          t_a_plugin_baseexception_cannot_choose_the_exit),
+        ("an empty plugin path searches nothing",
+         t_an_empty_plugin_path_searches_nothing),
+        ("a plugin error carries its kind",
+         t_a_plugin_error_carries_its_kind),
         ("a relative plugin entry imports nothing from the CWD",
          t_a_relative_plugin_path_imports_nothing),
         ("egress is a class the gate enforces",
@@ -9310,6 +10570,8 @@ def main() -> int:
          t_png_size_needs_the_whole_file),
         ("the x plugin validates before it navigates",
          t_x_reader_validates_its_numbers_before_it_navigates),
+        ("every package and entry point is declared",
+         t_every_package_and_entry_point_is_declared),
         ("help is audited and never gated",
          t_help_is_audited_and_never_gated),
         ("-- reaches the verb with the literal value",

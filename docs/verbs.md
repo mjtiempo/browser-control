@@ -20,7 +20,7 @@ on the command line.
 | `profile seed` | copy a source profile's logins into a managed one |
 | `profile reset` | wipe a managed profile, logins included |
 | `selftest` | prove the install, and report the policy in force; one of the TWO verbs the gate never consults |
-| `help` (`-h` / `--help`) | this text plus the plugin usage lines; never gated like `selftest`, and still audited |
+| `help` (`-h` / `--help`) | this text plus the plugin usage lines, printed to **stdout** at exit 0 — the ONE verb whose answer is not JSON; never gated like `selftest`, and still audited |
 
 ## Page level — `tab`
 
@@ -44,7 +44,7 @@ on the command line.
 | `tab scroll` | a wheel event, a wheel to the edge, or reveal one element |
 | `tab focus` / `press` / `insert` / `type` | put the caret, send keys, write text |
 | `tab upload FILE` | attach a file to an `<input type=file>` |
-| `tab screenshot PATH` | write a PNG vouched by its own header |
+| `tab screenshot PATH [--full \| --selector CSS [--index N] \| --clip X,Y,W,H]` | write a PNG vouched by its own header |
 | `tab dialog state\|accept\|dismiss` | read or answer a JavaScript dialog |
 | `tab media state\|play\|pause` | read or drive the page's video/audio |
 

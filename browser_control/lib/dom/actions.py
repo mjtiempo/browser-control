@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
 
 from browser_control.lib import (
     browser as browser_lib,
@@ -64,6 +65,7 @@ from browser_control.lib.errors import (
 )
 from browser_control.lib.poll import (
     POLL_FAST,
+    deadline,
     poll,
 )
 from browser_control.lib.text import (
@@ -71,6 +73,15 @@ from browser_control.lib.text import (
 )
 
 CHECK_TIMEOUT_S = 2.0       # how long a click is given to flip `checked`
+#: How long `tab select` may spend WALKING to the wanted option. A `<select>`
+#: moves one option per arrow PAIR and no CDP method opens the popup or jumps to
+#: an index, so the walk is as long as the page's own option list: a
+#: 3 000-option control measured 24 s and a 16 000-option one had not returned
+#: after 380 s (both measured by a review, the second killed). Ten seconds
+#: clears any list a person would build by hand (~1 200 options) with room to
+#: spare, and a longer walk REFUSES by name rather than running for as long as
+#: the page's list happens to be — a caller cannot bound that from argv.
+SELECT_KEY_BUDGET_S = 10.0
 
 
 @contextlib.contextmanager
@@ -525,12 +536,14 @@ def _focus_node(session: cdp.Session, needle: str, css: str, index: int | None,
     failure: the protocol says WHY (a disabled control, an element that
     cannot be focused).
     """
-    node_id = _pkg._node_of(session,
-                            _pkg._match_args(ELEMENT_EXPR, needle, css, index))
-    if not node_id:
+    handle = _pkg._node_of(session,
+                           _pkg._match_args(ELEMENT_EXPR, needle, css, index))
+    if not handle:
         fail(ERR_NO_MATCH, f"{_pkg._describe(element)} {gone}")
     try:
-        session.call("DOM.focus", {"nodeId": node_id})
+        # the remote object DIRECTLY: no `nodeId` escalation, which would make
+        # the browser push the node's children (`queries._node_of`)
+        session.call("DOM.focus", {"objectId": handle})
     except ControlError as e:
         why = f", {what}" if what else ""
         fail(code, f"{_pkg._describe(element)} cannot take the DOM focus"
@@ -620,7 +633,23 @@ def select(text: str | None = None, selector: str | None = None,
                     gone="left the document before the choice could be made",
                     what="so the arrow keys would go elsewhere")
         key_name = "arrowdown" if delta > 0 else "arrowup"
-        for _step in range(abs(delta)):
+        steps = abs(delta)
+        # BOUNDED, because the walk is as long as the page's option list: the
+        # deadline is checked BEFORE each pair (so a walk of any length still
+        # sends its first key, like every other budgeted loop here), and a walk
+        # that runs out refuses with how far it got and what to do instead —
+        # never a verb that hangs for as long as the page's list is long
+        end = deadline(SELECT_KEY_BUDGET_S)
+        for _step in range(steps):
+            if time.monotonic() >= end:
+                fail(ERR_SELECT_NOT_VERIFIED,
+                     f"{_pkg._describe(element)} needs {steps} arrow key(s) to "
+                     f"reach option {target} from {selected}, and only {_step} "
+                     f"fit in {SELECT_KEY_BUDGET_S:g}s — the option list is too "
+                     "long to walk with real key events; pick a nearer option, "
+                     "or set the value directly with `tab js` (real keys are "
+                     "what this verb exists for, and a page's `change` handler "
+                     "sees them as trusted)")
             session.call("Input.dispatchKeyEvent",
                          key_event(key_name, "rawKeyDown", with_text=False))
             session.call("Input.dispatchKeyEvent",

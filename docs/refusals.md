@@ -80,7 +80,7 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 | `type-not-verified` | the field did not grow after per-character typing |
 | `select-not-verified` | the control's value/index did not reach the wanted option |
 | `scroll-not-verified` | nothing moved, the edge was not reached, or the element did not become visible |
-| `screenshot-not-verified` | the PNG bytes did not match the page's geometry, or the file could not be read back |
+| `screenshot-not-verified` | the PNG bytes did not match the region the mode measured — the page geometry (viewport/`--full`), the picked element's border box (`--selector`) or the caller's `--clip` rectangle (region) — or an element box reported no border box / no area; or the file could not be read back |
 | `upload-not-verified` | `input.files` did not take the file |
 | `media-not-verified` | `play` did not advance the clock / `pause` left it playing |
 | `media-blocked` | `play()` was rejected or blocked (autoplay policy, no supported source) |
