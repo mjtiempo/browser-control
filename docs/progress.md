@@ -1,7 +1,7 @@
 # browser-control — progress
 
 Status: **the CLI surface is delivered, packaged, and covered by a committed
-battery.** `python3 tests/test_unit.py` → 165 passed, 0 failed; the live battery
+battery.** `python3 tests/test_unit.py` → 195 passed, 0 failed; the live battery
 (`tests/live_test.py`) runs against a real browser — run it before a release,
 and remember skip ≠ pass.
 Plan: [`docs/plan.md`](plan.md). This file is the state of the work: what
@@ -75,6 +75,44 @@ re-opened is fixed too, and the round-2 findings are the ones worth naming:
   longer block a verb; `page read`'s frame scope, a bad `--cap` before any
   navigation, an audited `help`, and a value that is itself a flag
   (`--frame --deny=egress`) are all refused rather than silently dropped.
+
+## 0.1 Remote CDP over a tunnel (delivered)
+
+`browser-control-cli remote …` drives a browser behind a loopback tunnel (a
+Firecracker microVM's guest, an `ssh -L` port) without pretending the kernel
+can identify it. The full design is [plan-remote-cdp.md](plan-remote-cdp.md);
+what exists:
+
+- **The noun.** `remote attach --cdp-url URL`, `remote detach [--cdp-url|--all]`,
+  `remote list`, `remote info [--cdp-url]`, `remote close` (a declared refusal)
+  and `remote tab VERB … [--cdp-url]`. The flat verbs have no remote spelling:
+  no remote row joins the census, `--profile` never names one, and
+  `close --port N` cannot select one.
+- **The oracle.** `remote attach` validates a loopback `http://HOST:PORT`
+  (userinfo/path/query/`ws://`/non-loopback refuse `bad-args`) and records the
+  four `/json/version` fields the endpoint reports about itself. `EndpointGuard`
+  consults the record before `/proc`, so every call-time gate
+  (`verify_profile_endpoint`, `verify_ws_owner`, `verify_port_owner`) inherits
+  ONE rule, and the fingerprint is re-read immediately before each connection.
+  A change is `cdp-identity-changed` with nothing sent; a re-attach over a
+  changed record refuses the same way (same fingerprint is idempotent).
+- **The binding.** `remote tab` makes the chosen record the ONE remote row in
+  `browsers()` for the call (pid 0, `managed: false`, `headless: null`), so the
+  ordinary tab verbs, their read-backs and their capability classes run
+  unchanged. `headless` is now tri-state through `BrowserRow`.
+- **One store, two kinds.** `attached.json` records carry a `kind`; local
+  `attach`/`detach`/`attach --list` and the `remote` noun each own theirs.
+  `remote list` reports `reachable`/`verified`/`running` per record.
+- **The refusals.** `cdp-identity-changed`, `remote-not-closable`,
+  `remote-path`, with `ambiguous-browser`/`not-attached`/`cdp-unreachable`
+  reused. The internal key (`<root>/.remote/<host>-<port>`) is never a
+  profile: `open --profile` and `Instance.resolve` refuse `not-managed`.
+- **Tests.** Nine hermetic checks: URL policy; records/list/info/detach;
+  identity + family + a dead endpoint; the gate seam (per-connection swap, no
+  page traffic after a refusal); flat-surface isolation; `remote tab` drives
+  including the port-only path (`tab frames`, `tab wait`); selection/detach;
+  the declared surface (delegated `remote tab X` → `tab X`, gate, `selftest`,
+  help) and argv.
 
 ## 1. What exists
 

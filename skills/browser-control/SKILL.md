@@ -102,11 +102,47 @@ Rules that save a round trip:
 - Tab-level verbs (`nav`, `back`, `forward`, `reload`, `activate`, `list`,
   `frames`, `info`, `close`) act on the tab; every content verb acts inside
   `--frame` when given.
+- A REMOTE browser (behind a loopback tunnel) is addressed with `--cdp-url`
+  and only through the `remote` noun; the flat verbs never reach it. See
+  "Remote browsers" below.
+
+## Remote browsers (a loopback tunnel)
+
+When the browser runs where this CLI cannot see it (a microVM's guest, an
+`ssh -L` port), drive it through `remote …` — never through the flat verbs;
+no remote row joins the census, so an unqualified `tab text` can never land in
+the tunnelled browser by accident.
+
+```bash
+# on this machine (the guest runs Chromium with --remote-debugging-port=9222)
+ssh -N -L 9222:127.0.0.1:9222 root@<vm-ip> &
+browser-control-cli remote attach --cdp-url http://127.0.0.1:9222
+browser-control-cli remote list                       # running/verified per record
+browser-control-cli remote tab text --tab active
+browser-control-cli remote tab click "Sign in"
+browser-control-cli remote detach --cdp-url http://127.0.0.1:9222
+```
+
+- `remote attach` records the endpoint and the fingerprint the browser reports
+  about itself (`/json/version`); every connection re-reads it and refuses
+  `cdp-identity-changed` when it changed. That is trust-on-first-use, not a
+  kernel fact — see the trust docs.
+- `--cdp-url` names one record; without it the SOLE attachment is the target
+  (several → `ambiguous-browser`, none → `cdp-unreachable`).
+- Files land HERE (`remote tab screenshot`, `remote tab js --out`);
+  `remote tab upload` refuses `remote-path` (the path is the BROWSER's
+  filesystem). `remote close` always refuses `remote-not-closable` — stop the
+  browser where it runs.
+- The remote verb's action (and capability classes) is the local tab verb's:
+  `--deny code remote tab js` refuses exactly like `--deny code tab js`.
 
 ## Command map
 
 **Browser:** `open`, `close`, `list`, `info`, `attach`, `detach`, `profile …`,
 `selftest`.
+
+**Remote:** `remote attach|detach|list|info|close`, `remote tab VERB …`
+(`--cdp-url` names the endpoint). See "Remote browsers" above.
 
 **Reads (safe):** `tab list`, `tab info SPEC`, `tab text`, `tab find`,
 `tab extract`, `tab frames`, `tab dialog state`, `tab media state`, `tab wait`,

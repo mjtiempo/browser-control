@@ -119,6 +119,26 @@ Rules:
 - `close --pid N` / `--port N` can stop a browser the CLI did not start, but
   that is a named, deliberate act — only do it when the user asked.
 
+## A browser behind a tunnel (`remote`)
+
+When the browser runs where this CLI cannot see it — a microVM's guest, a
+machine reached by `ssh -L` — the session is reached through the `remote`
+noun, and the flat verbs never see it.
+
+```bash
+# on this machine (the guest runs Chromium with --remote-debugging-port=9222)
+ssh -N -L 9222:127.0.0.1:9222 root@<vm-ip> &
+browser-control-cli remote attach --cdp-url http://127.0.0.1:9222
+browser-control-cli remote tab text --tab active   # a normal tab verb, remote
+browser-control-cli remote detach --cdp-url http://127.0.0.1:9222
+```
+
+`remote attach` records the fingerprint the endpoint reports about itself and
+re-reads it per connection (`cdp-identity-changed` on a difference); that is
+trust-on-first-use, not the kernel check a local attach gets. `remote close`
+refuses (stop the browser where it runs), and `remote tab upload` refuses
+because the path names the BROWSER's filesystem, not this machine's.
+
 ## Safety rules
 
 - Never run `profile seed`, `profile reset`, or `attach` unless the user asked

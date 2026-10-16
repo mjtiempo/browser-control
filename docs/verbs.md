@@ -22,6 +22,34 @@ on the command line.
 | `selftest` | prove the install, and report the policy in force; one of the TWO verbs the gate never consults |
 | `help` (`-h` / `--help`) | this text plus the plugin usage lines, printed to **stdout** at exit 0 — the ONE verb whose answer is not JSON; never gated like `selftest`, and still audited |
 
+## Remote level — `remote`
+
+A browser behind a loopback tunnel (a Firecracker microVM's guest, an
+`ssh -L` port) is driven through this noun and nothing else. The FLAT verbs
+never address a remote endpoint: no remote row joins the process census,
+`--profile` never names one, and `close --port N` cannot select one.
+`remote attach` is the consent step, and every connection re-reads the
+fingerprint the endpoint reports about itself before it goes out.
+
+| verb | what it does |
+| --- | --- |
+| `remote attach --cdp-url URL` | attach one loopback endpoint (`http://127.0.0.1:9222`, the tunnel's local end): validate the URL, record the `/json/version` fingerprint, allow remote tab writes |
+| `remote detach [--cdp-url URL \| --all]` | revoke that authorization |
+| `remote list` | every remote attachment, and whether it answers and still matches its fingerprint |
+| `remote info [--cdp-url URL]` | one endpoint's record, fingerprint and live verdict |
+| `remote close [--cdp-url URL]` | always refuses `remote-not-closable` — a remote browser is stopped where it RUNS |
+| `remote tab VERB [ARGS…] [--cdp-url URL]` | any `tab` verb over the tunnel (the same action, mode and capability classes as the local verb) |
+
+`--cdp-url` names one record; without it the SOLE remote attachment is the
+target (several refuse `ambiguous-browser`, none `cdp-unreachable`). Files
+are written HERE (`remote tab screenshot`, `remote tab js --out`);
+`remote tab upload` refuses `remote-path`, because a file path names the
+OTHER side's filesystem. Closing the remote browser's LAST tab still exits it
+(Chromium exits with its last window) — `remote close` will not signal it,
+but `remote tab close` is a tab write. See [Sessions](sessions.md) for the
+tunnel recipe, and [Trust](trust.md) for what the fingerprint proves and
+does not.
+
 ## Page level — `tab`
 
 | verb | what it does |
@@ -58,6 +86,9 @@ on the command line.
   CLI drives. Several tabs refuse `tab-ambiguous`.
 - `--browser NAME` picks the browser (its executable, or the profile's name).
   With no flag, a live managed browser is used.
+- `--cdp-url URL` names a REMOTE endpoint, and is accepted by `remote …`
+  calls only: the flat verbs have no remote spelling, so `attach --cdp-url`
+  and `close --cdp-url` are `bad-args`.
 - `--profile DIR` picks the **instance**: a profile directory under the root,
   which is how two instances of one browser — two logins, two sessions — are
   addressed, on every verb.

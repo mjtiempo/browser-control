@@ -124,6 +124,26 @@ capability classes (`capabilities.by_class`, `capabilities.unclassified`),
 policy in force (`policy`), browsers found, loaded `plugins` and
 `plugin_errors`. Never gated.
 
+## Remote level — `remote`
+
+A browser behind a loopback tunnel, driven through this noun and nothing else
+(the flat verbs have no remote spelling):
+
+| verb | what it does |
+| --- | --- |
+| `remote attach --cdp-url URL` | attach a loopback endpoint (`http://127.0.0.1:9222`): record the `/json/version` fingerprint, allow remote tab writes |
+| `remote detach [--cdp-url URL \| --all]` | revoke that authorization |
+| `remote list` | every remote attachment, and whether it answers + still matches its fingerprint |
+| `remote info [--cdp-url URL]` | one endpoint's record, fingerprint and live verdict |
+| `remote close [--cdp-url URL]` | always refuses `remote-not-closable` |
+| `remote tab VERB [ARGS…] [--cdp-url URL]` | any `tab` verb over the tunnel; the same action/classes as the local verb |
+
+Without `--cdp-url`, the sole attachment is the target (several →
+`ambiguous-browser`, none → `cdp-unreachable` naming `remote attach`). A
+changed fingerprint refuses `cdp-identity-changed` before anything is sent;
+`remote tab upload` refuses `remote-path`; files land HERE for
+`screenshot`/`js --out`.
+
 ## Tab level
 
 ### `tab [URL...]`

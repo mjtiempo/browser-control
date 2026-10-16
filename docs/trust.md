@@ -65,7 +65,15 @@ is in [Refusal codes](refusals.md).
   which is how another tool's browser goes.
 - **Every drive is checked against the kernel.** The port comes from a file;
   the process holding the listening socket is verified first, and anything
-  else refuses `cdp-not-local` with nothing sent to it.
+  else refuses `cdp-not-local` with nothing sent to it. A `remote attach`ed
+  endpoint is the ONE exception, and it is explicit: the listener there is the
+  tunnel, so the oracle is the fingerprint the endpoint reports about itself
+  (`/json/version`), recorded at attach and re-read before every connection —
+  a difference refuses `cdp-identity-changed` before anything is sent. That is
+  a SELF-REPORT, not a kernel fact: a hostile local process holding the
+  tunnelled port can forge it. The attach record is this CLI's own
+  authorization ledger, not a security boundary — and the flat verbs never
+  reach a remote endpoint at all (`remote …` is the only spelling).
 - **Only this CLI's own root is touchable.** `BROWSER_CONTROL_ROOT` moves
   the managed root; `reset --force` and `seed --force` recursively delete
   under it, so a profile directory under a MOVED root is wiped only when this
@@ -95,7 +103,7 @@ check or a reviewer does not have to hardcode a verb list:
 
 | class | means |
 | --- | --- |
-| `read` | state and page CONTENT — `/proc`, loopback CDP, and the rendered page of every drivable browser |
+| `read` | state and page CONTENT — `/proc`, loopback CDP, and the rendered page of every drivable browser, including a remote endpoint driven through `remote` |
 | `write` | the page, the browser, or this CLI's authorization |
 | `code` | runs caller-supplied code: `tab js`, `tab wait --for js` |
 | `file` | a path the CALLER named: `screenshot`, `upload` |

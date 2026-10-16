@@ -26,7 +26,7 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 | `launch-failed` | the browser was started but never answered CDP; the failed start is stopped and named by pid |
 | `browser-not-stopped` | SIGTERM did not end the process; it is reported (by pid), never hunted |
 | `cdp-unreachable` | the endpoint did not answer — including a port that lost its holder between the check and the connection (a re-judged port nobody holds any more) |
-| `cdp-not-local` | the DevTools port is held by something that is not that profile's browser; `close --force` then `open` |
+| `cdp-not-local` | the DevTools port is held by something that is not that profile's browser (`close --force` then `open`), or a `--cdp-url` endpoint answers as a non-Chromium product |
 | `profile-busy` | another call holds the profile lock; wait for it and retry |
 | `profile-live` | a browser is running on the profile — close it first |
 | `profile-unusable` | the profile directory cannot be created/read (permissions), or its lock cannot be opened/taken at all |
@@ -107,6 +107,19 @@ capability gate in force, and [Trust](trust.md) explains the classes.
 | `blocked` | the tab is parked (a dialog, or a script that does not yield); enabling domains/reading blocks on it |
 | `js-error` | your `tab js`/`--expr` threw in the page |
 | `result-too-large` | your JavaScript value is too big for a reply — narrow it in the page |
+
+## Remote endpoints
+
+| code | meaning |
+| --- | --- |
+| `cdp-identity-changed` | the endpoint behind a `remote attach` answers, but its `/json/version` fingerprint differs from the stored one (an upgraded guest browser, or the port handed to something else). Nothing was sent: confirm the endpoint, then `remote detach` and `remote attach` it again |
+| `remote-not-closable` | `remote close` was called: a remote browser is stopped where it RUNS (`remote detach` only revokes this CLI's tab writes) |
+| `remote-path` | `remote tab upload` was called: a file path names THIS machine's filesystem, and the browser is on the other side of the tunnel |
+
+A remote target that is missing is `cdp-unreachable` (naming `remote attach`),
+several without `--cdp-url` are `ambiguous-browser`, and an unattached URL is
+`not-attached`. A `<root>/.remote/…` internal key given to `open --profile` or
+a profile verb refuses `not-managed` — it is never a profile.
 
 ## Policy
 

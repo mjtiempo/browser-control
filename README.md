@@ -38,7 +38,10 @@ $ browser-control-cli tab click "Learn more" && browser-control-cli close --forc
   the page so a huge document cannot flood the reply.
 - **Sessions when you need them.** Copy your logins into a managed profile,
   run two accounts side by side, or attach a browser you started yourself —
-  for tab writes only.
+  for tab writes only. A browser behind a loopback tunnel (a microVM's guest)
+  is driven through the `remote` noun: `remote attach --cdp-url
+  http://127.0.0.1:9222`, then `remote tab …`. The fingerprint the endpoint
+  reports about itself is recorded and re-read per connection.
 - **One site at a time.** Site plugins add what a page needs: search Google
   by typing at a human cadence, read X search results across its recycled
   timeline, or read a whole list of URLs in one call.

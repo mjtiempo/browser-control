@@ -95,3 +95,43 @@ Without a grant, a write at that browser refuses `not-managed`.
 
 Prefer a seeded managed profile over attaching the live browser: it cannot
 disturb what you are doing.
+
+## Remote endpoints — a browser behind a tunnel
+
+When the browser runs where this CLI cannot see it (a microVM's guest, another
+machine) and only a loopback tunnel reaches it, drive it with the `remote`
+noun. The flat verbs never address it: no remote row joins the census, so an
+unqualified `tab text` can never land in the tunnelled browser by accident.
+
+```bash
+# where the browser runs (the guest)
+chromium --headless --no-sandbox --remote-debugging-port=9222 about:blank &
+# on this machine
+ssh -N -L 9222:127.0.0.1:9222 root@<vm-ip> &
+
+browser-control-cli remote attach --cdp-url http://127.0.0.1:9222
+browser-control-cli remote list
+browser-control-cli remote tab text --tab active
+browser-control-cli remote tab click "Sign in"
+browser-control-cli remote detach --cdp-url http://127.0.0.1:9222
+```
+
+`remote attach` records the endpoint and the four `/json/version` fields the
+browser reports about itself (`Browser`, `Protocol-Version`, `User-Agent`,
+`V8-Version`). Every connection re-reads them and refuses
+`cdp-identity-changed` if any changed — a guest browser upgrade, or the port
+handed to something else — until you detach and attach again. The fingerprint
+is the endpoint's self-report, so this is trust-on-first-use: it proves "the
+same Chromium-family browser answered", not "the browser you meant". A
+re-attach with the SAME fingerprint is idempotent; with a different one it
+refuses, so one call never silently re-blesses a swapped endpoint.
+
+The rules: loopback `http://HOST:PORT` only (`127.0.0.1`, `localhost`, `::1`,
+with no userinfo/path/query); a dead tunnel is `cdp-unreachable`;
+`remote close` refuses `remote-not-closable` (stop the browser where it runs);
+`remote tab upload` refuses `remote-path` (the path is the browser's
+filesystem, not this machine's); `remote tab screenshot` and
+`remote tab js --out` write HERE, which is the useful direction; and the
+internal record key is never a profile (`open --profile` refuses
+`not-managed`). Several attachments with no `--cdp-url` refuse
+`ambiguous-browser`; none refuses `cdp-unreachable` naming `remote attach`.

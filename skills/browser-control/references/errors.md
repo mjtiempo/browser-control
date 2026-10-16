@@ -44,6 +44,19 @@ vocabulary; `selftest` shows the policy in force.
 | `frame-ambiguous` | `--frame` matched several frames — use an index or a fuller URL |
 | `frame-not-separate` | that frame shares the page's process; it is already part of the page, no `--frame` needed |
 | `frame-unattributable` | the frame cannot be attributed to a target — run `tab frames` and re-name it |
+
+## Remote endpoints
+
+| code | meaning |
+| --- | --- |
+| `cdp-identity-changed` | the `remote attach`ed endpoint answers but its `/json/version` fingerprint changed (an upgraded guest browser, or the port taken) — nothing was sent; `remote detach` then `remote attach` again |
+| `remote-not-closable` | `remote close`: stop the browser where it RUNS; `remote detach` only revokes this CLI's authorization |
+| `remote-path` | `remote tab upload`: a file path names THIS machine's filesystem, and the browser is behind the tunnel |
+
+A missing remote target is `cdp-unreachable` (naming `remote attach`),
+several without `--cdp-url` are `ambiguous-browser`, and an unattached URL is
+`not-attached`. A `.remote` internal key given to `open --profile` or a
+profile verb refuses `not-managed`.
 | `no-viewport` | the page reports a zero viewport (windowless/never shown); nothing can be measured |
 | `no-viewport-target` | no target in the browser has a viewport |
 

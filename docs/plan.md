@@ -395,13 +395,14 @@ unclear oracle into a claim of absence.**
 
 Desktop/compositor integration · window-scoped tabs · `--workspace`
 placement · screen coordinates/monitors/clicks · site adapters in core ·
-remote/forwarded CDP · writes to the user's profile · `file://`/`data:`/
-`chrome://` navigation · shelling out to a launcher.
+writes to the user's profile · `file://`/`data:`/`chrome://` navigation ·
+shelling out to a launcher.
 
-One exclusion has a use case with a draft behind it — remote CDP through a
-loopback tunnel (a Firecracker microVM's guest browser):
-[plan-remote-cdp.md](plan-remote-cdp.md). It is a DRAFT, not a decision, and
-this list stands until the draft reverses it.
+The one exclusion that was since DELIVERED: remote CDP through a loopback
+tunnel (a Firecracker microVM's guest browser), as the `remote` noun —
+[plan-remote-cdp.md](plan-remote-cdp.md). The flat verbs still have no remote
+spelling, so an unqualified `tab` call can never land in a tunnelled browser;
+the design, the fingerprint oracle and its trust delta live in that plan.
 
 ## 8. Build order
 
