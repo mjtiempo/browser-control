@@ -414,9 +414,15 @@ class BrowserRow:
         # opposite lie — so the null survives the conversion (the plan's row
         # shape depends on it).
         headless = row.get("headless")
+        profile = str(row.get("profile") or "")
+        if row.get("remote") and str(row.get("url") or ""):
+            # a remote row's name for a CALLER is its URL: the internal key is
+            # the verb machinery's identity, never a user-facing spelling, and
+            # every reply projection (`brief`, `as_row`) goes through here
+            profile = str(row["url"])
         return cls(pid=as_int(row.get("pid")), exe=str(row.get("exe") or ""),
                    path=str(row.get("path") or ""),
-                   profile=str(row.get("profile") or ""),
+                   profile=profile,
                    profile_from=str(row.get("profile_from") or ""),
                    managed=bool(row.get("managed")),
                    attached=bool(row.get("attached")),

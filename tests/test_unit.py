@@ -10709,6 +10709,9 @@ def t_remote_tab_drives_and_refusals() -> None:
             listed = json.loads(out)
             assert listed["count"] == 1, listed
             assert listed["browsers"][0]["tabs"][0]["id"] == "TAB", listed
+            # a reply names the remote row by its URL, never the internal key
+            assert listed["browsers"][0]["profile"] == fake.url, listed
+            assert ".remote" not in out, out
             rc, out, err = run_cli(["remote", "tab", "text"])
             assert rc == 0, (rc, err)
             reply = json.loads(out)
