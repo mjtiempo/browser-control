@@ -10726,9 +10726,15 @@ def t_remote_tab_drives_and_refusals() -> None:
                 (rc, err)
             # the PORT-ONLY path (`verify_port_owner`) is authorised by the
             # fingerprint verdict too: `tab frames` and `tab wait` do not
-            # carry a profile to the seam, they carry the port
+            # carry a profile to the seam, they carry the port. A FRESH CLI
+            # process has no port memo — this runner reuses one, which hid a
+            # real refusal until the memo was cleared here.
+            browser.GUARD._cache.clear()                              # noqa: SLF001
+            browser.GUARD._verified.clear()                           # noqa: SLF001
             rc, out, err = run_cli(["remote", "tab", "frames"])
             assert rc == 0, (rc, err)
+            browser.GUARD._cache.clear()                              # noqa: SLF001
+            browser.GUARD._verified.clear()                           # noqa: SLF001
             rc, out, err = run_cli(["remote", "tab", "wait", "--for", "load",
                                     "--timeout", "5"])
             assert rc == 0, (rc, err)

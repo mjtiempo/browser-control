@@ -285,15 +285,21 @@ def _remote_row(binding: dict) -> dict:
     """
     key = norm(str(binding.get("profile") or ""))
     port = as_int(binding.get("port"))
-    live = remote_lib.check(binding)
+    # THROUGH the guard, not `remote.check` directly: the guard remembers the
+    # profile a port last VERIFIED for, and the port-only callers (`tab wait`,
+    # `tab frames`) authorise on exactly that memo. A fresh CLI process has
+    # none, so a row that verified out-of-band left them refusing
+    # `cdp-not-local` — a real `remote tab wait` did, while the hermetic
+    # runner's long-lived guard hid it.
+    live = _pkg.GUARD.verdict(key, port)
     verified = bool(live["verified"])
-    endpoint: dict = {"port": port, "reachable": bool(live["reachable"]),
+    endpoint: dict = {"port": port, "reachable": bool(live.get("held")),
                       "verified": verified, "remote": True,
                       "url": str(binding.get("url") or ""),
                       "product": str(binding.get("product") or ""),
                       "port_from": "record",
-                      "reason": str(live["reason"] or ""),
-                      "code": str(live["code"] or "")}
+                      "reason": str(live.get("reason") or ""),
+                      "code": str(live.get("code") or "")}
     if verified:
         try:
             endpoint["tabs"] = len(cdp.page_rows_at(port))
