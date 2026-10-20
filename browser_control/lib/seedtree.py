@@ -348,6 +348,15 @@ def copy_verified(source: str, target: str, dry: bool, *,
                 # and rewriting it would hand Chrome files with modes it did
                 # not choose.
                 shutil.copy2(child.path, destination)
+            except FileNotFoundError:
+                # the source VANISHED between the walk and the copy: a running
+                # browser unlinks rollback journals and rotates leveldb logs,
+                # which is the documented main case, and `_source_size`
+                # already names the answer — `changed`, not a failed seed.
+                # `copy2` opens the source first, so nothing was written.
+                facts.sizes.pop(child.path, None)
+                facts.changed.append(child.path)
+                continue
             except OSError as e:
                 fail(ERR_SEED_FAILED, f"cannot copy {child.path}: {e}")
             # the source's size on BOTH sides of the copy: the one before it is

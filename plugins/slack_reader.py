@@ -60,10 +60,10 @@ from datetime import datetime, timezone
 from browser_control import plugin_api
 from browser_control.plugin_api import (
     ControlError,
+    bounded_int,
     errors,
     fail,
     float_arg,
-    int_arg,
     pop,
     switch,
     tab_arg,
@@ -159,6 +159,27 @@ _CLIENT_CHANNEL = re.compile(
 #: An address the TAB reported that is still Slack's own — the read-back half
 #: of the same rule, for where a Slack address took the tab.
 _LANDED = re.compile(rf"^https?://{_SLACK_HOST}(?=[/?#]|$)")
+
+
+#: The EXACT shape Slack mints ts values in (the same one `_CLIENT`
+#: matches). Values READ OUT OF THE PAGE become CSS selectors in `_parts`
+#: (`[data-ts="…"]`), so anything outside this shape is not a ts this
+#: plugin ever claimed to read.
+_TS_SHAPE = re.compile(r"^\d{1,12}\.\d{1,9}$")
+
+
+def _canonical_ts(value: object) -> str:
+    """A ts in Slack's own shape, or "" — the page's values are untrusted.
+
+    `_parts` splices each ts into a selector, and the values come from the
+    page: a hostile page could set `data-ts='x"] , [data-secret] ,
+    [data-ts="'` and change WHAT the extraction reads (no JavaScript
+    execution — the value crosses as JSON — but the read's scope was the
+    page's to choose; a review found it). Only the shape Slack itself mints
+    passes; everything else is a row this plugin never claimed to read.
+    """
+    text = str(value or "").strip()
+    return text if _TS_SHAPE.match(text) else ""
 
 
 def _ts(value: object) -> float:
@@ -343,7 +364,7 @@ def _sequence(tab: str, browser: str) -> list[dict]:
                               chars=64, tab=tab, browser=browser)
     rows: list[dict] = []
     for row in data.get("matches") or []:
-        ts = str((row or {}).get("ts") or "")
+        ts = _canonical_ts((row or {}).get("ts"))
         if ts:
             rows.append({"ts": ts, "sender": str(row.get("sender") or "")})
     rows.sort(key=lambda row: _ts(row["ts"]))
@@ -418,7 +439,13 @@ def _payload(target: dict, sequence: list[dict]
 
 def _parts(extra: list[str], tab: str, browser: str,
            chars: int) -> tuple[dict[str, str], bool]:
-    """The overflow messages' own text, in ONE extraction, keyed by ts."""
+    """The overflow messages' own text, in ONE extraction, keyed by ts.
+
+    Every ts is shape-checked first (`_canonical_ts`): the values are the
+    page's own, and one that is not Slack's shape could splice selector
+    syntax into the `each` below and change what the extraction reads.
+    """
+    extra = [ts for ts in extra if _canonical_ts(ts)]
     if not extra:
         return {}, False
     each = ", ".join(f'{MESSAGE}:has([data-ts="{ts}"])' for ts in extra)
@@ -585,26 +612,16 @@ def _channel(args: list[str], browser: str) -> dict:
     channel = _channel_ref(url)
     # every argument is validated BEFORE the first navigation: a typo must not
     # move the caller's tab and stall a client boot before refusing
-    cap = int_arg(cap_flag, "slack channel: --cap") \
-        if cap_flag is not None else DEFAULT_CAP
-    if cap < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"slack channel: --cap must be at least 1, got {cap}")
-    cap = min(cap, MAX_CAP)
-    chars = int_arg(chars_flag, "slack channel: --chars") \
-        if chars_flag is not None else DEFAULT_WINDOW_CHARS
-    if chars < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"slack channel: --chars must be at least 1, got {chars}")
-    chars = min(chars, MAX_WINDOW_CHARS)
-    max_scrolls = int_arg(scrolls_flag, "slack channel: --max-scrolls") \
-        if scrolls_flag is not None else DEFAULT_SCROLLS
-    if max_scrolls < 0:
-        # 0 is meaningful ("read the first window, wheel nothing")
-        fail(errors.ERR_BAD_ARGS,
-             "slack channel: --max-scrolls must be 0 or more, got "
-             f"{max_scrolls}")
-    max_scrolls = min(max_scrolls, MAX_SCROLLS)
+    cap = bounded_int(cap_flag, "slack channel: --cap",
+                      default=DEFAULT_CAP, low=1, high=MAX_CAP)
+    chars = bounded_int(chars_flag, "slack channel: --chars",
+                        default=DEFAULT_WINDOW_CHARS, low=1,
+                        high=MAX_WINDOW_CHARS)
+    # 0 is meaningful ("read the first window, wheel nothing")
+    max_scrolls = bounded_int(
+        scrolls_flag, "slack channel: --max-scrolls",
+        default=DEFAULT_SCROLLS, low=0, high=MAX_SCROLLS,
+        below="slack channel: --max-scrolls must be 0 or more")
     timeout = float_arg(timeout_flag, "slack channel: --timeout") \
         if timeout_flag is not None else DEFAULT_TIMEOUT_S
     if not 0 < timeout < 3600:
@@ -667,12 +684,8 @@ def _message(args: list[str], browser: str) -> dict:
     channel, ts = _permalink(url)
     # every argument is validated BEFORE the first navigation: a typo must not
     # move the caller's tab and stall a client boot before refusing
-    chars = int_arg(chars_flag, "slack message: --chars") \
-        if chars_flag is not None else DEFAULT_CHARS
-    if chars < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"slack message: --chars must be at least 1, got {chars}")
-    chars = min(chars, MAX_CHARS)
+    chars = bounded_int(chars_flag, "slack message: --chars",
+                        default=DEFAULT_CHARS, low=1, high=MAX_CHARS)
     timeout = float_arg(timeout_flag, "slack message: --timeout") \
         if timeout_flag is not None else DEFAULT_TIMEOUT_S
     if not 0 < timeout < 3600:

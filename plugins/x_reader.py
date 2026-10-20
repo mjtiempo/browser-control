@@ -36,9 +36,9 @@ import urllib.parse
 from browser_control import plugin_api
 from browser_control.plugin_api import (
     ControlError,
+    bounded_int,
     errors,
     fail,
-    int_arg,
     pop,
     switch,
     tab_arg,
@@ -230,33 +230,22 @@ def run(rest: list[str], browser: str) -> dict:
     if not query:
         fail(errors.ERR_BAD_ARGS, "x search: an empty QUERY is not a search")
     # EVERY numeric option is parsed and bounds-checked HERE, above the first
-    # navigation. The parse and its "needs a number" refusal are the core's
-    # (`int_arg`); only this verb's bounds stay — an absent flag is the default,
-    # a value below the floor is refused, and one above the top clamps. A typo
-    # used to be found AFTER `nav` and two `wait`s, so a bad argument had
-    # already moved the caller's tab and stalled up to 35 s before refusing;
-    # `google search` validates before its nav and the core verbs validate argv
-    # before resolving a tab, and now this one does too.
-    cap_n = (int_arg(cap, "x search: --cap")
-             if cap is not None else DEFAULT_CAP)
-    if cap_n < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"x search: --cap must be at least 1, got {cap_n}")
-    cap_n = min(cap_n, MAX_CAP)
-    chars_n = (int_arg(chars, "x search: --chars")
-               if chars is not None else DEFAULT_CHARS)
-    if chars_n < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"x search: --chars must be at least 1, got {chars_n}")
-    chars_n = min(chars_n, 20_000)
-    max_scrolls = (int_arg(scrolls_flag, "x search: --max-scrolls")
-                   if scrolls_flag is not None else DEFAULT_SCROLLS)
-    if max_scrolls < 0:
-        # 0 is meaningful ("read the first render, wheel nothing"); a negative
-        # budget is a mistake, not a smaller load
-        fail(errors.ERR_BAD_ARGS,
-             f"x search: --max-scrolls must be 0 or more, got {max_scrolls}")
-    max_scrolls = min(max_scrolls, MAX_SCROLLS)
+    # navigation — the ONE bounded reader (default / floor / clamp), whose
+    # parse is the core's `int_arg`. A typo used to be found AFTER `nav` and
+    # two `wait`s, so a bad argument had already moved the caller's tab and
+    # stalled up to 35 s before refusing; `google search` validates before its
+    # nav and the core verbs validate argv before resolving a tab, and now this
+    # one does too.
+    cap_n = bounded_int(cap, "x search: --cap",
+                        default=DEFAULT_CAP, low=1, high=MAX_CAP)
+    chars_n = bounded_int(chars, "x search: --chars",
+                          default=DEFAULT_CHARS, low=1, high=20_000)
+    # 0 is meaningful here ("read the first render, wheel nothing"); a
+    # negative budget is a mistake, not a smaller load
+    max_scrolls = bounded_int(
+        scrolls_flag, "x search: --max-scrolls", default=DEFAULT_SCROLLS,
+        low=0, high=MAX_SCROLLS,
+        below="x search: --max-scrolls must be 0 or more")
 
     url = _search_url(query, latest=(not top))
     plugin_api.nav(url, tab=tab, browser=browser)

@@ -29,6 +29,7 @@ from browser_control.lib.errors import (
     fail,
 )
 from browser_control.lib.paths import (
+    identity,
     is_managed,
     norm,
 )
@@ -135,10 +136,10 @@ def driver_port(profile: str) -> int:
     if file_port and cdp.answers(file_port) \
             and _pkg.endpoint_owner(profile, file_port).get("verified"):
         return file_port
-    want = norm(str(profile or ""))
+    want = identity(str(profile or ""))
     if want:
         for row in _pkg.browsers():
-            if norm(str(row.get("profile") or "")) != want:
+            if identity(str(row.get("profile") or "")) != want:
                 continue
             port = row_port(row)
             if port:
@@ -347,7 +348,7 @@ def _narrow(rows: list[dict], browser: str) -> list[dict]:
         if wanted and wanted not in (row["exe"],
                                      os.path.basename(str(row["profile"]))):
             continue
-        if scoped and norm(str(row["profile"])) != scoped:
+        if scoped and identity(str(row["profile"])) != identity(scoped):
             continue
         out.append(row)
     return out

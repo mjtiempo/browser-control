@@ -50,9 +50,9 @@ import time
 from browser_control import plugin_api
 from browser_control.plugin_api import (
     ControlError,
+    bounded_int,
     errors,
     fail,
-    int_arg,
     pop,
     tab_arg,
     text_arg,
@@ -202,77 +202,21 @@ def _next_page(before_url: str, seen: set[str], selector: str, cap: int,
         time.sleep(SWAP_POLL_S)
 
 
-def run(rest: list[str], browser: str) -> dict:
-    """`google search QUERY [--cap N] [--wpm N] [--max-pages N] [--tab SPEC]`."""
-    args = [str(arg) for arg in rest]
-    if not args or args[0] != "search":
-        # the verb's own subcommand: `google` is the plugin's noun, `search`
-        # is the action, so a later read (`google result URL`) can sit beside it
-        fail(errors.ERR_BAD_ARGS,
-             "google: the subcommand is required — `google search QUERY ...` "
-             "(have: search)")
-    args = args[1:]
-    args, cap = pop(args, "--cap", "google search")
-    args, wpm_flag = pop(args, "--wpm", "google search")
-    args, pages_flag = pop(args, "--max-pages", "google search")
-    args, tab = tab_arg(args, "google search")
-    # the positional rule is the CORE's (`text_arg`): a flag where the query
-    # goes, a missing query or a repeated one refuses with the same message a
-    # built-in verb gives, rather than a shape only this plugin speaks
-    query = text_arg(args, "google search").strip()
-    if not query:
-        fail(errors.ERR_BAD_ARGS, "google search: an empty QUERY is not a search")
-    # the parse and its "needs a number" refusal are the core's (`int_arg`);
-    # only the bounds this verb alone knows stay here — an absent flag is the
-    # default, a cadence below 1 would divide by zero, and a value above the
-    # top is clamped rather than refused
-    cap_n = (int_arg(cap, "google search: --cap")
-             if cap is not None else DEFAULT_CAP)
-    if cap_n < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"google search: --cap must be at least 1, got {cap_n}")
-    cap_n = min(cap_n, MAX_CAP)
-    wpm = (int_arg(wpm_flag, "google search: --wpm")
-           if wpm_flag is not None else DEFAULT_WPM)
-    if wpm < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"google search: --wpm must be at least 1, got {wpm}")
-    wpm = min(wpm, MAX_WPM)
-    max_pages = (int_arg(pages_flag, "google search: --max-pages")
-                 if pages_flag is not None else DEFAULT_PAGES)
-    if max_pages < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"google search: --max-pages must be at least 1, got {max_pages}")
-    max_pages = min(max_pages, MAX_PAGES)
+def _pages(cap_n: int, max_pages: int, tab: str, browser: str) -> dict:
+    """Read the SERP and click the site's own Next control until it stops.
 
-    # the HOMEPAGE, never a query URL: the query is typed below, into the
-    # page's own field, and the site builds the address from it
-    plugin_api.nav(HOME, tab=tab, browser=browser)
-    box = _rendered(SEARCH_BOXES, WAIT_S, PROBE_S, tab, browser)[0]
-    if not box:
-        # no search box rendered: `focus` refuses with the core's own message,
-        # exactly as the old single-selector path did after its suppressed wait
-        box = SEARCH_BOXES[0]
-    plugin_api.focus(selector=box, tab=tab, browser=browser)
-    started = time.monotonic()
-    typed = plugin_api.type_text(query, tab=tab, browser=browser,
-                                 delay_s=_delay(wpm))
-    elapsed = time.monotonic() - started
-    # `verified` is TRI-STATE in the core, and only the RAISED half is proof of
-    # absence: `dom.type_text` refuses `type-not-verified` ITSELF when the probe
-    # proved the focus takes no text, so a reply that came back at all means the
-    # text landed or the oracle could not tell — an unreadable field, a focus
-    # that moved, a PARTIAL landing, or a length that did not move because the
-    # box ALREADY held the query (re-running a search is the everyday case; the
-    # core's own docstring names it). `typed["verified"]` is `bool(verdict)`, so
-    # a returned `False` is that UNCLEAR case, never "did not land" — reading it
-    # as a failure refused working searches with a message asserting the one
-    # thing the tri-state exists to avoid claiming (a review found it). The
-    # uncertainty is CARRIED instead: `typing.verified` reports what the core
-    # could prove, and the search goes ahead.
-    typed_verified = bool(typed.get("verified"))
-    time.sleep(SUBMIT_PAUSE_S)          # a person's beat before Enter
-    plugin_api.press("enter", tab=tab, browser=browser)
+    One page's list is `tab extract`'s answer and every following page is the
+    site's own Next control, CLICKED (no address is built here either). The
+    loop's stop reason is part of the reply, because "the list ended", "the
+    cap was reached", "a click did not move the page" and "the wait for the
+    turn FAILED" are four different facts:
+
+    * `no-next` is the honest end of the list and does NOT set `truncated`;
+    * `cap`, `max-pages`, `no-growth`, `click-failed` and `wait-failed` all
+      do, because the list is not all there was;
+    * `wait_error` carries the refusal itself when the wait failed, so
+      `stop: "wait-failed"` is never a bare verdict.
+    """
     results_sel, matched = _rendered(RESULT_CANDIDATES, WAIT_S, PROBE_S,
                                      tab, browser)
     if not matched:
@@ -345,7 +289,83 @@ def run(rest: list[str], browser: str) -> dict:
     # other direction
     truncated = truncated or stop in ("max-pages", "no-growth", "click-failed",
                                       "wait-failed")
-    results = results[:cap_n]
+    return {
+        "results": results[:cap_n],
+        "landed_on": landed_on,
+        "truncated": truncated,
+        "loading": {"pages": pages, "clicks": clicks,
+                    "max_pages": max_pages, "stop": stop,
+                    "wait_error": wait_error},
+        "selectors": {"results": results_sel, "matched": matched,
+                      # the pagination control, read the same way as
+                      # `results`: `next_matched` false with `stop: "no-next"`
+                      # is the page really having no Next, and `next` names
+                      # the selector
+                      "next": next_sel, "next_matched": next_matched},
+    }
+
+
+def run(rest: list[str], browser: str) -> dict:
+    """`google search QUERY [--cap N] [--wpm N] [--max-pages N] [--tab SPEC]`."""
+    args = [str(arg) for arg in rest]
+    if not args or args[0] != "search":
+        # the verb's own subcommand: `google` is the plugin's noun, `search`
+        # is the action, so a later read (`google result URL`) can sit beside it
+        fail(errors.ERR_BAD_ARGS,
+             "google: the subcommand is required — `google search QUERY ...` "
+             "(have: search)")
+    args = args[1:]
+    args, cap = pop(args, "--cap", "google search")
+    args, wpm_flag = pop(args, "--wpm", "google search")
+    args, pages_flag = pop(args, "--max-pages", "google search")
+    args, tab = tab_arg(args, "google search")
+    # the positional rule is the CORE's (`text_arg`): a flag where the query
+    # goes, a missing query or a repeated one refuses with the same message a
+    # built-in verb gives, rather than a shape only this plugin speaks
+    query = text_arg(args, "google search").strip()
+    if not query:
+        fail(errors.ERR_BAD_ARGS, "google search: an empty QUERY is not a search")
+    # every numeric option goes through the ONE bounded reader: the default
+    # when absent, the floor refused, the ceiling clamped — the policy used to
+    # be spelled out here and in three other plugins (a review found it), and
+    # the parse inside it is the core's own `int_arg`
+    cap_n = bounded_int(cap, "google search: --cap",
+                        default=DEFAULT_CAP, low=1, high=MAX_CAP)
+    wpm = bounded_int(wpm_flag, "google search: --wpm",
+                      default=DEFAULT_WPM, low=1, high=MAX_WPM)
+    max_pages = bounded_int(pages_flag, "google search: --max-pages",
+                            default=DEFAULT_PAGES, low=1, high=MAX_PAGES)
+
+    # the HOMEPAGE, never a query URL: the query is typed below, into the
+    # page's own field, and the site builds the address from it
+    plugin_api.nav(HOME, tab=tab, browser=browser)
+    box = _rendered(SEARCH_BOXES, WAIT_S, PROBE_S, tab, browser)[0]
+    if not box:
+        # no search box rendered: `focus` refuses with the core's own message,
+        # exactly as the old single-selector path did after its suppressed wait
+        box = SEARCH_BOXES[0]
+    plugin_api.focus(selector=box, tab=tab, browser=browser)
+    started = time.monotonic()
+    typed = plugin_api.type_text(query, tab=tab, browser=browser,
+                                 delay_s=_delay(wpm))
+    elapsed = time.monotonic() - started
+    # `verified` is TRI-STATE in the core, and only the RAISED half is proof of
+    # absence: `dom.type_text` refuses `type-not-verified` ITSELF when the probe
+    # proved the focus takes no text, so a reply that came back at all means the
+    # text landed or the oracle could not tell — an unreadable field, a focus
+    # that moved, a PARTIAL landing, or a length that did not move because the
+    # box ALREADY held the query (re-running a search is the everyday case; the
+    # core's own docstring names it). `typed["verified"]` is `bool(verdict)`, so
+    # a returned `False` is that UNCLEAR case, never "did not land" — reading it
+    # as a failure refused working searches with a message asserting the one
+    # thing the tri-state exists to avoid claiming (a review found it). The
+    # uncertainty is CARRIED instead: `typing.verified` reports what the core
+    # could prove, and the search goes ahead.
+    typed_verified = bool(typed.get("verified"))
+    time.sleep(SUBMIT_PAUSE_S)          # a person's beat before Enter
+    plugin_api.press("enter", tab=tab, browser=browser)
+    found = _pages(cap_n, max_pages, tab, browser)
+    results = found["results"]
     measured = round(len(query) / elapsed * 12, 1) if elapsed > 0 else 0.0
     return {
         "ok": True,
@@ -365,24 +385,16 @@ def run(rest: list[str], browser: str) -> dict:
             # this is the flag that says the typing was not certified.
             "verified": typed_verified,
         },
-        "landed_on": landed_on,
+        "landed_on": found["landed_on"],
         "count": len(results),
-        "truncated": truncated,
+        "truncated": found["truncated"],
         # every row is the page's own, plus `page`: the 1-based SERP it came
-        # from, so a merged multi-page list stays explainable
+        # from, so a merged multi-page list stays explainable, and `site`: the
+        # display address the card rendered — on a wrapper `url` it is the ONLY
+        # thing that says where the link goes
         "results": results,
-        "loading": {"pages": pages, "clicks": clicks,
-                    "max_pages": max_pages, "stop": stop,
-                    # "" unless a page turn's wait FAILED, and then the refusal
-                    # itself (`ERR[code]: message`), so `stop: "wait-failed"`
-                    # is never a bare verdict
-                    "wait_error": wait_error},
-        "selectors": {"search_box": box, "results": results_sel,
-                      "matched": matched,
-                      # the pagination control, read the same way as `results`:
-                      # `next_matched` false with `stop: "no-next"` is the page
-                      # really having no Next, and `next` names the selector
-                      "next": next_sel, "next_matched": next_matched},
+        "loading": found["loading"],
+        "selectors": {**found["selectors"], "search_box": box},
         "note": ("typed into the page's own search box at a human cadence and "
                  "submitted with Enter — no query URL was built, and further "
                  "pages are the site's own Next control, clicked; `landed_on` "

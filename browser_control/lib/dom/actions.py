@@ -201,6 +201,19 @@ def _same_control(first: dict, second: dict) -> bool:
         return True
     return first_id == second_id
 
+
+def _reads_a_state(probe: dict) -> bool:
+    """Did the probe report the control's own state at all?
+
+    `CHECK_READ` answers `{found: false}` for a control that left the
+    document — a shape with NO `checked` key. `bool(None)` is `False`, so
+    that absent sample used to satisfy `--uncheck`'s wanted state, and the
+    reply certified `checked: false, verified: true` about an element the
+    read-back never observed (a review measured a to-do row that removes
+    itself when unchecked). "No state" is not "not checked".
+    """
+    return probe.get("found") is not False and "checked" in probe
+
 def _still_the_pick(described: object, element: dict) -> bool:
     """Do a describe-style string and a match ROW name the same element?
 
@@ -471,7 +484,10 @@ def check(text: str | None = None, selector: str | None = None,
     element that was picked (and, after the click, the same element the
     pre-click probe named), or the verb refuses instead of certifying another
     control's `checked` (a review scripted `input#a` picked and `input#b`
-    answering the poll).
+    answering the poll). A probe that reports NO state at all (`{found: false}`
+    after the page removed the control) refuses too: `bool(None)` read as
+    "unchecked" and certified an element the read-back never saw (a review
+    measured it for `--uncheck`).
     """
     needle, css = _pkg._query_args(text, selector, "tab check")
     want = not uncheck
@@ -495,8 +511,15 @@ def check(text: str | None = None, selector: str | None = None,
         _attempts, after = poll(
             lambda: _check_state(session, needle, css, index),
             timeout=CHECK_TIMEOUT_S, interval=POLL_FAST,
-            accept=lambda state: _same_control(before, state)
+            accept=lambda state: _reads_a_state(state)
+            and _same_control(before, state)
             and bool(state.get("checked")) == want)
+    if not _reads_a_state(after):
+        fail(ERR_CHECK_NOT_VERIFIED,
+             f"{_pkg._describe(element)} no longer reports a checked state "
+             f"after the click at viewport {[x, y]} — the page may have "
+             "removed or re-rendered it, and a state this read-back never "
+             "saw is not a verdict")
     if not _same_control(before, after):
         fail(ERR_CHECK_NOT_VERIFIED,
              _changed_under(element, _identity(after), _identity(before)))

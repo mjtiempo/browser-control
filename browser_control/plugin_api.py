@@ -33,7 +33,9 @@ names the verb in its refusal the same way the CLI does. `text_arg`,
 readers beside them, so "one TEXT at most", "TEXT is required", "needs a
 number" and "`--tab` needs a SPEC" are the same refusals a built-in verb
 gives — including the empty `--tab ""` that a plugin must not read as "no
-spec".
+spec". `bounded_int` is the numeric FLAG reader those readers sit under: the
+default when absent, the floor refused, the ceiling clamped — the one place
+the plugins' bound policy lives instead of one copy per option.
 
 Everything is re-exported from where it already lived, so nothing moves and no
 plugin that imports `lib` directly breaks. The readers come from
@@ -44,6 +46,7 @@ from __future__ import annotations
 
 from browser_control.lib import errors
 from browser_control.lib.argv import (
+    _bounded_int as bounded_int,
     _float as float_arg,
     _int as int_arg,
     _pop as pop,
@@ -66,7 +69,7 @@ from browser_control.lib.dom import (
 from browser_control.lib.errors import ControlError, fail
 from browser_control.lib.plugins import PLUGIN_API
 
-__all__ = ["ControlError", "PLUGIN_API", "click", "errors", "extract",
-           "fail", "float_arg", "focus", "frame", "int_arg", "nav", "pop",
-           "press", "scroll", "switch", "tab_arg", "text", "text_arg",
-           "type_text", "wait"]
+__all__ = ["ControlError", "PLUGIN_API", "bounded_int", "click",
+           "errors", "extract", "fail", "float_arg", "focus", "frame",
+           "int_arg", "nav", "pop", "press", "scroll", "switch",
+           "tab_arg", "text", "text_arg", "type_text", "wait"]

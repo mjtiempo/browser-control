@@ -27,7 +27,7 @@ ROOT_KEY = "_root" + os.sep
 
 __all__ = ["DEFAULT_ROOT", "LOCK_DIR", "LOCK_FILE", "LOCK_NAME_LIMIT",
            "MARKER", "PID_FILE", "REMOTE_DIR", "ROOT_ENV", "ROOT_KEY",
-           "ensure_root", "expand", "is_managed", "is_remote_key",
+           "ensure_root", "expand", "identity", "is_managed", "is_remote_key",
            "lock_path", "mark", "marked", "norm", "pid_file",
            "profile_dir", "remote_dir", "remote_key", "root"]
 
@@ -49,6 +49,22 @@ def norm(path: object) -> str:
     """
     text = str(path or "").strip()
     return expand(text) if text else ""
+
+
+def identity(path: object) -> str:
+    """`norm` with the symlinks resolved: one identity for one directory.
+
+    The liveness and lock guards compare paths, and `is_managed` already
+    accepts a profile by its REAL path: a root reached through a symlink
+    (`BROWSER_CONTROL_ROOT=~/link` -> `/data/profiles`) could therefore hold
+    a profile whose two spellings are both managed but compare UNEQUAL. That
+    defeated both guards at once -- each spelling took its own lock, and
+    `refuse_live` read a running browser as idle, so `profile reset --force`
+    could wipe the directory of the browser it could not see (a review
+    measured the hole). An empty path stays empty, like `norm`.
+    """
+    text = norm(path)
+    return os.path.realpath(text) if text else ""
 
 
 def root() -> str:
@@ -104,6 +120,12 @@ def ensure_root() -> str:
     path = root()
     try:
         os.makedirs(path, mode=0o700, exist_ok=True)
+        # ...and NARROW one that already existed: `mode` applies only to a leaf
+        # `makedirs` CREATES, and a root from an image, an older version or a
+        # plain `mkdir -p` kept the umask default (0755), where any local user
+        # could list every managed profile's name (a review flagged it). Every
+        # creator calls this first, so this is the one place the mode is owed.
+        os.chmod(path, 0o700)
     except OSError:
         # the caller's refusal (it names the verb and the path): re-raise the
         # filesystem error unchanged rather than turning it into a different
@@ -192,9 +214,16 @@ def lock_path(profile: str) -> str:
     file twice and refused `profile-busy` after the wait naming the caller's
     own pid (a review measured it). `_lock_name`'s digest is what keeps the two
     files apart even though the readable tails look alike.
+
+    Both sides are resolved through SYMLINKS before the key is derived
+    (`identity`'s rule on the target, realpath on the root): a profile reached
+    through a linked root and the same profile reached by its real path are
+    one directory and must key ONE lock. Lexically they keyed two, so two
+    callers took two different locks on one profile and both proceeded (a
+    review measured it).
     """
-    target = expand(profile)
-    base = root()
+    target = os.path.realpath(expand(profile))
+    base = os.path.realpath(root())
     rel = os.path.relpath(target, base)
     if rel == os.curdir:
         key = ROOT_KEY

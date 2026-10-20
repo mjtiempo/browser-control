@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from browser_control.lib.argv import (  # noqa: F401
     MARKER,
+    _bounded_int,
     _float,
     _head_of,
     _int,
@@ -25,6 +26,7 @@ from browser_control.lib.argv import (  # noqa: F401
     _switch,
     _tab_arg,
     _text_arg,
+    _text_or_selector,
     _twice,
 )
 from browser_control.lib.errors import (

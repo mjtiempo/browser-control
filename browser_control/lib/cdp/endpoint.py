@@ -340,17 +340,27 @@ def _get_port(port: int, path: str) -> Any:
     body = _get_bytes(f"http://127.0.0.1:{port}{path}")
     try:
         return json.loads(body.decode("utf-8", "replace"))
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
+        # `RecursionError` is not a `ValueError`: deeply nested JSON (a few
+        # hundred `[` make CPython's scanner recurse past its limit) escaped
+        # the typed refusal and surfaced as ERR[internal] (a review found
+        # it). The bytes are a peer's, and a shape this tool cannot parse is
+        # its ordinary refusal.
         fail(ERR_CDP_ERROR, f"{path}: the endpoint answered no JSON: {e}")
 
-def get_json(profile: str, path: str) -> Any:
-    """GET one CDP JSON endpoint on the profile's own loopback port."""
+def port_or_fail(profile: str) -> int:
+    """The profile's live DevTools port, or the refusal that names why not."""
     port = port_of(profile)
     if not port:
         fail(ERR_CDP_UNREACHABLE,
              f"no DevTools port in {profile}: the browser is not running "
              "(or was started without --remote-debugging-port=0)")
-    return _get_port(port, path)
+    return port
+
+
+def get_json(profile: str, path: str) -> Any:
+    """GET one CDP JSON endpoint on the profile's own loopback port."""
+    return _get_port(port_or_fail(profile), path)
 
 def answers(port: int) -> bool:
     """Is a CDP endpoint answering on this loopback port right now?

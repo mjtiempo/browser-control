@@ -319,7 +319,10 @@ def _sweep_copies(parent: str, pattern: re.Pattern[str]) -> None:
         pid = match.group(1)
         if pid is not None and _pid_alive(int(pid)):
             continue
-        shutil.rmtree(path, ignore_errors=True)
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            pass                    # collection is best-effort, never a raise
 
 
 def _copy_root() -> str:
@@ -362,13 +365,20 @@ def _store_workspace() -> str:
     legacy = tempfile.gettempdir()
     _sweep_copies(legacy, LEGACY_COPY_NAME_RE)
     parent = _copy_root()
-    if parent:
-        _sweep_copies(parent, COPY_NAME_RE)
-        prefix = f"{os.getpid()}-"
-    else:
-        parent = legacy
-        prefix = f"{LEGACY_COPY_PREFIX}{os.getpid()}-"
-    return tempfile.mkdtemp(prefix=prefix, dir=parent)
+    if not parent:
+        # NO fallback to `tempfile.gettempdir()`: a byte copy of
+        # `Cookies`/`Login Data` belongs under THIS CLI's 0700 root, and the
+        # shared temp directory is chosen by the environment (`TMPDIR`) — a
+        # caller's shell, or whatever wrapper started this process (a review
+        # flagged it). A store the root cannot keep private reads as
+        # unreadable, which is an ANSWER (`_store_connection` reports it),
+        # not a reason to write credentials somewhere less protected.
+        raise OSError(
+            "cannot make a private workspace under the managed root "
+            f"({root()}); refusing to copy a login store into the shared "
+            "temp directory")
+    _sweep_copies(parent, COPY_NAME_RE)
+    return tempfile.mkdtemp(prefix=f"{os.getpid()}-", dir=parent)
 
 
 @contextlib.contextmanager
@@ -443,7 +453,10 @@ def _store_connection(db: str) -> Iterator[tuple[sqlite3.Connection | None,
         finally:
             conn.close()
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            shutil.rmtree(tmp)
+        except OSError:
+            pass                    # cleanup must not fail the read it follows
 
 
 def _cookie_rows(db: str) -> tuple[list[tuple], str, bool]:

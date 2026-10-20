@@ -38,10 +38,10 @@ from __future__ import annotations
 from browser_control import plugin_api
 from browser_control.plugin_api import (
     ControlError,
+    bounded_int,
     errors,
     fail,
     float_arg,
-    int_arg,
     pop,
     tab_arg,
 )
@@ -171,17 +171,15 @@ def run(rest: list[str], browser: str) -> dict:
     args, timeout_flag = pop(args, "--timeout", "page read")
     args, tab = tab_arg(args, "page read")
     urls = _urls(args, "page read")
-    # the readers and their "needs a number" refusals are the CORE's (`int_arg`,
-    # `float_arg`); only the defaults this verb alone knows stay here. The test
-    # is `is not None`, never truthiness: `--chars ""` is a flag the caller
-    # GAVE with an empty value, and the rest of the tool refuses one (`_tab_arg`,
-    # `_parse_globals`, `_one`, `_classes_of` all do) — reading it as "absent"
-    # silently used the default instead
-    chars = int_arg(chars_flag, "page read --chars") if chars_flag is not None \
-        else DEFAULT_CHARS
-    if chars < 1:
-        fail(errors.ERR_BAD_ARGS,
-             f"page read: --chars must be at least 1, got {chars}")
+    # the readers and their "needs a number" refusals are the CORE's (`int_arg`
+    # inside `bounded_int`, `float_arg`); only the defaults this verb alone
+    # knows stay here. The test is `is not None`, never truthiness: `--chars ""`
+    # is a flag the caller GAVE with an empty value, and the rest of the tool
+    # refuses one (`_tab_arg`, `_parse_globals`, `_one`, `_classes_of` all do)
+    # — reading it as "absent" silently used the default instead
+    chars = bounded_int(chars_flag, "page read --chars",
+                        default=DEFAULT_CHARS, low=1,
+                        below="page read: --chars must be at least 1")
     timeout = float_arg(timeout_flag,
                         "page read --timeout") if timeout_flag is not None \
         else DEFAULT_TIMEOUT_S

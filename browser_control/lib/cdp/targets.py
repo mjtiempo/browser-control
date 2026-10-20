@@ -10,9 +10,10 @@ from typing import Any
 from browser_control.lib.cdp.endpoint import (
     _get_port,
     get_json,
+    port_or_fail,
 )
 from browser_control.lib.cdp.rpc import (
-    _checked_ws,
+    _ws_at_port,
 )
 from browser_control.lib.cdp.session import (
     call,
@@ -45,13 +46,20 @@ def frame_targets(port: int) -> list[dict]:
     this returns. `[]` means the browser did not say (or would not answer), and
     the caller then trusts only a URL that is unique in the whole browser.
     """
-    version = _get_port(port, "/json/version")
+    try:
+        version = _get_port(port, "/json/version")
+    except ControlError:
+        # the contract above: `[]` means "the browser did not say", and a
+        # browser dying between this read and the tab read is exactly that —
+        # the unwrapped call refused a frame census the caller had an
+        # `unattributable` answer for (a review found it)
+        return []
     url = str((version or {}).get("webSocketDebuggerUrl") or "") \
         if isinstance(version, dict) else ""
     if not url:
         return []
     try:
-        result = call(_checked_ws(url), "Target.getTargets")
+        result = call(_ws_at_port(url, "endpoint", port), "Target.getTargets")
     except ControlError:
         return []
     infos = result.get("targetInfos") if isinstance(result, dict) else None
@@ -101,7 +109,7 @@ def target_ws(port: int, target_id: str, kind: str = "page") -> str:
     ws = str(row.get("webSocketDebuggerUrl") or "")
     if not ws:
         fail(code, f"{what} {str(target_id)[:10]}… has no websocket endpoint")
-    return _checked_ws(ws, what)
+    return _ws_at_port(ws, what, port)
 
 def rows_to_tabs(rows: list[dict]) -> list[dict]:
     """One page row, as every verb reports it."""
@@ -111,14 +119,15 @@ def rows_to_tabs(rows: list[dict]) -> list[dict]:
 
 
 def browser_ws(profile: str) -> str:
-    """The browser endpoint's websocket URL, shape- and host-checked."""
-    info = get_json(profile, "/json/version")
+    """The browser endpoint's websocket URL, shape-, host- and port-checked."""
+    port = port_or_fail(profile)
+    info = _get_port(port, "/json/version")
     if not isinstance(info, dict):
         fail(ERR_CDP_ERROR, "/json/version answered a shape this tool cannot read")
     ws = str(info.get("webSocketDebuggerUrl") or "")
     if not ws:
         fail(ERR_CDP_ERROR, "/json/version names no browser websocket endpoint")
-    return _checked_ws(ws)
+    return _ws_at_port(ws, "endpoint", port)
 
 def browser_call(profile: str, method: str, params: dict) -> dict:
     """One CDP call on the BROWSER endpoint (`Target.*`)."""

@@ -193,7 +193,7 @@ def _preflight(session: cdp.Session, text: str, verb: str) -> dict:
     return before
 
 def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
-                text: str, rung: str) -> dict:
+                text: str, rung: str, expected: int | None = None) -> dict:
     """The reply `insert` and `type` share, from the read-back verdict.
 
     `inserted` is the raw DELTA the field reported (None when the oracle could
@@ -201,8 +201,15 @@ def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
     a length that did not move are all UNCLEAR verdicts, so this is how a caller
     still sees what the field actually did. Only a verdict the probe PROVED
     fails (`_text_verdict` says which), and it names the rung's own code.
+
+    `expected` is what the verdict judges the field against: `type` moves a
+    newline as an ENTER key, which commits NO character, so judging `type
+    "hi\n"` by `len(text)` read a correct write as "only 3 of 4 landed" (a
+    review found the false negative). The reply's own `chars` stays the length
+    of the TEXT the caller gave.
     """
-    verified, why = _text_verdict(before, after, len(text))
+    wanted = len(text) if expected is None else expected
+    verified, why = _text_verdict(before, after, wanted)
     if verified is not None and not verified:
         # the rung names the code: both are REGISTERED in errors.CODES, so a
         # caller can branch on them (a built string would be invisible to the
@@ -210,7 +217,7 @@ def _text_reply(row: dict, tab_row: dict, before: dict, after: dict,
         code = (ERR_INSERT_NOT_VERIFIED if rung == "insert"
                 else ERR_TYPE_NOT_VERIFIED)
         fail(code, f"{why}: {foreign(before.get('active'), 60)!r} did not take "
-                   f"the {len(text)} character(s)")
+                   f"the {wanted} character(s)")
     reply = {"ok": True, "verb": rung, "chars": len(text),
              "inserted": _length_delta(before, after),
              "active": after.get("active") or before.get("active"),
@@ -291,4 +298,6 @@ def type_text(text: str, tab: str = "", browser: str = "",
                     session.call("Input.dispatchKeyEvent", event)
             time.sleep(pause)             # the page's handlers need air
         after = _text_target(session)
-    return _text_reply(row, tab_row, before, after, value, "type")
+    # ENTER commits no character: judge only what this rung's rung commits
+    return _text_reply(row, tab_row, before, after, value, "type",
+                       expected=len(value) - value.count("\n"))

@@ -972,9 +972,28 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
             fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} survived SIGTERM for {STOP_WAIT_S:g}s — "
                  "stop it yourself; this CLI does not SIGKILL a browser")
+        def endpoint_still_ours() -> bool:
+            """Is this profile's OWN endpoint still answering?
+
+            "Something answers on that port" is not the same claim as "this
+            browser is still up": the SIGTERMed browser frees its port, and
+            a DIFFERENT Chromium (another profile) can be re-bound to it
+            inside the wait window — the old proof then failed
+            `browser-not-stopped` on a stop that worked, and the re-run
+            reported an endpoint it could not identify (a review found it).
+            The owner check is the one `_page_count` already uses: an answer
+            only counts while it is this profile's browser.
+            """
+            if not endpoint:
+                return cdp.reachable(target)
+            # REFRESHED: the memo holds the verdict from BEFORE the SIGTERM
+            # (`_page_count` populated it), so reading it here reported every
+            # real stop as "still answers" (the live battery caught it)
+            return bool(_pkg.endpoint_owner(target, endpoint,
+                                            refresh=True).get("verified"))
+
         _attempts, answering = poll(
-            lambda: cdp.answers(endpoint) if endpoint
-            else cdp.reachable(target),
+            endpoint_still_ours,
             timeout=PORT_WAIT_S,
             interval=POLL_NORMAL,
             accept=lambda a: not a,
@@ -982,7 +1001,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
         if answering:
             fail(ERR_BROWSER_NOT_STOPPED,
                  f"pid {target_pid} is gone but the CDP endpoint on {target} "
-                 "still answers")
+                 "still answers as this profile's browser")
         # best effort: the stop is PROVEN at this point, and a filesystem that
         # refuses this unlink must not turn a successful stop into a traceback
         # (or into the refusal being built elsewhere)
@@ -990,7 +1009,7 @@ def stop(browser: str = "", force: bool = False, port: int = 0, pid: int = 0,
             Path(pid_file(target)).unlink(missing_ok=True)
     reply = {"ok": True, "stopped": True, "pid": target_pid,
              "profile": target, "tabs": tabs,
-             "forced": bool(tabs and force), "named": named,
+             "forced": bool(force and (tabs is None or tabs)), "named": named,
              "managed": bool(row["managed"]) if row else True}
     lock.warn(reply)
     return reply

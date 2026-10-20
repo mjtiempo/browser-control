@@ -278,7 +278,12 @@ def _wait_ids_gone(profile: str, ids: list[str], timeout: float = PORT_WAIT_S,
 
     def probe() -> list[str]:
         try:
-            open_ids = {r["id"] for r in _pkg._rows(profile)}
+            # the READ uses the endpoint this call resolved — `endpoint` is
+            # the port the readability check below judges, so judging one
+            # listener while reading another (a row's port vs `driver_port`)
+            # could report a survivor gone, or a gone tab surviving (a review
+            # found the split)
+            open_ids = {r["id"] for r in _pkg._rows(profile, endpoint)}
         except ControlError as e:
             _require_tab_list_readable(profile, e, endpoint)
             open_ids = set()          # the browser is gone: so are its tabs
@@ -293,9 +298,9 @@ def browser_ws_at(port: int) -> str:
 
     `cdp.browser_ws` resolves the port from the profile's FILE, which a
     browser started with an explicit `--remote-debugging-port=N` never writes;
-    this is the same two steps (`/json/version`, then the host check) on an
-    explicit port, so a verb that holds a row drives the endpoint THAT row
-    reports.
+    this is the same three steps (`/json/version`, the host check and the port
+    check) on an explicit port, so a verb that holds a row drives the endpoint
+    THAT row reports.
     """
     info = cdp._get_port(port, "/json/version")
     if not isinstance(info, dict):
@@ -304,7 +309,7 @@ def browser_ws_at(port: int) -> str:
     ws = str(info.get("webSocketDebuggerUrl") or "")
     if not ws:
         fail(ERR_CDP_ERROR, "/json/version names no browser websocket endpoint")
-    return cdp._checked_ws(ws)
+    return cdp._ws_at_port(ws, "endpoint", port)
 
 
 def browser_call_at(profile: str, port: int, method: str,

@@ -337,9 +337,16 @@ def _checked_ws(url: str, where: str = "endpoint") -> str:
     boundary, though — a co-tenant user on this machine can reach the port —
     so this guard is against remote hosts and wrong-process takeover, not
     against another local user.
+
+    The PORT is not checked here: the transport sees a URL, never the port
+    that resolved it. Every URL built from an endpoint's OWN answer goes
+    through `_ws_at_port` first, which adds that equality check; this guard
+    is the host half, and it stays on every path.
     """
     try:
-        host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
+        # The URL is PARSED here, never connected — loopback is what this
+        # guard enforces; `Session._connect` carries the one suppressed connect.
+        host = (urllib.parse.urlparse(str(url)).hostname or "").lower()  # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket  # noqa: E501
     except ValueError as e:
         # a malformed endpoint (`ws://[::1/x`) raised a raw ValueError out of
         # every public transport call; it is a refusal like any other (a
@@ -349,4 +356,31 @@ def _checked_ws(url: str, where: str = "endpoint") -> str:
         fail(ERR_CDP_NOT_LOCAL,
              f"{where}: the endpoint names a websocket on {host!r} — refusing "
              "to send page traffic off the loopback CDP endpoint")
+    return str(url)
+
+
+def _ws_at_port(url: str, where: str, port: int) -> str:
+    """The endpoint's websocket URL, checked to be ON the port it answered on.
+
+    Chrome serves the debugger websocket on the same port as the `/json` and
+    `/json/version` reply that named it, so a URL naming another port is not
+    this endpoint's: a process holding the resolved port could answer with
+    `ws://127.0.0.1:9222/...` and this tool would drive the victim's OTHER
+    local browser — clicks, keystrokes, `tab js`, uploads — while the
+    fingerprint and owner checks still judged the port the record names (a
+    review found the port was never checked at all). The check lives HERE,
+    at every place an endpoint's own answer becomes a connection, because the
+    transport cannot know which port resolved the URL.
+    """
+    _checked_ws(url, where)
+    try:
+        found = urllib.parse.urlparse(str(url)).port
+    except ValueError as e:
+        fail(ERR_CDP_NOT_LOCAL,
+             f"{where}: {url!r} is not a usable endpoint ({e})")
+    if found is None or found != port:
+        fail(ERR_CDP_NOT_LOCAL,
+             f"{where}: the endpoint's websocket is on port {found}, not the "
+             f"port {port} it answered on — refusing to drive another "
+             "listener")
     return str(url)

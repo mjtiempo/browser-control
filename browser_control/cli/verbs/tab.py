@@ -14,6 +14,7 @@ from browser_control.cli.argv import (
     _switch,
     _tab_flag,
     _text_arg,
+    _text_or_selector,
 )
 from browser_control.lib import browser as browser_lib
 from browser_control.lib import dom
@@ -121,10 +122,7 @@ def cmd_tab_check(rest: list[str], browser: str) -> dict:
     rest, index = _pop(rest, "--index", "tab check")
     rest, uncheck = _switch(rest, "--uncheck")
     needle = _needle(rest, "tab check")
-    if (needle is None) == (selector is None):
-        if not needle and not selector:
-            fail(ERR_BAD_ARGS, "tab check: give TEXT or --selector CSS")
-        fail(ERR_BAD_ARGS, "tab check: give TEXT or --selector CSS, not both")
+    _text_or_selector("tab check", needle, selector)
     return dom.check(needle, selector=selector,
                      index=_opt_int(index, "tab check --index"),
                      uncheck=uncheck, tab=spec, browser=browser)
@@ -136,10 +134,7 @@ def cmd_tab_select(rest: list[str], browser: str) -> dict:
     rest, index = _pop(rest, "--index", "tab select")
     rest, value = _pop(rest, "--value", "tab select")
     needle = _needle(rest, "tab select")
-    if (needle is None) == (selector is None):
-        if not needle and not selector:
-            fail(ERR_BAD_ARGS, "tab select: give TEXT or --selector CSS")
-        fail(ERR_BAD_ARGS, "tab select: give TEXT or --selector CSS, not both")
+    _text_or_selector("tab select", needle, selector)
     if value is None:
         fail(ERR_BAD_ARGS,
              "tab select: --value is required — the option's value, or its "
@@ -268,10 +263,7 @@ def cmd_tab_find(rest: list[str], browser: str) -> dict:
     rest, selector = _pop(rest, "--selector", "tab find")
     rest, cap = _pop(rest, "--cap", "tab find")
     needle = _needle(rest, "tab find")
-    if (needle is None) == (selector is None):
-        if not needle and not selector:
-            fail(ERR_BAD_ARGS, "tab find: give TEXT or --selector CSS")
-        fail(ERR_BAD_ARGS, "tab find: give TEXT or --selector CSS, not both")
+    _text_or_selector("tab find", needle, selector)
     return dom.find(needle, selector=selector,
                     cap=_int(cap, "tab find --cap") if cap is not None
                     else dom.FIND_CAP,
@@ -345,10 +337,7 @@ def cmd_tab_focus(rest: list[str], browser: str) -> dict:
     rest, selector = _pop(rest, "--selector", "tab focus")
     rest, index = _pop(rest, "--index", "tab focus")
     needle = _needle(rest, "tab focus")
-    if (needle is None) == (selector is None):
-        if not needle and not selector:
-            fail(ERR_BAD_ARGS, "tab focus: give TEXT or --selector CSS")
-        fail(ERR_BAD_ARGS, "tab focus: give TEXT or --selector CSS, not both")
+    _text_or_selector("tab focus", needle, selector)
     return dom.focus(needle, selector=selector,
                      index=_opt_int(index, "tab focus --index"),
                      tab=spec, browser=browser)

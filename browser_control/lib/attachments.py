@@ -98,7 +98,10 @@ class AttachmentStore:
             return {}
         try:
             data = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # a deeply nested body raises RecursionError, not ValueError: the
+            # file is written by whoever owns the root, and an unreadable
+            # shape is "no records" like any other
             return {}
         if not isinstance(data, list):
             return {}
@@ -124,14 +127,6 @@ class AttachmentStore:
             if number and as_int(record.get("port")) != number:
                 continue
             return record
-        return {}
-
-    def find_url(self, url: str) -> dict:
-        """One remote record by its canonical URL, or {}."""
-        wanted = str(url or "").strip()
-        for record in self.records(KIND_REMOTE).values():
-            if str(record.get("url")) == wanted:
-                return record
         return {}
 
     def is_attached(self, profile: str) -> bool:

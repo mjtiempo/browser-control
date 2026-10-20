@@ -166,12 +166,19 @@ class EndpointGuard:
 
 GUARD = EndpointGuard()
 
-def endpoint_owner(profile: str, port: int) -> dict:
+def endpoint_owner(profile: str, port: int, *,
+                   refresh: bool = False) -> dict:
     """Is the process holding that port the browser this profile says it is?
 
     {"verified": bool, "pid": int, "exe": str, "profile_pid": int,
     "reason": str}. The port comes from a FILE, so it is checked against the
     kernel (`cdp.listener_of`): the process that owns the listening socket.
+
+    `refresh=True` makes the walk NOW instead of reading the memo — what a
+    caller asking after a change (`close` proved the process gone) must do:
+    the memo holds the verdict from BEFORE the signal, so a stale `verified`
+    outlives the browser it named (the live battery caught the stop proof
+    doing exactly that).
 
     The rule, and why it stops there:
 
@@ -186,7 +193,7 @@ def endpoint_owner(profile: str, port: int) -> dict:
       endpoint refuses instead (`cdp-not-local`). A local process that names
       itself `chrome` cannot be told apart, and docs/progress.md says so.
     """
-    return GUARD.verdict(profile, port)
+    return GUARD.verdict(profile, port, refresh=refresh)
 
 
 def _remote_refusal(owner: dict) -> None:
@@ -364,9 +371,10 @@ def verify_ws_owner(profile: str, port: int) -> None:
     from the same port a moment later: between the check and the connection
     the port can be REBOUND, and then keystrokes and caller JS go to the new
     holder while the reply still says `verified: true` (a review flagged the
-    verify-then-use gap; `cdp._checked_ws` checks the HOST and ignores the
-    port). The memo is evicted (`refresh=True`) so what authorises the traffic
-    is the listener that is there when the connection is made.
+    verify-then-use gap; the URL builders check the HOST and the PORT, but
+    only this re-judge ties the port to the LISTENER that is there when the
+    connection is made). The memo is evicted (`refresh=True`) so what
+    authorises the traffic is the listener that is there NOW.
 
     The two failures are two refusals: a port nobody holds any more is
     `cdp-unreachable` (the endpoint went away), and a port held by something

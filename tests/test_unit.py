@@ -97,6 +97,10 @@ FAIL: list[str] = []
 # (the battery has always said so; the hermetic suite did not, and a machine
 # without `node` reported a green run for a check that never ran).
 SKIP: list[tuple[str, str]] = []
+#: The check functions `main()` actually runs; `t_every_check_is_registered`
+#: compares this against every module-level `t_*` callable, so a check added
+#: without a registry entry cannot silently never run.
+REGISTERED: set[Callable[[], None]] = set()
 
 
 def _gate(allow: str | None = None, deny: str | None = None) -> Any:
@@ -2844,30 +2848,23 @@ def t_frames_bind_to_their_tab() -> None:
         assert partial["total"] == 1 and partial["separate"] is None, partial
         assert "error" not in partial, partial
         # an unreadable CENSUS is an error instead — never an empty page
-        patched = cdp.evaluate
-
         def no_census(ws: str, expression: str,
                       timeout: float = 15.0, raw: bool = False,
                       cap: object = None) -> object:
             raise ControlError("cdp-error", "no census")
 
-        cdp.evaluate = no_census                            # type: ignore[assignment]
-        try:
+        with _patched(cdp, evaluate=no_census):
             broken = dom._frame_summary(row, tab_row)        # noqa: SLF001
             assert broken["total"] is None and "no census" in broken["error"], \
                 broken
             # the note says it too — and it is asserted while the census is
             # still failing, which is the only time that message is the truth
             assert "could not be read" in dom._frames_note(row, tab_row)  # noqa: SLF001
-        finally:
-            cdp.evaluate = patched                          # type: ignore[assignment]
         # a page with no frames says NOTHING (`{}`), not a zeroed census
-        cdp.evaluate = lambda ws, expr, timeout=15.0, cap=None: []  # type: ignore[assignment]  # noqa: E501
-        try:
+        with _patched(cdp, evaluate=lambda ws, expr, timeout=15.0,
+                      cap=None: []):
             assert dom._frame_summary(row, tab_row) == {}     # noqa: SLF001
             assert dom._frames_note(row, tab_row) == ""       # noqa: SLF001
-        finally:
-            cdp.evaluate = patched                          # type: ignore[assignment]
     finally:
         dom.frames_of = real_frames_of
         frames_lib.verify_port_owner = real_judge            # type: ignore[assignment]
@@ -3903,6 +3900,26 @@ def _element_row(**extra: object) -> dict:
 
 
 @contextlib.contextmanager
+def _patched(module: Any, **names: Any) -> Iterator[Any]:
+    """Patch module attributes for one block, restoring them however it exits.
+
+    The save/restore the suite hand-rolled ~60 times, with the patches often
+    applied BEFORE the `try:` — a raise in between leaked the fake into every
+    later check of this single-process runner (a review found the pattern).
+    `with _patched(dom, _resolve=fake):` cannot leak, and the restore no longer
+    has to be kept in step with the assignment list by hand.
+    """
+    real = {name: getattr(module, name) for name in names}
+    for name, value in names.items():
+        setattr(module, name, value)
+    try:
+        yield module
+    finally:
+        for name, value in real.items():
+            setattr(module, name, value)
+
+
+@contextlib.contextmanager
 def _capped_poll(module: Any, cap: float = 0.25) -> Iterator[Any]:
     """A module's `poll`, with every budget capped at `cap` seconds.
 
@@ -4670,7 +4687,7 @@ def t_close_survivor_is_a_refusal() -> None:
             lambda profile, port=0: None                 # type: ignore[assignment]
         # the read-back finds the tab STILL THERE after the close
         browser._wait_ids_gone = (                      # type: ignore[assignment]
-            lambda profile, ids: list(ids))
+            lambda profile, ids, port=0: list(ids))
         try:
             refusal(lambda: browser.close_tabs(["id:AB12"]),
                     "close-tab-not-verified")
@@ -5767,7 +5784,7 @@ def t_unreadable_tab_list_is_not_absence() -> None:
     with tempfile.TemporaryDirectory() as profile:
         Path(profile, cdp.PORT_FILE).write_text("1515\n")
 
-        def boom(path: str) -> list[dict]:
+        def boom(path: str, port: int = 0) -> list[dict]:
             raise ControlError("cdp-error", "the endpoint answered no JSON")
 
         real = browser._rows
@@ -7238,7 +7255,7 @@ def t_close_reply_keys_match_the_preview() -> None:
             lambda profile, port, method, params: {})
         browser._verify_profile_endpoint = \
             lambda profile, port=0: None                 # type: ignore[assignment]
-        browser._wait_ids_gone = lambda profile, ids: []     # type: ignore[assignment]
+        browser._wait_ids_gone = lambda profile, ids, port=0: []     # type: ignore[assignment]
         try:
             cases: list[tuple[dict[str, Any], dict[str, Any]]] = [
                 ({"like": ["t"]}, {"like": ["t"]}),
@@ -7383,12 +7400,44 @@ def t_the_node_lookup_does_not_drag_the_subtree() -> None:
     session = FakeSession("")
     assert dom._node_of(session, "el") == ""                    # noqa: SLF001
     assert session.calls == [], session.calls
-    # ...and the two callers pass it as `objectId`, never as a node
-    for module, needle in ((actions_lib, "DOM.focus"),
-                           (scroll_lib, "DOM.scrollIntoViewIfNeeded")):
-        source = Path(module.__file__).read_text(encoding="utf-8")
-        assert '"nodeId"' not in source, (module.__name__, "a nodeId is back")
-        assert f'"{needle}", {{"objectId": handle}}' in source, module.__name__
+    # ...and the two callers pass it as `objectId`, never as a node. DRIVEN,
+    # not grepped out of the source: the old source-text assertions failed a
+    # behaviour-preserving refactor and passed a caller that built the params
+    # in a variable, so they pinned spelling instead of the protocol (a review
+    # found it)
+    class CallSession(FakeSession):
+        """A session that records the (method, params) of every DOM call."""
+
+        def __init__(self) -> None:
+            super().__init__("obj-1")
+            self.methods: list[tuple[str, dict]] = []
+
+        def call(self, method: str, params: dict | None = None) -> dict:
+            self.methods.append((method, params or {}))
+            return {}
+
+    real_node = dom._node_of                                   # noqa: SLF001
+    real_matches = dom._matches_in                             # noqa: SLF001
+    dom._node_of = lambda session, expression: "obj-1"          # type: ignore[assignment]
+    dom._matches_in = (lambda session, needle, css, cap:          # type: ignore[assignment]
+                       _matches_data(_element_row()))
+    try:
+        session = CallSession()
+        actions_lib._focus_node(session, "q", "", None, {"tag": "input"},
+                                code="focus-not-verified", gone="left the "
+                                "document")
+        assert session.methods == [("DOM.focus", {"objectId": "obj-1"})], \
+            session.methods
+        session = CallSession()
+        with _capped_poll(scroll_lib):
+            scroll_lib._reveal(session, _SCRIPTED_ROW, _SCRIPTED_TAB,
+                               "q", None, None, {})
+        assert session.methods == [
+            ("DOM.scrollIntoViewIfNeeded", {"objectId": "obj-1"})], \
+            session.methods
+    finally:
+        dom._node_of = real_node                               # type: ignore[assignment]
+        dom._matches_in = real_matches                         # type: ignore[assignment]
 
 
 def t_focus_nodes_go_through_one_helper() -> None:
@@ -7607,7 +7656,7 @@ def t_close_resolve_and_verify_seam() -> None:
         browser._verify_profile_endpoint = (          # type: ignore[assignment]
             lambda profile, port=0: None)
         browser._wait_ids_gone = (                    # type: ignore[assignment]
-            lambda profile, ids: [])
+            lambda profile, ids, port=0: [])
         try:
             found, skipped, filter_used = browser._resolve_close_set(  # noqa: SLF001
                 [], "", "keep", None, False, [], [])
@@ -7738,7 +7787,7 @@ def t_close_of_the_only_tab_reads_exit_as_gone() -> None:
         assert cdp.listener_of(free) == {}, free
         Path(profile, cdp.PORT_FILE).write_text(f"{free}\n")
 
-        def unreachable(path: str) -> list[dict]:
+        def unreachable(path: str, port: int = 0) -> list[dict]:
             raise ControlError("cdp-unreachable", "the endpoint did not answer")
 
         real = browser._rows
@@ -8142,6 +8191,17 @@ def t_stop_refuses_a_known_tab_count() -> None:
             assert reply["tabs"] == 3 and reply["forced"] is True, reply
             assert len(signals.signals) == 1, signals.signals
             assert signals.signals[0][0] == 4321, signals.signals
+            # ...and a count the probe could NOT read, taken through by
+            # `--force`, still says `forced: true`: the flag is about the
+            # guard that was overridden, not about a number the endpoint
+            # could not give (`bool(tabs and force)` reported false while
+            # `tabs: null` — a review found it)
+            lifecycle_lib._page_count = (                        # type: ignore[assignment]
+                lambda profile, port=0: None)
+            reply = lifecycle_lib.stop(force=True)
+            assert reply["stopped"] is True and reply["tabs"] is None, reply
+            assert reply["forced"] is True, reply
+            assert len(signals.signals) == 2, signals.signals
         finally:
             (lifecycle_lib.managed_profile, lifecycle_lib.pid_of,
              lifecycle_lib._page_count, lifecycle_lib.pid_on_profile,
@@ -10308,7 +10368,6 @@ class _FakeRemote:
         self.ws_methods: list[str] = []
         self.connections = 0
         self.ws_port = 0
-        self.server: http.server.ThreadingHTTPServer | None = None
         self._ws_server: Any = None
         self._ws_thread: threading.Thread | None = None
 
@@ -10326,7 +10385,9 @@ class _FakeRemote:
                      f"ws://127.0.0.1:{self.ws_port}/devtools/page/TAB"}]
 
     def __enter__(self) -> _FakeRemote:
-        from websockets.sync.server import serve                # noqa: PLC0415
+        from websockets.datastructures import Headers          # noqa: PLC0415
+        from websockets.http11 import Response                 # noqa: PLC0415
+        from websockets.sync.server import serve               # noqa: PLC0415
 
         outer = self
 
@@ -10352,63 +10413,63 @@ class _FakeRemote:
                 else:
                     connection.send(json.dumps({"id": mid, "result": {}}))
 
-        self._ws_server = serve(handler, "127.0.0.1", 0)
+        def http(connection: Any, request: Any) -> Response | None:
+            """The CDP HTTP endpoints, on the SAME listener as the websocket.
+
+            A real Chromium serves `/json{,/version}` and the debugger
+            websocket from the port it binds, so the
+            `webSocketDebuggerUrl` it reports names that port. Splitting
+            them across two fake listeners made the fake answer with another
+            port — a peer no real browser could be — and the tool's port
+            check rightly refused it (a review found the port gap).
+            """
+            path = str(request.path)
+            if path not in ("/json", "/json/version"):
+                return None
+            outer.seen.append(path)
+            body: Any = (outer._version() if path == "/json/version"
+                         else outer._rows())
+            payload = json.dumps(body).encode()
+            return Response(
+                200, "OK",
+                Headers([("Content-Type", "application/json"),
+                         ("Content-Length", str(len(payload)))]),
+                payload)
+
+        self._ws_server = serve(handler, "127.0.0.1", 0,
+                                process_request=http)
         self.ws_port = int(self._ws_server.socket.getsockname()[1])
         self._ws_thread = threading.Thread(
             target=self._ws_server.serve_forever, daemon=True)
         self._ws_thread.start()
-
-        class HttpHandler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                outer.seen.append(self.path)
-                if self.path == "/json/version":
-                    body: Any = outer._version()
-                elif self.path == "/json":
-                    body = outer._rows()
-                else:
-                    self.send_error(404)
-                    return
-                payload = json.dumps(body).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, format: str, *args: object) -> None:
-                pass
-
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
-                                                      HttpHandler)
-        threading.Thread(target=self.server.serve_forever,
-                         daemon=True).start()
         return self
 
     @property
     def port(self) -> int:
-        assert self.server is not None
-        return int(self.server.server_address[1])
+        assert self._ws_server is not None
+        return int(self._ws_server.socket.getsockname()[1])
 
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
     def shutdown(self) -> None:
-        """Stop answering: the endpoint is GONE but the fake stays reusable.
+        """Stop answering: the endpoint is GONE for HTTP and the websocket.
 
-        The websocket peer is left alone (nothing dials it once the HTTP side
-        is gone), and `__exit__` tolerates an already-closed HTTP server.
+        One listener serves both, so closing it is exactly what a browser
+        exiting looks like: reachability reads false and nothing is dialled.
+        The object is not reusable after this; a check that needs a live
+        peer opens its own.
         """
-        if self.server is not None:
-            self.server.shutdown()
-            self.server.server_close()
-            self.server = None
+        if self._ws_server is not None:
+            self._ws_server.shutdown()
+            self._ws_server = None
+        if self._ws_thread is not None:
+            self._ws_thread.join(timeout=5)
+            self._ws_thread = None
 
     def __exit__(self, exc_type: object, exc: object,
                  tb: object) -> None:
-        if self.server is not None:
-            self.server.shutdown()
-            self.server.server_close()
         if self._ws_server is not None:
             self._ws_server.shutdown()
         if self._ws_thread is not None:
@@ -10884,6 +10945,518 @@ def t_remote_cli_grammar() -> None:
         assert rc == 2 and "--cdp-url" in err, (rc, err)
 
 
+def t_check_uncheck_of_a_vanished_control_is_no_verdict() -> None:
+    """`--uncheck` on a control that removes itself is NOT `checked: false`.
+
+    `CHECK_READ` answers `{found: false}` for an element that left the
+    document — a shape with no `checked` key. `bool(None)` is `False`, so the
+    absent sample satisfied the poll's wanted state AND both final guards:
+    the reply certified `checked: false, verified: true` about a control the
+    read-back never observed (a review measured a to-do row that disappears
+    when unchecked). The click still has to go out — this is a read-back
+    refusal, not a pre-click guard — and then `check-not-verified` must
+    refuse.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    probe = {"found": True, "tag": "input", "type": "checkbox",
+             "name": "input#tick", "checkable": True, "checked": True,
+             "disabled": False}
+    seen = {"reads": 0}
+
+    def route(expression: str) -> object:
+        if "checkable" not in expression:
+            return {}
+        seen["reads"] += 1
+        return dict(probe) if seen["reads"] == 1 else {"found": False}
+
+    page = _ScriptedPage(route)
+    real = (dom._resolve, dom._session, dom._matches_in)         # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._matches_in = (lambda session, needle, css, cap:          # noqa: SLF001
+                       _matches_data(_element_row()))
+    dom._session = lambda _row, _tab: page                        # noqa: SLF001
+    try:
+        with _capped_poll(actions_lib):
+            refusal(lambda: dom.check(selector="#tick", uncheck=True),
+                    "check-not-verified")
+        assert [c for c in page.calls
+                if c["method"] == "Input.dispatchMouseEvent"], page.calls
+    finally:
+        (dom._resolve, dom._session, dom._matches_in) = real      # noqa: SLF001
+
+
+def t_a_symlinked_root_is_one_profile() -> None:
+    """Both spellings of a linked root are ONE lock and ONE live browser.
+
+    `is_managed` accepts a profile by its REAL path, but the lock key and the
+    liveness census compare were lexical: with `BROWSER_CONTROL_ROOT` naming a
+    symlink, `<link>/chrome` and `<real>/chrome` took different lock files and
+    `refuse_live` read a running browser as idle — so `profile reset --force`
+    (or `seed --force`) could `rmtree` the directory of the browser it could
+    not see (a review measured the hole). Both comparisons resolve symlinks
+    now, so every spelling shares the guard.
+    """
+    base = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    real = os.path.join(base, "real")
+    os.makedirs(real)
+    link = os.path.join(base, "link")
+    os.symlink(real, link)
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = link
+    try:
+        spelled = os.path.join(link, "chrome")
+        resolved = os.path.join(real, "chrome")
+        # the premise: BOTH spellings are managed profiles
+        assert paths_lib.is_managed(spelled)
+        assert paths_lib.is_managed(resolved)
+        # one lock file for one directory — the profile's and the root's
+        assert paths_lib.lock_path(spelled) == paths_lib.lock_path(resolved)
+        assert paths_lib.lock_path(link) == paths_lib.lock_path(real)
+        # a browser that spelled the root through the link is still live
+        cmd = f"/usr/bin/chrome\0--user-data-dir={spelled}\0"
+        assert proc_lib.pid_on_marker(4321, cmd, resolved)
+        assert not proc_lib.pid_on_marker(
+            4321, cmd, os.path.join(real, "other"))
+        from browser_control.lib.instance import Instance
+        row = {"pid": 4321, "exe": "chrome", "profile": spelled}
+        real_browsers = browser.browsers
+        browser.browsers = lambda: [row]                       # type: ignore
+        try:
+            assert Instance(resolved).browsers_row() is row
+            assert Instance(resolved).live_pid() == 4321
+        finally:
+            browser.browsers = real_browsers                   # type: ignore
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def t_a_websocket_is_judged_by_the_port_it_answered_on() -> None:
+    """An endpoint's websocket URL must be ON the port the endpoint answered.
+
+    Chrome serves the debugger websocket on the same port as `/json` and
+    `/json/version`, and every fingerprint/owner check judged the port the
+    RECORD names — never the port the traffic actually went to. A process
+    holding the resolved port could answer with another local browser's
+    websocket and receive every click, keystroke and `tab js` this tool sends
+    (a review found the gap). The host guard alone cannot see it.
+    """
+    tab_url = "ws://127.0.0.1:9222/devtools/page/A"
+    assert cdp_rpc._ws_at_port(tab_url, "tab", 9222) == tab_url
+    refusal(lambda: cdp_rpc._ws_at_port(
+        "ws://127.0.0.1:9223/devtools/page/A", "tab", 9222),
+        "cdp-not-local")
+    refusal(lambda: cdp_rpc._ws_at_port(
+        "ws://evil.example:9222/devtools/page/A", "tab", 9222),
+        "cdp-not-local")
+    refusal(lambda: cdp_rpc._ws_at_port(
+        "ws://127.0.0.1/devtools/page/A", "tab", 9222), "cdp-not-local")
+    refusal(lambda: cdp_rpc._ws_at_port("ws://[::1/x", "tab", 9222),
+            "cdp-not-local")
+    # the seam a verb drives: /json/version answers with a FOREIGN-port
+    # websocket and `browser_ws_at` refuses before anything connects
+    real = cdp._get_port
+    cdp._get_port = lambda port, path: {                      # type: ignore
+        "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/B"}
+    try:
+        refusal(lambda: readback_lib.browser_ws_at(9223), "cdp-not-local")
+        landed = readback_lib.browser_ws_at(9222)
+        assert landed.endswith("/devtools/browser/B"), landed
+    finally:
+        cdp._get_port = real                                  # type: ignore
+
+
+def t_a_close_readback_never_turns_into_a_refusal() -> None:
+    """A verified close must not be reported failed by its own tab count.
+
+    `_tab_count` summed `_tabs_or_fail`, which refuses on any read error — so
+    `tab close --all` on the last tab (the browser exits, and its endpoint
+    can die between the census and the read) returned `ERR[cdp-error]` AFTER
+    every requested id was verified gone, contradicting the docstring's
+    promised `count: 0` success (a review found it). The tolerant count reads
+    the same error as "no tabs to count"; the refusing read stays for drives.
+    """
+    row = {"pid": 4321, "exe": "chrome", "profile": "/profiles/x"}
+    real = (browser._drivable, browser._tabs_of)                 # noqa: SLF001
+    browser._drivable = (                                        # type: ignore
+        lambda browser="", strict=True, rows=None: [row])
+    browser._tabs_of = (                                         # type: ignore
+        lambda row: ([], "the endpoint did not answer"))
+    try:
+        assert tabs_lib._tab_count() == 0
+        # the refusing read itself is untouched: a DRIVE still refuses
+        refusal(lambda: browser._tabs_or_fail(row), "cdp-error")
+    finally:
+        (browser._drivable, browser._tabs_of) = real             # noqa: SLF001
+
+
+def t_deeply_nested_json_is_a_typed_refusal() -> None:
+    """A JSON body past CPython's recursion limit reads as `cdp-error`.
+
+    `_get_port` caught only `ValueError`, but `json.loads` raises
+    `RecursionError` on deeply nested input (measured: 150 000 nested objects,
+    a 900 KB body — well inside both caps — raise it in 10 ms). The bytes are
+    a PEER's, and the raw exception escaped the typed-refusal contract as
+    ERR[internal] (a review found it). The same body in `attached.json` must
+    read as "no records".
+    """
+    deep = b'{"a":' * 150_000 + b"1" + b"}" * 150_000
+    with _patched(endpoint_lib, _get_bytes=lambda url: deep):
+        refusal(lambda: endpoint_lib._get_port(9222, "/json"), "cdp-error")
+    with tempfile.TemporaryDirectory() as rootdir:
+        keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+        os.environ["BROWSER_CONTROL_ROOT"] = rootdir
+        try:
+            Path(rootdir, attachments_lib.ATTACH_FILE).write_bytes(deep)
+            assert attachments_lib.STORE.records() == {}
+        finally:
+            _restore_root(keep_root)
+
+
+def t_the_root_is_narrowed_to_0700() -> None:
+    """A root that already existed at 0755 is narrowed on the next call.
+
+    `makedirs(mode=...)` applies only to a leaf it CREATES: a root from an
+    image, an older version or a plain `mkdir -p` kept the umask default and
+    every managed profile's NAME stayed listable to any local user (a review
+    flagged it). `ensure_root` is the one call every creator makes first.
+    """
+    base = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    root = os.path.join(base, "root")
+    os.makedirs(root)
+    os.chmod(root, 0o755)          # noqa: S103 — the vulnerable state tested
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        assert stat.S_IMODE(os.stat(root).st_mode) == 0o755
+        paths_lib.ensure_root()
+        assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def t_a_store_without_a_private_root_refuses() -> None:
+    """No credential byte copy into `TMPDIR` when the root cannot be private.
+
+    `_store_workspace` fell back to `tempfile.gettempdir()`, which the
+    ENVIRONMENT chooses (`TMPDIR` — a shell, a wrapper): a byte copy of
+    `Cookies`/`Login Data` could be left under a directory this CLI does not
+    own (a review flagged it). The fallback is gone; the read reports an
+    unreadable store instead of copying credentials somewhere unprotected.
+    """
+    from browser_control.lib.profile import stores as stores_lib  # noqa: PLC0415
+    real_root = stores_lib._copy_root
+    real_sweep = stores_lib._sweep_copies
+    stores_lib._copy_root = lambda: ""                          # type: ignore
+    stores_lib._sweep_copies = (                                # type: ignore
+        lambda parent, pattern: None)
+    try:
+        try:
+            stores_lib._store_workspace()
+            raise AssertionError("expected OSError for a non-private root")
+        except OSError as e:
+            assert "private" in str(e), e
+    finally:
+        stores_lib._copy_root = real_root                      # type: ignore
+        stores_lib._sweep_copies = real_sweep                  # type: ignore
+
+
+def t_a_vanished_source_is_changed_not_failed() -> None:
+    """A source file gone between the walk and the copy is `changed`.
+
+    `_source_size` documents it — a running browser unlinks rollback journals
+    and rotates leveldb logs — but `copy2`'s ENOENT was a hard `seed-failed`
+    for the WHOLE seed, making the documented main case (seeding a live
+    profile) unusable (a review flagged it). Only the vanished file is
+    dropped, as `changed`.
+    """
+    base = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = os.path.join(base, "root")
+    source = os.path.join(base, "source")
+    os.makedirs(source)
+    Path(source, "Cookies").write_text("x", encoding="utf-8")
+    Path(source, "Login Data").write_text("y", encoding="utf-8")
+    target = os.path.join(base, "target")
+    real_copy2 = seedtree_lib.shutil.copy2
+
+    def vanish(src: str, dst: str) -> object:
+        if os.path.basename(src) == "Cookies":
+            raise FileNotFoundError(2, "No such file or directory", src)
+        return real_copy2(src, dst)
+
+    try:
+        with _patched(seedtree_lib.shutil, copy2=vanish):
+            facts = seedtree_lib.copy_verified(source, target, False,
+                                               skips=frozenset())
+            assert os.path.join(source, "Cookies") in facts.changed, \
+                facts.changed
+            assert Path(target, "Login Data").exists()
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def t_a_dead_version_read_is_an_empty_frame_census() -> None:
+    """`frame_targets` returns [] when `/json/version` stops answering.
+
+    Its docstring promises `[]` means "the browser did not say", and the frame
+    census has an `unattributable` answer for exactly that case; the unwrapped
+    `_get_port` raised `cdp-error` out of `tab frames` instead (a review found
+    it). A browser dying between the two reads is the normal way there.
+    """
+    targets_lib = import_module("browser_control.lib.cdp.targets")
+
+    def dead(port: int, path: str) -> object:
+        raise ControlError("cdp-unreachable", "the endpoint did not answer")
+
+    with _patched(targets_lib, _get_port=dead):
+        assert targets_lib.frame_targets(9222) == []
+
+
+def t_type_counts_only_committed_characters() -> None:
+    """`type "hi\\n"` must not be read as "only 2 of 3 landed".
+
+    ENTER commits no character — the newline becomes a key event, not text —
+    so judging the field's growth by `len(text)` reported a correct write as
+    an unclear partial landing (a review found the false negative). The
+    verdict judges the committed count; the reply still says what TEXT the
+    caller gave.
+    """
+    row, tab_row = _SCRIPTED_ROW, _SCRIPTED_TAB
+    reads = {"n": 0}
+
+    def route(expression: str) -> object:
+        if "editable" in expression:
+            reads["n"] += 1
+            return {"focused": True, "frame": False, "editable": True,
+                    "secret": False, "active": "input#s",
+                    "target": "input#s@0.1",
+                    "length": 0 if reads["n"] == 1 else 2}
+        return {}
+
+    page = _ScriptedPage(route)
+    real = (dom._resolve, dom._session)                           # noqa: SLF001
+    dom._resolve = (lambda tab="", browser="",                    # noqa: SLF001
+                    for_write=True: (row, tab_row))
+    dom._session = lambda _row, _tab: page                        # noqa: SLF001
+    try:
+        reply = dom.type_text("hi\n")
+        assert reply["verified"] is True, reply
+        assert reply["inserted"] == 2, reply
+        assert reply["chars"] == 3, reply       # the TEXT the caller gave
+        events = [c for c in page.calls
+                  if c["method"] == "Input.dispatchKeyEvent"]
+        assert [e["type"] for e in events] == [
+            "keyDown", "char", "keyUp", "keyDown", "char", "keyUp",
+            "keyDown", "keyUp"], events
+    finally:
+        (dom._resolve, dom._session) = real                       # noqa: SLF001
+
+
+def t_a_page_ts_cannot_become_selector_syntax() -> None:
+    """A page-controlled `data-ts` may not splice selector syntax into a read.
+
+    `_parts` builds `[data-ts="…"]` from values the PAGE rendered: a hostile
+    page could set `data-ts='x"] , [data-secret] , [data-ts="'` and change
+    what the extraction reads (no JavaScript execution — the value crosses as
+    JSON — but the read's scope was the page's to choose; a review found it).
+    Only Slack's own ts shape passes, and a rejected value never reaches the
+    selector builder.
+    """
+    import importlib.util as importlib_util                      # noqa: PLC0415
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    spec = importlib_util.spec_from_file_location(
+        "browser_control_test_slack_reader",
+        os.path.join(repo, "plugins", "slack_reader.py"))
+    assert spec is not None and spec.loader is not None
+    slack = importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(slack)
+    assert slack._canonical_ts("1790340351.996489") == \
+        "1790340351.996489"
+    assert slack._canonical_ts(" 1790340351.996489 ") == \
+        "1790340351.996489"
+    for hostile in ('x"] , [data-secret] , [data-ts="', "x] , *", "",
+                    None, "1790340351", "1.2<script>",
+                    "1" + "2" * 13 + ".5"):
+        assert slack._canonical_ts(hostile) == "", hostile
+    found, truncated = slack._parts(
+        ['x"] , [data-secret] , [data-ts="'], "TAB", "", 10)
+    assert (found, truncated) == ({}, False)
+
+
+def t_the_close_readback_reads_the_endpoint_it_judges() -> None:
+    """`_wait_ids_gone` reads the SAME listener its readability check judges.
+
+    The probe read through `_rows(profile)` — `driver_port` — while the
+    `endpoint` the caller passed only fed the refusal: a close aimed at a
+    row's port could be read back through a different listener, reporting a
+    survivor gone (a review found the split). The passed port is the read's
+    port now.
+    """
+    seen: list[int] = []
+
+    def seen_rows(profile: str, port: int = 0) -> list[dict]:
+        seen.append(port)
+        return []
+
+    with _patched(browser, _rows=seen_rows):
+        gone = readback_lib._wait_ids_gone("p", ["A"], timeout=0.05,
+                                           port=1234)
+        assert gone == []
+        assert seen == [1234], seen
+
+
+def t_an_owner_verdict_can_be_refreshed() -> None:
+    """`endpoint_owner(refresh=True)` re-walks: a memo must not outlive a stop.
+
+    The stop proof asked the MEMOIZED verdict — populated by `_page_count`
+    moments before the SIGTERM — so a browser that had already exited still
+    verified, and every real `close` failed `browser-not-stopped` (the live
+    battery caught it). The explicit refresh is the staleness guard.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = int(probe.getsockname()[1])
+    profile = "/profiles/memo"
+    key = (profile, free)
+    browser.GUARD._cache[key] = {"verified": True, "pid": 1}   # noqa: SLF001
+    try:
+        assert browser.endpoint_owner(profile, free)["verified"] is True
+        fresh = browser.endpoint_owner(profile, free, refresh=True)
+        assert fresh["verified"] is False, fresh
+    finally:
+        browser.GUARD._cache.pop(key, None)                    # noqa: SLF001
+
+
+def t_every_check_is_registered() -> None:
+    """Every module-level `t_*` check is in the tuple `main()` runs.
+
+    The registry is a hand-kept tuple of ~200 names: a new check that was not
+    added to it never ran and the suite still printed PASS (no discovery
+    existed). This check is appended to the tuple itself, so it cannot be
+    forgotten the same way (a review found the gap).
+    """
+    missing = sorted(
+        name for name, value in globals().items()
+        if name.startswith("t_") and callable(value)
+        and getattr(value, "__module__", "") == __name__
+        and value not in REGISTERED)
+    assert not missing, f"checks missing from main()'s registry: {missing}"
+
+
+def t_usage_names_every_registered_verb() -> None:
+    """`USAGE` names every registered verb and subcommand.
+
+    `USAGE` is the source of both `--help` and the `--bogus` usage hint; the
+    existing scan only asserted "more than 30 heads", so a verb added to
+    `registry.HANDLERS` but forgotten in the help text silently vanished from
+    `--help` and lost its hint, falling back to "…--help lists every verb" (a
+    review found the gap). Built-ins only: plugin verbs come from the
+    plugin's own `usage` field.
+    """
+    heads: set[str] = set()
+    for line in cli_main.USAGE.splitlines():
+        head = cli_main._usage_head(line)
+        if not head:
+            continue
+        for call in cli_main._usage_heads(head):
+            if not call:
+                continue
+            heads.add(call[0])
+            if len(call) > 1 and not str(call[1]).startswith("-"):
+                # a noun's subcommand (`tab list`) is named by two tokens; a
+                # top-level verb's positional (`open URL`) is not
+                heads.add(" ".join(call[:2]))
+    missing: list[str] = []
+    for verb in registry.HANDLERS:
+        if str(verb) not in heads:
+            missing.append(str(verb))
+    for verb, table in (("tab", registry.TAB_SUBCOMMANDS),
+                        ("profile", registry.PROFILE_SUBCOMMANDS),
+                        ("remote", registry.REMOTE_SUBCOMMANDS)):
+        for sub in table:
+            if f"{verb} {sub}" not in heads:
+                missing.append(f"{verb} {sub}")
+    assert not missing, f"USAGE does not name: {sorted(missing)}"
+
+
+def t_instance_locks_order_root_then_profile() -> None:
+    """The root lock is held while the profile lock is taken; `--dry` takes none.
+
+    `instance_locks` is where the safe ORDERING lives (its docstring says so),
+    and nothing drove it: swapping the two locks, or a `--dry` run that created
+    the profile lock (and `<root>/.locks/`), shipped green (a review found the
+    zero coverage).
+    """
+    from browser_control.lib import locks as locks_lib    # noqa: PLC0415
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        profile = os.path.join(root, "chrome")
+        os.makedirs(profile)
+        root_lock = paths_lib.lock_path(root)
+        profile_lock = paths_lib.lock_path(profile)
+        with locks_lib.instance_locks(root_lock, profile_lock, "test") as (
+                held_root, held_profile):
+            assert held_root.held and held_profile.held
+            # the root lock IS held while the profile lock is acquired: a
+            # second independent open (flock is per open file description)
+            # refuses, and so does a take of the profile lock
+            for path in (root_lock, profile_lock):
+                refusal(lambda path=path: _nested_lock(path), "profile-busy")
+        # `--dry`: taking the profile lock would CREATE it (and the lock
+        # directory), and a dry run writes nothing
+        dry_profile = paths_lib.lock_path(os.path.join(root, "dry"))
+        assert not os.path.exists(dry_profile)
+        with locks_lib.instance_locks(root_lock, dry_profile, "test",
+                                      skip_profile_lock=True) as (
+                held_root, held_profile):
+            assert held_root.held and held_profile.held
+        assert not os.path.exists(dry_profile), dry_profile
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _nested_lock(path: str) -> None:
+    """Take a lock that is already held by this call, or raise `profile-busy`."""
+    with browser._lock(path, "test", wait=0.0):          # noqa: SLF001
+        raise AssertionError(f"{path} was taken while held")
+
+
+def t_a_wiped_profile_is_detached_from_the_store() -> None:
+    """`reset --force` drops the profile's attach record as it wipes it.
+
+    The destructive branch (`drop_unlocked`) runs on every seed/reset wipe and
+    no check ever attached a profile first: regressing to the lock-taking
+    `drop()` while `instance_locks` already holds the root lock would re-flock
+    the same file, wait out the 20 s budget and refuse `profile-busy` — the
+    suite would only look slow, and only the live battery would notice (a
+    review found it).
+    """
+    root = tempfile.mkdtemp(prefix="browser-control-hermetic-")
+    keep_root = os.environ.get("BROWSER_CONTROL_ROOT")
+    os.environ["BROWSER_CONTROL_ROOT"] = root
+    try:
+        target = os.path.join(root, "managed")
+        os.makedirs(target)
+        paths_lib.mark(target)
+        attachments_lib.STORE.put({"profile": target, "pid": 4321,
+                                   "exe": "chrome", "managed": True})
+        assert attachments_lib.STORE.is_attached(target) is True
+        reply = profile_lib.reset(profile=target, force=True)
+        assert reply["reset"] is True, reply
+        assert reply["detached"] is True, reply
+        assert attachments_lib.STORE.is_attached(target) is False
+    finally:
+        _restore_root(keep_root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
     global SUITE_LOG
     # Pin everything the checks depend on, UNCONDITIONALLY: a host-exported
@@ -10902,7 +11475,7 @@ def main() -> int:
         prefix="browser-control-plugins-")
     for name in ("BROWSER_CONTROL_ALLOW", "BROWSER_CONTROL_DENY"):
         os.environ.pop(name, None)
-    for name, fn in (
+    checks = (
         ("safe_url policy", t_safe_url),
         ("resolve_tab refuses ambiguity", t_resolve_tab),
         ("launch flags make a profile drivable", t_launch_flags),
@@ -11217,7 +11790,45 @@ def main() -> int:
          t_remote_selection_and_detach),
         ("the remote surface is declared", t_remote_surface_is_declared),
         ("remote argv grammar", t_remote_cli_grammar),
-    ):
+        ("a check of a vanished control is no verdict",
+         t_check_uncheck_of_a_vanished_control_is_no_verdict),
+        ("one profile, one lock, through a symlinked root",
+         t_a_symlinked_root_is_one_profile),
+        ("a websocket is judged by the port it answered on",
+         t_a_websocket_is_judged_by_the_port_it_answered_on),
+        ("a close read-back never turns into a refusal",
+         t_a_close_readback_never_turns_into_a_refusal),
+        ("deep JSON is a typed refusal",
+         t_deeply_nested_json_is_a_typed_refusal),
+        ("the root is narrowed to 0700", t_the_root_is_narrowed_to_0700),
+        ("a store without a private root refuses",
+         t_a_store_without_a_private_root_refuses),
+        ("a vanished source is changed, not failed",
+         t_a_vanished_source_is_changed_not_failed),
+        ("a dead version read is an empty frame census",
+         t_a_dead_version_read_is_an_empty_frame_census),
+        ("type counts only committed characters",
+         t_type_counts_only_committed_characters),
+        ("a page ts cannot become selector syntax",
+         t_a_page_ts_cannot_become_selector_syntax),
+        ("the close read-back reads the endpoint it judges",
+         t_the_close_readback_reads_the_endpoint_it_judges),
+        ("an owner verdict can be refreshed",
+         t_an_owner_verdict_can_be_refreshed),
+        ("USAGE names every registered verb",
+         t_usage_names_every_registered_verb),
+        ("instance locks take the root first, dry takes none",
+         t_instance_locks_order_root_then_profile),
+        ("a wiped profile is detached from the store",
+         t_a_wiped_profile_is_detached_from_the_store),
+    )
+    # the self-check is part of the tuple, and the registry is filled from the
+    # tuple INCLUDING it (a check that is in `checks` is by definition run)
+    checks = (*checks, ("every check is registered",
+                        t_every_check_is_registered))
+    REGISTERED.clear()
+    REGISTERED.update(fn for _name, fn in checks)
+    for name, fn in checks:
         check(name, fn)
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed, {len(SKIP)} skipped")
     for name, why in SKIP:

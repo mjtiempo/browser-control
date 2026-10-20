@@ -641,9 +641,16 @@ EXTRACT_EXPR = ("JSON.stringify((() => {" + PRELUDE + r"""
   }
   return {
     // clipped like FIND_EXPR's: the RECORDS are what the schema's `budget`
-    // bounds, and a 2 MB title must not ride over it (see PRELUDE)
-    url: clip(location.href, 2000), title: clip(document.title, 300),
-    visibility: document.visibilityState,
+    // bounds, and a 2 MB title must not ride over it (see PRELUDE).
+    //
+    // `R.doc`, not `document`: a same-process `--frame` read is rooted at the
+    // frame's contentDocument while the session stays the PAGE, so the bare
+    // `document`/`location` reported the TOP page's url/title/visibility
+    // beside records read from the frame — TEXT_EXPR already used `R.doc`,
+    // and the two siblings disagreed about which document they named (a
+    // review found it).
+    url: clip(R.doc.location.href, 2000), title: clip(R.doc.title, 300),
+    visibility: R.doc.visibilityState,
     total: candidates.length, matches: records,
     truncated: budget_hit || candidates.length > records.length};
 })())""")

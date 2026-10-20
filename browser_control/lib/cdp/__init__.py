@@ -36,8 +36,10 @@ from browser_control.lib.cdp.rpc import (  # noqa: F401
     PARKED_BUDGET_S,
     UNDEFINED,
     _await_reply,
+    _checked_ws,
     _page_enable,
     _value_of,
+    _ws_at_port,
     websockets,
 )
 from browser_control.lib.cdp.session import (  # noqa: F401
@@ -48,7 +50,6 @@ from browser_control.lib.cdp.session import (  # noqa: F401
     require_websockets,
 )
 from browser_control.lib.cdp.targets import (  # noqa: F401
-    _checked_ws,
     _of_kind,
     _pages,
     browser_call,

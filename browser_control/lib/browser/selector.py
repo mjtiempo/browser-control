@@ -15,7 +15,7 @@ from browser_control.lib.errors import (
     ERR_BAD_ARGS,
     fail,
 )
-from browser_control.lib.paths import norm
+from browser_control.lib.paths import identity
 
 __all__ = ["Selector"]
 
@@ -73,9 +73,9 @@ class Selector:
             return next((r for r in rows
                          if r["pid"] == as_int(self.pid)), None)
         if self.profile:
-            want = norm(self.profile)
+            want = identity(self.profile)
             return next((r for r in rows
-                         if norm(str(r["profile"])) == want), None)
+                         if identity(str(r["profile"])) == want), None)
         want_port = as_int(self.port)
         return next((r for r in rows
                      if as_int((r.get("cdp") or {}).get("port")) == want_port), None)

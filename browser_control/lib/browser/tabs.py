@@ -193,13 +193,20 @@ def resolve_across(specs: list[str], browser: str,
     return found
 
 def _tab_count() -> int:
-    """How many page tabs the drivable browsers show right now."""
-    # a READ-BACK after a close must not turn into a refusal: `tab close --all`
-    # on the last tab makes the browser exit, and its endpoint can stop
-    # answering before the close is reported — the strict form then said
-    # `cdp-not-local` about an unrelated browser AFTER the tabs were gone (a
-    # review flagged it).
-    return sum(len(_pkg._tabs_or_fail(row)) for row in _pkg._drivable(strict=False))
+    """How many page tabs the drivable browsers show right now.
+
+    A TOLERANT read: a browser that stopped answering between the census and
+    this read contributes none, never a refusal. `tab close --all` on the
+    last tab makes the browser exit, and its endpoint can stop answering
+    before the close is reported: the strict form said `cdp-not-local` about
+    an unrelated browser AFTER the tabs were gone (a review flagged it), and
+    `_tabs_or_fail` still said `cdp-error` in the same window — a read-back
+    after a close this call already VERIFIED must not turn into a failure (a
+    review found the remaining half). The refusing read is still what a
+    DRIVE uses; only the count reads through `_tabs_of`'s error.
+    """
+    return sum(len(_pkg._tabs_of(row)[0])
+               for row in _pkg._drivable(strict=False))
 
 def tab_info(spec: str, browser: str = "") -> dict:
     """`tab info`: one tab, resolved across the drivable browsers.
@@ -427,8 +434,12 @@ def _close_and_verify(ours: list[tuple[dict, dict, int]]) -> None:
             browser_call_at(profile, port, "Target.closeTarget",
                             {"targetId": target_id})
     survivors: list[str] = []
-    for profile, (_row, ids) in by_profile.items():
-        survivors += _pkg._wait_ids_gone(profile, ids)
+    for profile, (row, ids) in by_profile.items():
+        # the READ-BACK is aimed at the same endpoint the close used
+        # (`row_port`), never the file: a browser started with an explicit
+        # `--remote-debugging-port` writes no port file, and a read through
+        # the file could judge a different listener than the one written to
+        survivors += _pkg._wait_ids_gone(profile, ids, port=row_port(row))
     if survivors:
         fail(ERR_CLOSE_TAB_NOT_VERIFIED,
              f"{len(survivors)} of {len(ours)} tabs are still open: "

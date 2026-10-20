@@ -21,9 +21,9 @@ from browser_control.lib.errors import (
 )
 from browser_control.lib.paths import (
     expand,
+    identity,
     is_managed,
     is_remote_key,
-    norm,
     profile_dir,
     root,
 )
@@ -93,19 +93,20 @@ class Instance:
 
     def browsers_row(self) -> dict | None:
         """The census row for this instance, or None when no browser is on it."""
-        wanted = norm(self.path)
+        wanted = identity(self.path)
         return next((row for row in browser_lib.browsers()
-                     if row["pid"] and norm(str(row["profile"])) == wanted),
+                     if row["pid"] and identity(str(row["profile"])) == wanted),
                     None)
 
     def live_pid(self) -> int:
         """The pid of the browser running on this profile, or 0.
 
-        Compared by NORMALISED path: a browser spells its `--user-data-dir`
-        however it was launched (a trailing slash, a `..`, a symlinked root),
-        and an exact string compare read a live profile as idle — which for
-        `profile reset` means wiping a running browser's directory (a review
-        flagged it).
+        Compared by CANONICAL path (`identity`): a browser spells its
+        `--user-data-dir` however it was launched (a trailing slash, a `..`,
+        a symlinked root), and `is_managed` accepts both spellings, so an
+        exact string compare — or one that stopped at the lexical path — read
+        a live profile as idle. For `profile reset` that means wiping a
+        running browser's directory (a review measured it).
         """
         if not self.path:
             return 0

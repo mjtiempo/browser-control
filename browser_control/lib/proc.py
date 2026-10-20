@@ -23,7 +23,7 @@ from browser_control.lib.errors import (
     ControlError,
 )
 from browser_control.lib.paths import (
-    norm,
+    identity,
     pid_file,
 )
 
@@ -186,11 +186,14 @@ def main_processes() -> list[tuple[int, str, str]]:
 def pid_on_marker(pid: int, cmd: str, profile: str) -> bool:
     """Does that process's cmdline name this profile, however it was spelled?
 
-    The marker is `--user-data-dir=<normalised profile>`: a browser launched
-    with a trailing slash, a `..` or a symlinked root is still this profile's.
+    The marker is `--user-data-dir=<profile>`: a browser launched with a
+    trailing slash, a `..` or a symlinked root is still this profile's. The
+    comparison resolves symlinks (`identity`): `is_managed` accepts a profile
+    by its REAL path, so a lexical compare read a running browser as idle and
+    a wipe of its directory passed the liveness guard (a review measured it).
     """
     spelled = cmdline_value(cmd, "--user-data-dir")
-    return bool(spelled) and norm(spelled) == norm(profile)
+    return bool(spelled) and identity(spelled) == identity(profile)
 
 
 def find_pid(profile: str) -> int:

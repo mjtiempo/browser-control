@@ -208,6 +208,40 @@ def _int(value: str, what: str) -> int:
     except (TypeError, ValueError):
         fail(ERR_BAD_ARGS, f"{what} needs a number, got {value!r}")
 
+def _bounded_int(value: str | None, where: str, *, default: int, low: int,
+                 high: int | None = None, below: str = "") -> int:
+    """A numeric flag: the default when absent, a floor refusal, a ceiling CLAMP.
+
+    The parse and its "needs a number" refusal stay `_int`'s; this adds the two
+    bounds every plugin numeric option was spelling out by hand — eight copies
+    across four plugins, one policy declared in eight places (a review found
+    it). `high=None` means no ceiling; `below` overrides the floor refusal's
+    wording where the option owns its own sentence ("must be 0 or more" for a
+    budget where zero is meaningful), and the default names the flag and the
+    floor. The number is appended to either wording, so both read the way the
+    hand-written refusals did.
+    """
+    number = _int(value, where) if value is not None else default
+    if number < low:
+        wording = below or f"{where} must be at least {low}"
+        fail(ERR_BAD_ARGS, f"{wording}, got {number}")
+    return number if high is None else min(number, high)
+
+def _text_or_selector(verb: str, needle: str | None,
+                      selector: str | None) -> None:
+    """Refuse "no spec" and "two specs" for a verb that takes exactly one.
+
+    The rule and BOTH refusal strings are the frozen contract, and four tab
+    verbs (`check`, `select`, `find`, `focus`) spelled them out identically:
+    a wording or rule change silently drifted in three of them (a review found
+    the duplication). `verb` is the only thing that differs.
+    """
+    if (needle is None) == (selector is None):
+        if not needle and not selector:
+            fail(ERR_BAD_ARGS, f"{verb}: give TEXT or --selector CSS")
+        fail(ERR_BAD_ARGS,
+             f"{verb}: give TEXT or --selector CSS, not both")
+
 def _float(value: str, what: str) -> float:
     try:
         number = float(str(value))
