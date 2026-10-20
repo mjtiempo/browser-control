@@ -30,6 +30,16 @@ Absence and failure are different answers: only `wait-timeout` — the refusal
 is not there". Every other refusal is re-raised or recorded, never folded into
 `no-next`: a closed tab used to be reported as the honest end of the list.
 
+A rendered result's LINK shape is the part that moved last: the JS SERP no
+longer puts the destination in the document. Every card's anchor is a
+same-origin redirect (`/goto?url=<opaque blob>`, older variants `/url?q=…`),
+the blob does not decode to a URL, and the `cite` breadcrumb the page shows is
+truncated by the page itself. So a row keeps the page's own link, absolutized
+(`url`), plus the display address the card rendered (`site`) — the wrapper does
+redirect when navigated, and `site` is what says where it really goes. Reading
+only absolute `href`s dropped every row on such a SERP and reported `count: 0`
+against a page full of results (a live run found it).
+
 The selector map below is the part that breaks when Google's DOM changes, so it
 is kept in one place at the top — as ORDERED candidates: the first selector the
 page renders is the one extraction runs with, and the reply's `selectors` block
@@ -71,6 +81,7 @@ FIELDS = [
     "title=h3",
     "url=a@href",
     "snippet=div.VwiC3b, div[data-sncf]",
+    "site=cite",
 ]
 
 DEFAULT_CAP = 10
@@ -140,26 +151,78 @@ def _rendered(candidates: tuple[str, ...], full_s: float, probe_s: float,
     return "", False
 
 
+def _destination(href: str, site: str) -> str:
+    """The address one card's link points at, or `""` when it points nowhere.
+
+    An absolute `href` is used as-is. Google's wrapper is the ordinary case on
+    the JS SERP — a same-origin `/goto?url=…` (or the older `/url?q=…`) whose
+    blob is opaque and whose destination the card only shows as a truncated
+    `cite` — so it is kept and absolutized against the homepage: it is the
+    page's own link and it does redirect when navigated. Only when there is no
+    usable `href` at all does the `cite` breadcrumb's leading token stand in,
+    which is then the only address the page has.
+    """
+    href = (href or "").strip()
+    if href.startswith(("https://", "http://")):
+        return href
+    if href.startswith("//"):                  # a protocol-relative href
+        return "https:" + href
+    if href.startswith("/"):                   # the site's own redirect wrapper
+        return HOME.rstrip("/") + href
+    lead = (site or "").strip().split(" ")[0]
+    return lead if lead.startswith(("https://", "http://")) else ""
+
+
+def _site(text: str) -> str:
+    """The card's display ADDRESS, when the card rendered one.
+
+    `cite` is the address line on a web result and, on a video or social card,
+    the engagement line ("4.6K+ views · 2 weeks ago") — which names no address
+    at all and is dropped rather than passed on as if it did. What survives is
+    the page's own truncated display URL, the only thing that says where a
+    wrapper link goes.
+    """
+    text = (text or "").strip()
+    return text if text.startswith(("https://", "http://")) else ""
+
+
+def _key(row: dict) -> str:
+    """One result's identity for de-duplication.
+
+    A wrapper's blob is minted per render, so the same result read on page 1
+    and on page 3 is NOT the same string: de-duplicating by `url` there repeats
+    every row on every page. The `site` the card displays plus its title is what
+    actually identifies the result; a row with no `site` is its URL.
+    """
+    site = str(row.get("site") or "").strip()
+    return f"{site}|{row['title']}" if site else str(row["url"])
+
+
 def _results(records: list[dict]) -> list[dict]:
-    """The extraction's rows as results: title, url, snippet.
+    """The extraction's rows as results: title, url, snippet, site.
 
     The selector already asks for cards WITH a heading, so this is the safety
-    net around it: a row with no title or no URL is not a result this verb can
-    name and is dropped, and a repeated URL is kept once, first occurrence —
-    WITHIN one page. Merging across pages is `_absorb`'s job.
+    net around it: a row with no title or no destination (`_destination`) is not
+    a result this verb can name and is dropped, and a repeated result is kept
+    once, first occurrence — WITHIN one page. Merging across pages is
+    `_absorb`'s job.
     """
     out: list[dict] = []
     seen: set[str] = set()
     for record in records:
         title = str(record.get("title") or "").strip()
-        url = str(record.get("url") or "").strip()
-        if not title or not url.startswith("http"):
+        site = _site(str(record.get("site") or ""))
+        url = _destination(str(record.get("url") or ""), site)
+        if not title or not url:
             continue
-        if url in seen:
+        row = {"title": title, "url": url,
+               "snippet": str(record.get("snippet") or "").strip(),
+               "site": site}
+        key = _key(row)
+        if key in seen:
             continue
-        seen.add(url)
-        out.append({"title": title, "url": url,
-                    "snippet": str(record.get("snippet") or "").strip()})
+        seen.add(key)
+        out.append(row)
     return out
 
 
@@ -167,14 +230,16 @@ def _absorb(results: list[dict], seen: set[str], batch: list[dict],
             page: int) -> None:
     """Merge one page's rows: first occurrence wins, and it says which page.
 
-    Google repeats rows between pages, so the cross-page rule is the URL, and
-    every kept row is stamped with the 1-based page it came from — that is how
-    a merged list stays explainable.
+    Google repeats rows between pages, so the cross-page rule is `_key` — a
+    wrapper's URL is not stable between renders — and every kept row is stamped
+    with the 1-based page it came from, which is how a merged list stays
+    explainable.
     """
     for row in batch:
-        if row["url"] in seen:
+        key = _key(row)
+        if key in seen:
             continue
-        seen.add(row["url"])
+        seen.add(key)
         row["page"] = page
         results.append(row)
 
@@ -194,7 +259,7 @@ def _next_page(before_url: str, seen: set[str], selector: str, cap: int,
                                   chars=CHARS, tab=tab, browser=browser)
         rows = _results(data.get("matches") or [])
         moved = str(data.get("url") or "") != before_url
-        fresh = any(row["url"] not in seen for row in rows)
+        fresh = any(_key(row) not in seen for row in rows)
         if moved or fresh:
             return data
         if time.monotonic() >= deadline:
@@ -399,7 +464,10 @@ def run(rest: list[str], browser: str) -> dict:
                  "submitted with Enter — no query URL was built, and further "
                  "pages are the site's own Next control, clicked; `landed_on` "
                  "is the first address the SITE put in the bar, and the "
-                 "values are the page's, not this tool's"),
+                 "values are the page's, not this tool's; `url` is the card's "
+                 "own link absolutized — Google hands results out as a "
+                 "same-origin redirect, so `site` (the display address the "
+                 "card rendered) is where that link actually goes"),
     }
 
 

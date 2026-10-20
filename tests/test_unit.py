@@ -6734,7 +6734,7 @@ def t_google_plugin_offline() -> None:
     calls: dict[str, list] = {"nav": [], "focus": [], "type": [], "press": [],
                               "scroll": [], "click": []}
     state = {"verified": True, "served": 0, "missing": (),
-             "failing": (), "raise_on_type": None}
+             "failing": (), "raise_on_type": None, "override": None}
     # two SERPs the fake serves in order — page 2 repeats nothing, so the
     # merge has something to merge and the `page` stamps differ
     pages = (
@@ -6757,7 +6757,8 @@ def t_google_plugin_offline() -> None:
         for key in calls:
             calls[key].clear()
         state.update({"verified": True, "served": 0, "missing": (),
-                      "failing": (), "raise_on_type": None})
+                      "failing": (), "raise_on_type": None,
+                      "override": None})
 
     def fake_nav(url: str, tab: str = "", browser: str = "") -> dict:
         calls["nav"].append((url, tab))
@@ -6818,7 +6819,7 @@ def t_google_plugin_offline() -> None:
     def fake_extract(each: str = "", fields: list | None = None, cap: int = 0,
                      chars: int = 0, visible: bool = False, unique: str = "",
                      tab: str = "", browser: str = "") -> dict:
-        page = pages[min(state["served"], len(pages) - 1)]
+        page = state["override"] or pages[min(state["served"], len(pages) - 1)]
         state["served"] += 1
         return {"ok": True, "truncated": False, "url": page["url"],
                 "matches": page["matches"]}
@@ -6927,6 +6928,39 @@ def t_google_plugin_offline() -> None:
         data = json.loads(out)
         assert data["selectors"]["results"] == "div.g:has(h3)", data
         assert data["count"] == 2, data
+
+        # a JS SERP links every result through Google's own redirect wrapper
+        # and shows the destination only as a `cite` breadcrumb. Those rows ARE
+        # results — they used to be dropped for not starting with `http`, so a
+        # page full of them read as `count: 0` with `matched: true` (a live run
+        # found it). The wrapper is kept and absolutized, and the identity that
+        # de-duplicates is `site`+title, because the blob is minted per render:
+        # the same result on two pages is not the same string
+        fresh()
+        state["override"] = {"url": None, "matches": [
+            {"title": "Wrapped", "url": "/goto?url=CAESone",
+             "snippet": "w", "site": "https://w.example \u203a news"},
+            {"title": "Wrapped", "url": "/goto?url=CAEStwo",
+             "snippet": "w", "site": "https://w.example \u203a news"},
+            {"title": "No href", "url": "", "snippet": "c",
+             "site": "https://c.example \u203a a"},
+            {"title": "Video card", "url": "/goto?url=CAESvid",
+             "snippet": "v", "site": "4.6K+ views \u00b7 2 weeks ago"},
+            {"title": "Nowhere", "url": "", "snippet": "e", "site": ""}]}
+        rc, out, err = run_cli(["google", "search", "q", "--cap", "5",
+                                "--max-pages", "1"])
+        assert rc == 0, (rc, err)
+        data = json.loads(out)
+        assert data["count"] == 3, data
+        assert [r["url"] for r in data["results"]] == [
+            "https://www.google.com/goto?url=CAESone",
+            "https://c.example",
+            "https://www.google.com/goto?url=CAESvid"], data
+        assert data["results"][0]["site"] == "https://w.example \u203a news", data
+        # a card whose `cite` is an engagement line names no address: it is
+        # dropped rather than passed on as if it did, and the row stays
+        assert data["results"][2]["site"] == "", data
+        assert data["selectors"]["matched"] is True, data
 
         # --wpm moves the cadence
         fresh()

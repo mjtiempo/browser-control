@@ -62,9 +62,16 @@ built `&start=` URL.
 - Reply: `query`, `entry` (the homepage), `typing` (`chars`, `wpm`,
   `measured_wpm`, `elapsed_s`, `verified`), `landed_on` (the FIRST address the
   SITE put in the bar after submit), `count`, `truncated`,
-  `results[{title, url, snippet, page}]`, `loading` (`pages`, `clicks`,
+  `results[{title, url, snippet, site, page}]`, `loading` (`pages`, `clicks`,
   `max_pages`, `stop` = `cap` | `no-next` | `max-pages` | `no-growth` |
   `click-failed`), `selectors` (`search_box`, `results`, `matched`), `note`.
+- `url` is the card's own link, absolutized — Google now hands organic results
+  out as a SAME-ORIGIN REDIRECT (`https://www.google.com/goto?url=…`) whose
+  blob is opaque and does not decode, so the wrapper is kept (it does redirect
+  when navigated) and `site` is the page's own truncated display address
+  (`https://www.reuters.com › world › asia`), which is what names the
+  destination. A card whose `cite` is an engagement line instead (a video or
+  social result) gets `site: ""` rather than text pretending to be an address.
 - Classes `read`+`write` (it navigates, types and clicks), so `--deny write
   google search …` refuses `not-allowed`. Zero results can be the site changing
   its DOM, a consent wall, or a challenge — `selectors.matched` says whether
