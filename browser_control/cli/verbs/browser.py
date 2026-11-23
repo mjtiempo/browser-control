@@ -10,6 +10,7 @@ from browser_control.cli import registry
 from browser_control.cli.argv import (
     _no_browser_flag,
     _none,
+    _pop,
     _selector,
     _switch,
     _urls,
@@ -52,17 +53,28 @@ def cmd_detach(rest: list[str], browser: str) -> dict:
                   profile=profile, detach_all=selector["all"])
 
 def cmd_open(rest: list[str], browser: str) -> dict:
-    """`open [URL...] [--headless]` — start (or adopt) the managed browser.
+    """`open [URL...] [--headless] [--class NAME]` — start (or adopt) the
+    managed browser.
 
     `--headless` is a property of the PROCESS, so `launch` owns what it means
     when one is already up; this adapter only pulls the switch out before
     `_urls`, which refuses anything flag-shaped. The switch always rides
     along, given or not: `launch` answers the same thing for `False` that it
     always did, and the mode is never guessed at one layer above the process.
+
+    `--class NAME` is the same kind of launch property, and the reader
+    refuses an EMPTY one rather than passing it on: "" is not a window
+    class, and a caller who wrote `--class=""` asked for a label nothing
+    will ever match.
     """
     rest, headless = _switch(rest, "--headless")
+    rest, window_class = _pop(rest, "--class", "open")
+    if window_class is not None and not window_class.strip():
+        fail(ERR_BAD_ARGS,
+             "--class: an empty window class names nothing — give a "
+             "non-empty name, e.g. --class=browser-control-web")
     return browser_lib.launch(_urls(rest, "open"), browser=browser,
-                  headless=headless)
+                  headless=headless, window_class=window_class or "")
 
 def cmd_close(rest: list[str], browser: str) -> dict:
     """`close [--force] [--port N | --pid N | --profile DIR]`.

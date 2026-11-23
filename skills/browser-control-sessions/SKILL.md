@@ -80,7 +80,7 @@ test; the real test is reading the site.
 ## Two accounts / two sessions
 
 ```bash
-ROOT=~/.local/share/browser-control/cdp-profiles
+ROOT="${BROWSER_CONTROL_ROOT:-$HOME/.local/share/browser-control/cdp-profiles}"
 browser-control-cli open --profile "$ROOT/work"    --headless https://example.com
 browser-control-cli open --profile "$ROOT/personal" --headless https://example.com
 # every verb now addresses one instance explicitly

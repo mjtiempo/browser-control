@@ -91,10 +91,13 @@ from browser_control.lib.errors import (
 
 USAGE = """usage: browser-control-cli VERB [ARGS]
 
-  open [URL...] [--headless]
+  open [URL...] [--headless] [--class NAME]
                      start (or adopt) the managed browser; each URL opens;
                      --headless starts it with NO WINDOW (`--headless=new`)
-                     and the same verbs drive it
+                     and the same verbs drive it; --class NAME sets the WM
+                     class the window carries, which is how a desktop tool
+                     addresses it — a sandboxed launch reports a pid the
+                     desktop never saw
   close [--force] [--port N|--pid N|--profile DIR]
                      stop the managed browser this CLI started — or the one
                      NAMED, which is how another tool's browser goes too;

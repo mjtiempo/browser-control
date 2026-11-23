@@ -1,6 +1,6 @@
 ---
 name: browser-control
-description: Drive Chromium on this machine through browser-control-cli — open pages headless or windowed, read rendered text, click, type, fill forms, wait for state, and take verified screenshots. Use for browser automation or page inspection in an isolated managed profile — checking what a site actually shows, testing a web UI, or running a multi-step page flow. For the user's own already-open browser with their live logins, prefer the pi-chrome tools unless the user asks for this CLI.
+description: Drive Chromium on this machine through browser-control-cli — open pages headless or windowed, read rendered text, click, type, fill forms, wait for state, and take verified screenshots. Use for browser automation or page inspection in an isolated managed profile — checking what a site actually shows, testing a web UI, or running a multi-step page flow. For the user's own already-open browser with their live logins, prefer the DSH browser MCP (`mcp__browser__*`) unless the user asks for this CLI.
 ---
 
 # Browser control (browser-control-cli)
@@ -12,6 +12,49 @@ unless the user explicitly attaches it (see the `browser-control-sessions` skill
 
 One verb per process. **stdout**: exactly one JSON object. **stderr**:
 `ERR[code]: message`, exit status 2 on any refusal. Success exits 0.
+
+## This harness: read-only home, one-shot calls
+
+This machine's DSH agent runs each `bash` call in a throwaway sandbox: `/` and
+`/home` are read-only, and the whole process tree dies when the call returns.
+
+- **Relocate the managed root.** With the default root under `~/.local/share`,
+  `open` refuses `ERR[profile-unusable]` (`[Errno 30] Read-only file system`).
+  Export both paths before the first verb, for the whole run:
+
+  ```bash
+  export BROWSER_CONTROL_ROOT=/tmp/bc/root
+  export BROWSER_CONTROL_LOG=/tmp/bc/actions.jsonl
+  ```
+
+- **One flow, one call.** The browser cannot survive into the next tool call —
+  `info` reports `running: false`, verbs refuse `cdp-unreachable`, and a
+  background job does not help (its namespace is not yours). Chain
+  open → wait → read → screenshot → `close --force` in a single invocation.
+  A windowed browser exists only while that call runs; `sleep N` holds it open
+  when the user is watching.
+- **Wait for content, not idle.** `--for idle` can answer `waited_s: 0.0` while
+  a JS page still shows only its shell (DuckDuckGo: 422 chars of footer). Wait
+  on `--for element --selector 'article[data-testid="result"]'`, then read.
+- **`tab info` needs a spec** (`tab info active`); bare `tab info` refuses
+  `bad-args`. Its reply nests the page under `.tab` (`jq '.tab.url'`).
+- **A sandboxed launch has no addressable pid — pass `--class NAME`.** The
+  `pid` in `open`'s reply is the SANDBOX's, not the desktop's (measured: the
+  CLI said `pid 16`, the desktop said `1517124` for the same window), so it
+  cannot match a `computer-control windows` row. `open --class NAME` labels the
+  window instead and the reply echoes `window_class`; place it with
+  `computer-control move-window class:NAME N`. A class is a LAUNCH flag: an
+  adopted browser keeps the one it started with, and the reply carries a
+  `warning` when a class could not be applied. Renaming costs something —
+  Wayland `app_id` drives the `.desktop` lookup, the dock icon and any
+  class-keyed window rule — which is why it is opt-in and never automatic.
+- **There is no DNS here, and `open` refuses `file://`.** Name resolution times
+  out (`getent hosts example.com` hangs; `curl https://example.com` reports
+  "Resolving timed out") while raw-IP egress works (`https://1.1.1.1` answers
+  301). So a windowed browser on an `https://` URL sits on "Loading…" with a
+  blank page and no error at all — that is the sandbox, not the browser. `open`
+  accepts http(s) or `about:blank` only: serve local content with
+  `python3 -m http.server --bind 127.0.0.1` and open `http://127.0.0.1:PORT/`.
 
 ## Stance: verify, or refuse
 
@@ -41,8 +84,8 @@ One verb per process. **stdout**: exactly one JSON object. **stderr**:
 - Site adapters (Google-by-typing, X search, a list of URLs in one call) →
   `browser-control-plugins` skill.
 
-Prefer the pi-chrome tools when the task needs the user's live session, a window
-they can watch, or an extension. Use this CLI for isolated, headless, verified
+Prefer the DSH browser MCP (`mcp__browser__*`) when the task needs the user's
+live session, a window they can watch, or an extension. Use this CLI for isolated, headless, verified
 automation.
 
 ## First call: prove the install

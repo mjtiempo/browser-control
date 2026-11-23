@@ -238,6 +238,14 @@ def t_launch_flags() -> None:
     assert set(flags) <= set(spoofed), (flags, spoofed)
     both = browser.flags(profile, headless=True, user_agent="UA-TEST")
     assert "--user-agent=UA-TEST" in both, both
+    # a window class is OPT-IN: no launch renames the window unasked, and
+    # the class is the only address a sandboxed launch can hand a desktop
+    # tool (the pid it reports belongs to the sandbox, not the desktop)
+    assert not any(flag.startswith("--class") for flag in flags), flags
+    named = browser.flags(profile, window_class="browser-control-web")
+    assert "--class=browser-control-web" in named, named
+    # it ADDS, like every other launch flag
+    assert set(flags) <= set(named), (flags, named)
     assert "--headless=new" in both, both
 
 
@@ -725,7 +733,8 @@ def t_cli_dispatch() -> None:
     seen: dict[str, object] = {}
 
     def fake_launch(urls: list[str] | None = None, browser: str = "",
-                    headless: bool = False) -> dict:
+                    headless: bool = False,
+                    window_class: str = "") -> dict:
         seen["urls"] = list(urls or [])
         seen["browser"] = browser
         seen["headless"] = headless
@@ -750,6 +759,39 @@ def t_cli_dispatch() -> None:
         browser.launch = original         # type: ignore[assignment]
 
 
+def t_cli_open_class() -> None:
+    """`open --class NAME` reaches `launch(window_class=NAME)`, empty refused.
+
+    The empty case is the reason this is its own reader: `--class=` is a
+    class nothing will ever match, so it refuses instead of launching a
+    window the caller can never address.
+    """
+    seen: list[dict] = []
+
+    def fake_launch(urls: list[str] | None = None, browser: str = "",
+                    headless: bool = False,
+                    window_class: str = "") -> dict:
+        seen.append({"urls": list(urls or []), "window_class": window_class})
+        return {"ok": True, "window_class": window_class}
+
+    original = browser.launch
+    browser.launch = fake_launch          # type: ignore[assignment]
+    try:
+        for argv in (["open", "--class=bc-web", "https://a.example"],
+                     ["open", "https://a.example", "--class", "bc-web"]):
+            rc, out, err = run_cli(argv)
+            assert rc == 0, (argv, rc, err)
+            assert json.loads(out)["window_class"] == "bc-web", out
+        rc, _out, err = run_cli(["open", "--class=", "https://a.example"])
+        assert rc == 2 and "empty window class" in err, (rc, err)
+        rc, out, err = run_cli(["open", "https://a.example"])
+        assert rc == 0 and json.loads(out)["window_class"] == "", (rc, out)
+    finally:
+        browser.launch = original         # type: ignore[assignment]
+    assert seen[-1] == {"urls": ["https://a.example"], "window_class": ""}, \
+        seen
+
+
 def t_cli_open_headless() -> None:
     """`open --headless` reaches `launch(headless=True)`; the plain form False.
 
@@ -761,7 +803,8 @@ def t_cli_open_headless() -> None:
     calls: list[dict] = []
 
     def fake_launch(urls: list[str] | None = None, browser: str = "",
-                    headless: bool = False) -> dict:
+                    headless: bool = False,
+                    window_class: str = "") -> dict:
         calls.append({"urls": list(urls or []), "browser": browser,
                       "headless": headless})
         return {"ok": True, "headless": headless}
@@ -11519,6 +11562,8 @@ def main() -> int:
         ("page rows from a fake endpoint", t_page_rows_from_a_fake_endpoint),
         ("cli dispatches with flags stripped", t_cli_dispatch),
         ("open --headless reaches launch", t_cli_open_headless),
+        ("open --class names the window, and empty is refused",
+         t_cli_open_class),
         ("tab grammar lands in one service", t_cli_tab_grammar),
         ("nav/history/reload grammar", t_cli_nav_grammar),
         ("dom verbs' argv", t_cli_dom_grammar),

@@ -31,10 +31,13 @@ cp plugins/*.py ~/.local/share/browser-control/plugins/
   with an existing verb is skipped, never fatal.
 - Verify: `selftest | jq '{plugins, plugin_errors}'` — `plugins` lists what
   loaded, `plugin_errors` what did not. `--help` appends installed usage lines.
-- The shipped plugins live in this repository's `plugins/` directory. When the
-  skills are installed as symlinks into `~/.pi/agent/skills/`, that directory
-  is `../../plugins` relative to this skill's own directory; on this machine
-  the checkout is `/home/mark/Documents/pidev/mark-browser-control`, so:
+- The shipped plugins live in this repository's `plugins/` directory. How to
+  reach it depends on how the skill was installed: a SYMLINKED skill resolves
+  `../../plugins` from its own directory, while a COPIED skill (a
+  `~/.pi/agent/skills`, `~/.agents/skills` or `~/.dsh/skills` install) cannot —
+  that relative path lands under the deploy root, not the checkout. Use the
+  absolute path; on this machine the checkout is
+  `/home/mark/Documents/pidev/mark-browser-control`, so:
 
 ```bash
 BROWSER_CONTROL_PLUGIN_PATH=/home/mark/Documents/pidev/mark-browser-control/plugins \

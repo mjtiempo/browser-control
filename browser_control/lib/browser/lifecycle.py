@@ -248,7 +248,7 @@ def desktop_user_agent(path: str) -> str:
 
 
 def flags(profile: str, headless: bool = False,
-          user_agent: str = "") -> list[str]:
+          user_agent: str = "", window_class: str = "") -> list[str]:
     """The launch flags that make a browser drivable ON its managed profile.
 
     `--no-first-run`/`--no-default-browser-check` are load-bearing: on a
@@ -294,12 +294,23 @@ def flags(profile: str, headless: bool = False,
     `Chrome/…` instead — a windowed run already sends that string, so GUI is
     unchanged). No version read, no flag: a claim the binary cannot back is
     worse than the truth.
+
+    `window_class=NAME` adds `--class=NAME`: the WM class the window
+    carries, which is how a desktop tool addresses THIS managed window
+    rather than guessing. It is opt-in because the class is not free —
+    Wayland app_id (and so the .desktop lookup, the dock icon and any
+    class-keyed window rule) follows it, so renaming every managed window
+    unasked would rewrite the user's desktop. The pid this CLI reports is
+    the SANDBOX's whenever the launch runs in one, so a pid is not an
+    address a desktop tool can use; a class it was told to expect is.
     """
     argv = [f"--user-data-dir={profile}", "--remote-debugging-port=0",
             "--remote-debugging-address=127.0.0.1",
             "--disable-blink-features=AutomationControlled",
             "--no-first-run", "--no-default-browser-check",
             "--disable-extensions"]
+    if window_class:
+        argv.append(f"--class={window_class}")
     if user_agent:
         argv.append(f"--user-agent={user_agent}")
     if headless:
@@ -676,7 +687,7 @@ def _opened_entry(requested: str, row: dict) -> dict:
     return entry
 
 def launch(urls: list[str] | None = None, browser: str = "",
-           headless: bool = False) -> dict:
+           headless: bool = False, window_class: str = "") -> dict:
     """Start (or adopt) the managed browser and prove the pages are there.
 
     `urls` is what to open: a fresh start loads the FIRST as its startup page
@@ -774,7 +785,8 @@ def launch(urls: list[str] | None = None, browser: str = "",
             first = wanted[0] if wanted else "about:blank"
             requests = [first, *wanted[1:]]
             ua = desktop_user_agent(path)
-            pid = spawn([path, *flags(profile, headless, user_agent=ua),
+            pid = spawn([path, *flags(profile, headless, user_agent=ua,
+                                      window_class=window_class),
                          first])
             record_pid(profile, pid)
             if not _pkg._wait_own_port(profile):
@@ -801,6 +813,14 @@ def launch(urls: list[str] | None = None, browser: str = "",
              f"{path} is up on {profile} but shows no page tab — pass a URL "
              "(browser-control-cli open https://…)")
     notes = [text for text in (stale, lock.warning) if text]
+    if already and window_class:
+        # a class is a LAUNCH flag: an adopted browser keeps the one it
+        # started with, so the caller's `class:` handle would not resolve
+        # and silence would look like success
+        notes.append(f"--class={window_class} was not applied: this "
+                     "browser was already running, and a window class "
+                     "belongs to the process — close it and open again "
+                     "to rename its window")
     entries = [_opened_entry(requests[index], row)
                for index, row in enumerate(opened)]
     reply = {"ok": True, "started": not already, "browser": path,
@@ -808,6 +828,11 @@ def launch(urls: list[str] | None = None, browser: str = "",
              "port": as_int(cdp.port_of(profile)) or port,
              "pid": pid_of(profile), "tabs": rows,
              "opened": entries}
+    if window_class and not already:
+        # the label the window actually carries, so a caller can place it
+        # with `computer-control move-window class:NAME N` instead of
+        # matching a pid the sandbox owns
+        reply["window_class"] = window_class
     if len(entries) == 1 and not entries[0].get("fallback"):
         # a HANDLE a later verb can act on — only for a tab this call
         # CONFIRMED. Every tier-3 entry is a page the call did not match, so
